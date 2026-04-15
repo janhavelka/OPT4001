@@ -1,0 +1,46 @@
+{
+  "name": "OPT4001",
+  "version": "1.0.0",
+  "description": "Production-grade OPT4001 ambient light sensor driver",
+  "keywords": [
+    "opt4001",
+    "ambient-light",
+    "light-sensor",
+    "lux",
+    "i2c",
+    "arduino",
+    "esp32"
+  ],
+  "authors": [
+    {
+      "name": "Thymos Solution s.r.o",
+      "email": "info@thymos.cz",
+      "url": "https://www.thymos.cz"
+    },
+    {
+      "name": "Jan Havelka",
+      "email": "info@thymos.cz",
+      "url": "https://www.thymos.cz",
+      "maintainer": true
+    }
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/janhavelka/OPT4001.git"
+  },
+  "license": "MIT",
+  "homepage": "https://www.thymos.cz",
+  "frameworks": [
+    "arduino"
+  ],
+  "platforms": [
+    "espressif32"
+  ],
+  "headers": [
+    "OPT4001/OPT4001.h"
+  ],
+  "build": {
+    "includeDir": "include",
+    "srcDir": "src"
+  }
+}

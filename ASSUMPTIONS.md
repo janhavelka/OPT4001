@@ -1,0 +1,33 @@
+# OPT4001 Implementation Assumptions
+
+This file records the places where the device notes were incomplete, awkward, or
+open to more than one implementation style. The library chooses the safest option
+that stays consistent with the other I2C driver repositories in this workspace.
+
+## Assumptions
+
+1. `Config::packageVariant` defaults to `PackageVariant::SOT_5X3`.
+   This is the broader package variant and matches the address-selectable part.
+   PicoStar users should set the variant explicitly when they need the tighter
+   lux LSB and fixed-address validation.
+
+2. `begin()` accepts only stable modes: `POWER_DOWN` or `CONTINUOUS`.
+   The OPT4001 datasheet documents one-shot operating modes, but this library does
+   not start a one-shot conversion implicitly during initialization. One-shot work
+   is started explicitly through `startConversion()` or `readBlocking()`.
+
+3. CRC verification is implemented as an expected-CRC comparison derived from the
+   datasheet syndrome equations.
+   The documentation describes zero-syndrome verification, while the driver derives
+   the equivalent expected 4-bit CRC nibble from the same equations and compares it
+   against the received nibble.
+
+4. Register `0x0B` fixed bits are encoded as raw value `0x8000`.
+   The datasheet notes describe bits `[15:5]` as needing to equal field value
+   `0x400`. In the full 16-bit register image that field occupies bits `[15:5]`,
+   which corresponds to raw register value `0x8000`.
+
+5. Sample readiness in the driver core uses time-bounded register polling.
+   The config struct carries optional INT pin hooks for board integration, but the
+   driver does not rely on catching the device's very short conversion-ready pulse.
+   This avoids baking board-specific GPIO interrupt behavior into the core library.
