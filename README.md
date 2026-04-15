@@ -137,8 +137,14 @@ void loop() {
 - `Config.mode` accepts only `POWER_DOWN` or `CONTINUOUS`.
   One-shot measurements are started explicitly with `startConversion()` or
   `readBlocking()`.
+- `softReset()` uses the documented general-call reset (`0x00` / `0x06`).
+  That reset is bus-wide; use it only when the bus topology allows it.
+- `resetAndReapply()` exists for the same workflow used in the stronger sibling
+  libraries: reset the device, then restore the cached configuration.
 - `readSample()`, `readBurst()`, and the blocking helpers may return `CRC_ERROR`
   while still populating the decoded sample data.
+- `getLastSample()` / `sampleTimestampMs()` / `sampleAgeMs()` provide RAM-only
+  access to the last successfully decoded sample.
 - `readFlags()` reads register `0x0C`; that register is clear-on-read on the device.
 - `writeIntConfiguration()` verifies the fixed register pattern documented for `0x0B`
   before writing.
@@ -152,6 +158,9 @@ void loop() {
 - `end()`
 - `probe()`
 - `recover()`
+- `softReset()`
+- `resetAndReapply()`
+- `readDeviceId(uint16_t&)`
 - `getSettings(SettingsSnapshot&)`
 
 ### Measurements
@@ -161,6 +170,9 @@ void loop() {
 - `conversionReady()`
 - `readSample(Sample&)`
 - `readBurst(BurstFrame&)`
+- `getLastSample(Sample&)`
+- `sampleTimestampMs()`
+- `sampleAgeMs(nowMs)`
 - `readLux(float&)`
 - `readMilliLux(uint32_t&)`
 - `readMicroLux(uint64_t&)`
@@ -169,7 +181,7 @@ void loop() {
 
 ### Configuration And Raw Access
 
-- `setRange()`, `setConversionTime()`, `setMode()`, `setQuickWake()`
+- `setRange()`, `setConversionTime()`, `setMode()`, `setQuickWake()`, `setVerifyCrc()`
 - `setInterruptLatch()`, `setInterruptPolarity()`, `setFaultCount()`
 - `setIntDirection()`, `setIntConfig()`, `setBurstMode()`
 - `setThresholds()`, `getThresholds()`, `setThresholdsLux()`
@@ -182,12 +194,23 @@ void loop() {
 
 - `examples/01_basic_bringup_cli/`
   - interactive bring-up shell
-  - scan, probe, recover, settings dump, raw register access
-  - one-shot reads, stress reads, threshold setup
+  - scan, probe, recover, reset, reset-and-reapply
+  - config / intcfg / flags / device-ID readback
+  - one-shot reads, burst FIFO reads, cached-sample inspection, stress/selftest
+  - threshold and interrupt configuration, plus raw register access
 - `examples/common/`
   - board config and serial logging helpers
   - I2C transport adapter and bus scanner
   - reusable CLI parsing / diagnostics glue
+
+### CLI Notes
+
+- `reset` performs the datasheet's general-call reset and is therefore bus-wide.
+- `config`, `intcfg`, `flags`, `reg`, and `wreg` are intended for bring-up and
+  diagnostics; raw writes can desynchronize the cached config until `recover()`
+  or `resetAndReapply()` is used.
+- The example defaults to the SOT-5X3 package path. For PicoStar, switch the
+  package variant and leave the INT hook disabled.
 
 ## Documentation
 
@@ -197,6 +220,15 @@ void loop() {
 - `docs/AN_picostar_package.md` - PicoStar-specific package differences
 - `include/OPT4001/CommandTable.h` - public register constants and masks
 - `ASSUMPTIONS.md` - implementation choices made where the device notes needed interpretation
+
+## Limits
+
+- High-speed I2C entry sequencing is transport-owned and not modeled in the driver.
+- SMBus alert response arbitration is controller-level bus behavior and is not
+  wrapped as a dedicated driver API.
+- Window transmission compensation and similar application-note calibration
+  factors are intentionally left at the application layer rather than baked into
+  the core lux conversion path.
 
 ## Validation
 

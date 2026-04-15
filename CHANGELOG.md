@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `softReset()` and `resetAndReapply()` to align OPT4001 reset handling with the stronger sibling libraries while preserving the datasheet's general-call reset behavior.
+- Sample-cache helpers: `getLastSample()`, `sampleTimestampMs()`, and `sampleAgeMs()`.
+- `readDeviceId()` and `setVerifyCrc()` typed helpers.
+- Broader native coverage for reset, CRC-policy, sample-cache, and device-ID paths.
+
+### Changed
+
+- Expanded the bring-up CLI to cover version info, reset flows, config/intcfg readback, cached samples, FIFO burst reads, interrupt setup, and self-test.
+- Tightened the CLI contract check so the richer diagnostic commands remain present.
+- Updated README and assumptions to document the bus-wide reset path and the intentionally omitted controller/application-layer behaviors.
+
 ## [1.0.0] - 2026-04-14
 
 ### Added

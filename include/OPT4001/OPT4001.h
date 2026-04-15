@@ -163,6 +163,9 @@ public:
   Status setQuickWake(bool enable);
   bool getQuickWake() const { return _config.quickWake; }
 
+  Status setVerifyCrc(bool enable);
+  bool getVerifyCrc() const { return _config.verifyCrc; }
+
   Status setInterruptLatch(InterruptLatch latch);
   InterruptLatch getInterruptLatch() const { return _config.interruptLatch; }
 

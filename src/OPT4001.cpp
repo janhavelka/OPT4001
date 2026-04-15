@@ -687,6 +687,11 @@ Status OPT4001::setQuickWake(bool enable) {
   return _applyConfig();
 }
 
+Status OPT4001::setVerifyCrc(bool enable) {
+  _config.verifyCrc = enable;
+  return Status::Ok();
+}
+
 Status OPT4001::setInterruptLatch(InterruptLatch latch) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");

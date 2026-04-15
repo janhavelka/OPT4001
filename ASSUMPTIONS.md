@@ -31,3 +31,16 @@ that stays consistent with the other I2C driver repositories in this workspace.
    The config struct carries optional INT pin hooks for board integration, but the
    driver does not rely on catching the device's very short conversion-ready pulse.
    This avoids baking board-specific GPIO interrupt behavior into the core library.
+
+6. High-speed I2C entry and SMBus alert response are not wrapped as dedicated
+   driver APIs.
+   The datasheet documents both, but they are controller-level bus procedures
+   rather than normal per-device register transactions. The driver keeps those
+   behaviors at the transport/application layer instead of pretending they are
+   device-local operations.
+
+7. Window-transmission and similar optical calibration factors are left to the
+   application layer.
+   The application notes discuss those corrections, but they depend on system
+   mechanics such as cover-glass transmission and enclosure geometry, so the
+   library does not bake them into the core lux conversion path.

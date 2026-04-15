@@ -30,12 +30,19 @@ struct FakeBus {
   uint32_t continuousReadyAtMs = UINT32_MAX;
 
   FakeBus() {
+    resetToDefaults();
+  }
+
+  void resetToDefaults() {
+    memset(registers, 0, sizeof(registers));
     registers[cmd::REG_THRESHOLD_L] = cmd::THRESHOLD_L_RESET;
     registers[cmd::REG_THRESHOLD_H] = cmd::THRESHOLD_H_RESET;
     registers[cmd::REG_CONFIGURATION] = cmd::CONFIGURATION_RESET;
     registers[cmd::REG_INT_CONFIGURATION] = cmd::INT_CONFIGURATION_RESET;
     registers[cmd::REG_FLAGS] = cmd::FLAGS_RESET;
     registers[cmd::REG_DEVICE_ID] = cmd::DEVICE_ID_RESET;
+    oneShotReadyAtMs = UINT32_MAX;
+    continuousReadyAtMs = UINT32_MAX;
   }
 };
 
@@ -80,6 +87,11 @@ Status fakeWrite(uint8_t, const uint8_t* data, size_t len, uint32_t, void* user)
   }
   if (data == nullptr || len == 0) {
     return Status::Error(Err::INVALID_PARAM, "invalid fake write");
+  }
+
+  if (len == 1 && data[0] == cmd::GENERAL_CALL_RESET) {
+    bus->resetToDefaults();
+    return Status::Ok();
   }
 
   if (len >= 3) {
@@ -227,6 +239,19 @@ void test_config_defaults() {
   TEST_ASSERT_EQUAL_UINT16(0x0FFF, cfg.highThreshold.result);
 }
 
+void test_get_last_sample_before_any_read() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  Sample sample;
+  Status st = dev.getLastSample(sample);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::MEASUREMENT_NOT_READY),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT32(0u, dev.sampleTimestampMs());
+  TEST_ASSERT_EQUAL_UINT32(0u, dev.sampleAgeMs(5000));
+}
+
 void test_begin_rejects_missing_callbacks() {
   OPT4001::OPT4001 dev;
   Config cfg;
@@ -347,6 +372,14 @@ void test_read_sample_decodes_lux_and_crc() {
   TEST_ASSERT_EQUAL_UINT32(0x34567u, sample.mantissa);
   TEST_ASSERT_EQUAL_UINT32(0xD159Cu, sample.adcCodes);
   TEST_ASSERT_FLOAT_WITHIN(0.01f, sample.adcCodes * dev.getLuxLsb(), sample.lux);
+  TEST_ASSERT_EQUAL_UINT32(bus.nowMs, dev.sampleTimestampMs());
+
+  Sample cached;
+  TEST_ASSERT_TRUE(dev.getLastSample(cached).ok());
+  TEST_ASSERT_EQUAL_UINT32(sample.adcCodes, cached.adcCodes);
+
+  bus.nowMs += 250;
+  TEST_ASSERT_EQUAL_UINT32(250u, dev.sampleAgeMs(bus.nowMs));
 }
 
 void test_crc_mismatch_returns_error_when_enabled() {
@@ -363,6 +396,24 @@ void test_crc_mismatch_returns_error_when_enabled() {
   Sample sample;
   Status st = dev.readSample(sample);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::CRC_ERROR), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_FALSE(sample.crcValid);
+}
+
+void test_crc_mismatch_allowed_when_verification_disabled() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  cfg.verifyCrc = false;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  seedSample(bus, cmd::REG_RESULT, 0, 0x23456, 3, false);
+  bus.nowMs += 150;
+  dev.tick(bus.nowMs);
+
+  Sample sample;
+  Status st = dev.readSample(sample);
+  TEST_ASSERT_TRUE(st.ok());
   TEST_ASSERT_FALSE(sample.crcValid);
 }
 
@@ -428,6 +479,67 @@ void test_write_int_configuration_rejects_bad_fixed_pattern() {
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM), static_cast<uint8_t>(st.code));
 }
 
+void test_read_device_id_returns_raw_register_value() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  uint16_t did = 0;
+  Status st = dev.readDeviceId(did);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_HEX16(cmd::DEVICE_ID_RESET, did);
+}
+
+void test_set_verify_crc_updates_cached_setting() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  TEST_ASSERT_TRUE(dev.getVerifyCrc());
+  TEST_ASSERT_TRUE(dev.setVerifyCrc(false).ok());
+  TEST_ASSERT_FALSE(dev.getVerifyCrc());
+}
+
+void test_soft_reset_moves_driver_to_uninit() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  TEST_ASSERT_TRUE(dev.softReset().ok());
+  TEST_ASSERT_FALSE(dev.isInitialized());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::UNINIT),
+                          static_cast<uint8_t>(dev.state()));
+}
+
+void test_reset_and_reapply_restores_ready_and_config() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  TEST_ASSERT_TRUE(dev.setQuickWake(true).ok());
+  TEST_ASSERT_TRUE(dev.setRange(Range::RANGE_3).ok());
+  TEST_ASSERT_TRUE(dev.setFaultCount(FaultCount::FAULTS_4).ok());
+  TEST_ASSERT_TRUE(dev.setBurstMode(false).ok());
+
+  Status st = dev.resetAndReapply();
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_TRUE(dev.isInitialized());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::READY),
+                          static_cast<uint8_t>(dev.state()));
+
+  uint16_t cfg = 0;
+  uint16_t intCfg = 0;
+  TEST_ASSERT_TRUE(dev.readConfiguration(cfg).ok());
+  TEST_ASSERT_TRUE((cfg & cmd::MASK_QWAKE) != 0);
+  TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(Range::RANGE_3),
+                           static_cast<uint16_t>((cfg & cmd::MASK_RANGE) >> cmd::BIT_RANGE));
+  TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(FaultCount::FAULTS_4),
+                           static_cast<uint16_t>(cfg & cmd::MASK_FAULT_COUNT));
+
+  TEST_ASSERT_TRUE(dev.readIntConfiguration(intCfg).ok());
+  TEST_ASSERT_EQUAL_UINT16(0u, intCfg & cmd::MASK_I2C_BURST);
+}
+
 void test_raw_transport_rejects_invalid_buffers() {
   FakeBus bus;
   OPT4001::OPT4001 dev;
@@ -461,6 +573,7 @@ int main() {
   RUN_TEST(test_status_error);
   RUN_TEST(test_status_in_progress);
   RUN_TEST(test_config_defaults);
+  RUN_TEST(test_get_last_sample_before_any_read);
   RUN_TEST(test_begin_rejects_missing_callbacks);
   RUN_TEST(test_begin_rejects_one_shot_startup_mode);
   RUN_TEST(test_begin_success_sets_ready_and_counters);
@@ -470,10 +583,15 @@ int main() {
   RUN_TEST(test_start_conversion_wraparound_reaches_ready);
   RUN_TEST(test_read_sample_decodes_lux_and_crc);
   RUN_TEST(test_crc_mismatch_returns_error_when_enabled);
+  RUN_TEST(test_crc_mismatch_allowed_when_verification_disabled);
   RUN_TEST(test_read_burst_decodes_fifo);
   RUN_TEST(test_set_thresholds_lux_updates_threshold_registers);
   RUN_TEST(test_read_flags_parses_and_clears_ready_flag);
   RUN_TEST(test_write_int_configuration_rejects_bad_fixed_pattern);
+  RUN_TEST(test_read_device_id_returns_raw_register_value);
+  RUN_TEST(test_set_verify_crc_updates_cached_setting);
+  RUN_TEST(test_soft_reset_moves_driver_to_uninit);
+  RUN_TEST(test_reset_and_reapply_restores_ready_and_config);
   RUN_TEST(test_raw_transport_rejects_invalid_buffers);
   return UNITY_END();
 }

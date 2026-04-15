@@ -21,7 +21,22 @@ REQUIRED_COMMON = [
     "HealthDiag.h",
 ]
 
-MANDATORY_COMMANDS = ["help", "scan", "probe", "recover", "drv", "read", "verbose", "stress"]
+MANDATORY_COMMANDS = [
+    "help",
+    "version",
+    "scan",
+    "probe",
+    "recover",
+    "drv",
+    "read",
+    "config",
+    "intcfg",
+    "flags",
+    "reset",
+    "selftest",
+    "verbose",
+    "stress",
+]
 
 
 def fail(msg: str) -> None:
