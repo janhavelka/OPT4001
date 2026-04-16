@@ -67,6 +67,10 @@ bool isValidIntConfig(IntConfig config) {
          config == IntConfig::FIFO_FULL;
 }
 
+bool isValidSampleSlot(uint8_t slot) {
+  return slot < cmd::SAMPLE_SLOT_COUNT;
+}
+
 uint32_t ceilUsToMs(uint32_t microseconds) {
   return (microseconds + 999U) / 1000U;
 }
@@ -273,6 +277,16 @@ Status OPT4001::readDeviceId(uint16_t& value) {
   return readRegister16(cmd::REG_DEVICE_ID, value);
 }
 
+Status OPT4001::readDeviceId(DeviceIdInfo& out) {
+  uint16_t raw = 0;
+  Status st = readDeviceId(raw);
+  if (!st.ok()) {
+    return st;
+  }
+  decodeDeviceId(raw, out);
+  return Status::Ok();
+}
+
 Status OPT4001::getSettings(SettingsSnapshot& out) const {
   out.initialized = _initialized;
   out.state = _driverState;
@@ -465,6 +479,43 @@ Status OPT4001::readBurst(BurstFrame& out) {
   return status;
 }
 
+Status OPT4001::readSampleSlot(uint8_t slot, Sample& out) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+  if (!isValidSampleSlot(slot)) {
+    return Status::Error(Err::INVALID_PARAM, "Sample slot must be 0..3");
+  }
+
+  if (_config.mode == Mode::CONTINUOUS) {
+    if (!_conversionReady && !conversionReady()) {
+      return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
+    }
+  } else {
+    if (_conversionStarted && !conversionReady()) {
+      return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
+    }
+    if (!_sampleAvailable) {
+      return Status::Error(Err::MEASUREMENT_NOT_READY, "No sample available");
+    }
+  }
+
+  const uint8_t msbReg = static_cast<uint8_t>(cmd::REG_RESULT + (slot * 2U));
+  Status st = _readSampleAt(msbReg, out);
+  if (!st.ok() && st.code != Err::CRC_ERROR) {
+    return st;
+  }
+
+  if (slot == 0U) {
+    _cacheSample(out);
+    if (_config.mode == Mode::POWER_DOWN) {
+      _conversionReady = false;
+    }
+  }
+
+  return st;
+}
+
 Status OPT4001::getLastSample(Sample& out) const {
   if (!_lastSampleValid) {
     return Status::Error(Err::MEASUREMENT_NOT_READY, "No cached sample");
@@ -623,12 +674,28 @@ Status OPT4001::readFlags(Flags& out) {
   return Status::Ok();
 }
 
-Status OPT4001::clearFlags() {
+Status OPT4001::readFlagsRaw(uint16_t& value) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+  return readRegister16(cmd::REG_FLAGS, value);
+}
+
+Status OPT4001::clearConversionReadyFlag() {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
 
   return writeRegister16(cmd::REG_FLAGS, 0x0001);
+}
+
+Status OPT4001::clearFlags() {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+
+  Flags flags;
+  return readFlags(flags);
 }
 
 // ============================================================================
@@ -801,6 +868,18 @@ Status OPT4001::getThresholds(Threshold& low, Threshold& high) {
   return Status::Ok();
 }
 
+Status OPT4001::getThresholdsLux(float& lowLux, float& highLux) {
+  Threshold low;
+  Threshold high;
+  Status st = getThresholds(low, high);
+  if (!st.ok()) {
+    return st;
+  }
+  lowLux = thresholdToLux(low);
+  highLux = thresholdToLux(high);
+  return Status::Ok();
+}
+
 Status OPT4001::setThresholdsLux(float lowLux, float highLux) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
@@ -824,6 +903,16 @@ Status OPT4001::readConfiguration(uint16_t& value) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
   return readRegister16(cmd::REG_CONFIGURATION, value);
+}
+
+Status OPT4001::readConfiguration(ConfigurationInfo& out) {
+  uint16_t raw = 0;
+  Status st = readConfiguration(raw);
+  if (!st.ok()) {
+    return st;
+  }
+  decodeConfiguration(raw, out);
+  return Status::Ok();
 }
 
 Status OPT4001::writeConfiguration(uint16_t value) {
@@ -904,6 +993,16 @@ Status OPT4001::readIntConfiguration(uint16_t& value) {
   return readRegister16(cmd::REG_INT_CONFIGURATION, value);
 }
 
+Status OPT4001::readIntConfiguration(IntConfigurationInfo& out) {
+  uint16_t raw = 0;
+  Status st = readIntConfiguration(raw);
+  if (!st.ok()) {
+    return st;
+  }
+  decodeIntConfiguration(raw, out);
+  return Status::Ok();
+}
+
 Status OPT4001::writeIntConfiguration(uint16_t value) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
@@ -938,6 +1037,16 @@ Status OPT4001::writeIntConfiguration(uint16_t value) {
 // Raw Register Access
 // ============================================================================
 
+Status OPT4001::readRegisters(uint8_t startReg, uint8_t* buf, size_t len) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+  if (buf == nullptr || len == 0) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid register block buffer");
+  }
+  return _i2cWriteReadTracked(&startReg, 1, buf, len);
+}
+
 Status OPT4001::readRegister16(uint8_t reg, uint16_t& value) {
   uint8_t rx[2] = {0, 0};
   Status st = _i2cWriteReadTracked(&reg, 1, rx, sizeof(rx));
@@ -961,6 +1070,51 @@ Status OPT4001::writeRegister16(uint8_t reg, uint16_t value) {
 // Utility
 // ============================================================================
 
+void OPT4001::decodeDeviceId(uint16_t raw, DeviceIdInfo& out) const {
+  out.raw = raw;
+  out.didh = static_cast<uint16_t>(raw & cmd::MASK_DIDH);
+  out.didl = static_cast<uint8_t>((raw & cmd::MASK_DIDL) >> 12U);
+  out.matchesExpected = (out.didh == cmd::DIDH_EXPECTED) && (out.didl == 0U);
+}
+
+void OPT4001::decodeConfiguration(uint16_t raw, ConfigurationInfo& out) const {
+  out.raw = raw;
+  out.quickWake = (raw & cmd::MASK_QWAKE) != 0;
+  out.reservedBitSet = (raw & cmd::MASK_CONFIGURATION_RESERVED) != 0;
+  out.range = static_cast<Range>((raw & cmd::MASK_RANGE) >> cmd::BIT_RANGE);
+  out.conversionTime =
+      static_cast<ConversionTime>((raw & cmd::MASK_CONVERSION_TIME) >> cmd::BIT_CONVERSION_TIME);
+  out.mode = static_cast<Mode>((raw & cmd::MASK_MODE) >> cmd::BIT_MODE);
+  out.interruptLatch =
+      static_cast<InterruptLatch>((raw & cmd::MASK_LATCH) >> cmd::BIT_LATCH);
+  out.interruptPolarity =
+      static_cast<InterruptPolarity>((raw & cmd::MASK_INT_POL) >> cmd::BIT_INT_POL);
+  out.faultCount =
+      static_cast<FaultCount>((raw & cmd::MASK_FAULT_COUNT) >> cmd::BIT_FAULT_COUNT);
+  out.valid = !out.reservedBitSet &&
+              isValidRange(out.range) &&
+              isValidConversionTime(out.conversionTime) &&
+              isValidMode(out.mode) &&
+              isValidInterruptLatch(out.interruptLatch) &&
+              isValidInterruptPolarity(out.interruptPolarity) &&
+              isValidFaultCount(out.faultCount);
+}
+
+void OPT4001::decodeIntConfiguration(uint16_t raw, IntConfigurationInfo& out) const {
+  out.raw = raw;
+  out.fixedPatternValid = (raw & cmd::MASK_INTCFG_FIXED) == cmd::INTCFG_FIXED_BITS;
+  out.reservedBitSet = (raw & cmd::MASK_INTCFG_RESERVED) != 0;
+  out.intDirection =
+      static_cast<IntDirection>((raw & cmd::MASK_INT_DIR) >> cmd::BIT_INT_DIR);
+  out.intConfig =
+      static_cast<IntConfig>((raw & cmd::MASK_INT_CFG) >> cmd::BIT_INT_CFG);
+  out.burstMode = (raw & cmd::MASK_I2C_BURST) != 0;
+  out.valid = out.fixedPatternValid &&
+              !out.reservedBitSet &&
+              isValidIntDirection(out.intDirection) &&
+              isValidIntConfig(out.intConfig);
+}
+
 float OPT4001::adcCodesToLux(uint32_t adcCodes) const {
   return static_cast<float>(adcCodes) * getLuxLsb();
 }
@@ -969,10 +1123,79 @@ float OPT4001::rawToLux(uint8_t exponent, uint32_t mantissa) const {
   return adcCodesToLux(static_cast<uint32_t>(mantissa << exponent));
 }
 
+float OPT4001::thresholdToLux(const Threshold& threshold) const {
+  return adcCodesToLux(thresholdToAdcCodes(threshold));
+}
+
 float OPT4001::getLuxLsb() const {
   return (_config.packageVariant == PackageVariant::PICOSTAR)
              ? cmd::LUX_LSB_PICOSTAR
              : cmd::LUX_LSB_SOT_5X3;
+}
+
+float OPT4001::getRangeFullScaleLux(Range range) const {
+  uint8_t index = 8U;
+  if (range != Range::AUTO) {
+    const uint8_t value = static_cast<uint8_t>(range);
+    if (value <= 8U) {
+      index = value;
+    }
+  }
+  return (_config.packageVariant == PackageVariant::PICOSTAR)
+             ? cmd::RANGE_FULL_SCALE_LUX_PICOSTAR[index]
+             : cmd::RANGE_FULL_SCALE_LUX_SOT_5X3[index];
+}
+
+float OPT4001::getCurrentFullScaleLux() const {
+  return getRangeFullScaleLux(_config.range);
+}
+
+float OPT4001::getSampleFullScaleLux(const Sample& sample) const {
+  const Range range = (sample.exponent <= 8U)
+                          ? static_cast<Range>(sample.exponent)
+                          : Range::AUTO;
+  return getRangeFullScaleLux(range);
+}
+
+uint8_t OPT4001::getEffectiveBits(ConversionTime time) const {
+  if (!isValidConversionTime(time)) {
+    return 0;
+  }
+  return cmd::CONVERSION_EFFECTIVE_BITS[static_cast<uint8_t>(time)];
+}
+
+uint8_t OPT4001::getEffectiveBits() const {
+  return getEffectiveBits(_config.conversionTime);
+}
+
+float OPT4001::getRangeResolutionLux(Range range, ConversionTime time) const {
+  const uint8_t effectiveBits = getEffectiveBits(time);
+  if (effectiveBits == 0U) {
+    return 0.0f;
+  }
+
+  uint8_t exponent = 8U;
+  if (range != Range::AUTO) {
+    const uint8_t value = static_cast<uint8_t>(range);
+    if (value <= 8U) {
+      exponent = value;
+    }
+  }
+
+  const uint8_t paddedBits = static_cast<uint8_t>(20U - effectiveBits);
+  const uint32_t adcStep = 1UL << (paddedBits + exponent);
+  return adcCodesToLux(adcStep);
+}
+
+float OPT4001::getCurrentResolutionLux() const {
+  return getRangeResolutionLux(_config.range, _config.conversionTime);
+}
+
+float OPT4001::getSampleResolutionLux(const Sample& sample) const {
+  const Range range = (sample.exponent <= 8U)
+                          ? static_cast<Range>(sample.exponent)
+                          : Range::AUTO;
+  return getRangeResolutionLux(range, _config.conversionTime);
 }
 
 uint32_t OPT4001::getConversionTimeUs() const {
@@ -1029,6 +1252,11 @@ Status OPT4001::luxToThreshold(float lux, Threshold& out) const {
 
 uint32_t OPT4001::thresholdToAdcCodes(const Threshold& threshold) const {
   return static_cast<uint32_t>(threshold.result) << (8U + threshold.exponent);
+}
+
+uint8_t OPT4001::sampleCounterDelta(uint8_t previousCounter, uint8_t currentCounter) const {
+  return static_cast<uint8_t>((currentCounter - previousCounter) &
+                              (cmd::SAMPLE_COUNT_MODULO - 1U));
 }
 
 // ============================================================================

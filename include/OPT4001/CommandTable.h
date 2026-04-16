@@ -136,6 +136,10 @@ static constexpr uint32_t CONVERSION_TIME_US[] = {
   25000U, 50000U, 100000U, 200000U, 400000U, 800000U
 };
 
+static constexpr uint8_t CONVERSION_EFFECTIVE_BITS[] = {
+  9U, 10U, 11U, 12U, 13U, 14U, 15U, 16U, 17U, 18U, 19U, 20U
+};
+
 static constexpr uint32_t CONVERSION_TIME_MS_CEIL[] = {
   1U, 1U, 2U, 4U, 7U, 13U, 25U, 50U, 100U, 200U, 400U, 800U
 };
@@ -147,6 +151,14 @@ static constexpr float LUX_LSB_PICOSTAR = 312.5e-6f;
 static constexpr float LUX_LSB_SOT_5X3 = 437.5e-6f;
 static constexpr uint16_t MICRO_LUX_NUMERATOR_PICOSTAR = 3125U;  ///< divide by 10
 static constexpr uint16_t MICRO_LUX_NUMERATOR_SOT_5X3 = 4375U;   ///< divide by 10
+static constexpr float RANGE_FULL_SCALE_LUX_PICOSTAR[] = {
+  328.0f, 655.0f, 1311.0f, 2621.0f, 5243.0f,
+  10486.0f, 20972.0f, 41943.0f, 83886.0f
+};
+static constexpr float RANGE_FULL_SCALE_LUX_SOT_5X3[] = {
+  459.0f, 918.0f, 1835.0f, 3670.0f, 7340.0f,
+  14680.0f, 29360.0f, 58720.0f, 117441.0f
+};
 
 // ============================================================================
 // Miscellaneous
@@ -155,6 +167,8 @@ static constexpr uint16_t MICRO_LUX_NUMERATOR_SOT_5X3 = 4375U;   ///< divide by 
 static constexpr uint8_t GENERAL_CALL_ADDRESS = 0x00;
 static constexpr uint8_t GENERAL_CALL_RESET = 0x06;
 static constexpr uint8_t SAMPLE_COUNT_MODULO = 16;
+static constexpr uint8_t SAMPLE_SLOT_COUNT = 4;
+static constexpr uint8_t BUS_TIMEOUT_MS = 28;
 
 }  // namespace cmd
 }  // namespace OPT4001

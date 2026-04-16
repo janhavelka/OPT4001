@@ -63,6 +63,62 @@ const char* packageToStr(OPT4001::PackageVariant variant) {
   return (variant == OPT4001::PackageVariant::PICOSTAR) ? "PICOSTAR" : "SOT_5X3";
 }
 
+const char* rangeToStr(OPT4001::Range range) {
+  switch (range) {
+    case OPT4001::Range::RANGE_0: return "RANGE_0";
+    case OPT4001::Range::RANGE_1: return "RANGE_1";
+    case OPT4001::Range::RANGE_2: return "RANGE_2";
+    case OPT4001::Range::RANGE_3: return "RANGE_3";
+    case OPT4001::Range::RANGE_4: return "RANGE_4";
+    case OPT4001::Range::RANGE_5: return "RANGE_5";
+    case OPT4001::Range::RANGE_6: return "RANGE_6";
+    case OPT4001::Range::RANGE_7: return "RANGE_7";
+    case OPT4001::Range::RANGE_8: return "RANGE_8";
+    case OPT4001::Range::AUTO: return "AUTO";
+    default: return "UNKNOWN";
+  }
+}
+
+const char* conversionTimeToStr(OPT4001::ConversionTime time) {
+  static constexpr const char* kNames[] = {
+    "600us", "1ms", "1.8ms", "3.4ms", "6.5ms", "12.7ms",
+    "25ms", "50ms", "100ms", "200ms", "400ms", "800ms"
+  };
+  const uint8_t idx = static_cast<uint8_t>(time);
+  return (idx < 12U) ? kNames[idx] : "UNKNOWN";
+}
+
+const char* latchToStr(OPT4001::InterruptLatch latch) {
+  return (latch == OPT4001::InterruptLatch::LATCHED) ? "LATCHED" : "TRANSPARENT";
+}
+
+const char* polarityToStr(OPT4001::InterruptPolarity polarity) {
+  return (polarity == OPT4001::InterruptPolarity::ACTIVE_HIGH) ? "ACTIVE_HIGH" : "ACTIVE_LOW";
+}
+
+const char* faultCountToStr(OPT4001::FaultCount count) {
+  switch (count) {
+    case OPT4001::FaultCount::FAULTS_1: return "1";
+    case OPT4001::FaultCount::FAULTS_2: return "2";
+    case OPT4001::FaultCount::FAULTS_4: return "4";
+    case OPT4001::FaultCount::FAULTS_8: return "8";
+    default: return "?";
+  }
+}
+
+const char* intDirectionToStr(OPT4001::IntDirection direction) {
+  return (direction == OPT4001::IntDirection::PIN_INPUT) ? "INPUT" : "OUTPUT";
+}
+
+const char* intConfigToStr(OPT4001::IntConfig config) {
+  switch (config) {
+    case OPT4001::IntConfig::THRESHOLD: return "THRESHOLD";
+    case OPT4001::IntConfig::EVERY_CONVERSION: return "EVERY_CONVERSION";
+    case OPT4001::IntConfig::FIFO_FULL: return "FIFO_FULL";
+    default: return "UNKNOWN";
+  }
+}
+
 bool parseU32(const String& token, uint32_t& out) {
   char* end = nullptr;
   const unsigned long value = strtoul(token.c_str(), &end, 0);
@@ -155,14 +211,36 @@ void printSnapshot() {
   Serial.printf("  Package: %s\n", packageToStr(snap.packageVariant));
   Serial.printf("  Address: 0x%02X\n", snap.i2cAddress);
   Serial.printf("  Mode / pending: %s / %s\n", modeToStr(snap.mode), modeToStr(snap.pendingMode));
+  Serial.printf("  Range / ctime: %s / %s\n",
+                rangeToStr(snap.range),
+                conversionTimeToStr(snap.conversionTime));
   Serial.printf("  Quick wake / CRC / burst: %s / %s / %s\n",
                 log_bool_str(snap.quickWake),
                 log_bool_str(snap.verifyCrc),
                 log_bool_str(snap.burstMode));
+  Serial.printf("  Latch / polarity / faults: %s / %s / %s\n",
+                latchToStr(snap.interruptLatch),
+                polarityToStr(snap.interruptPolarity),
+                faultCountToStr(snap.faultCount));
+  Serial.printf("  INT dir / cfg / pin: %s / %s / %d\n",
+                intDirectionToStr(snap.intDirection),
+                intConfigToStr(snap.intConfig),
+                snap.intPin);
+  Serial.printf("  Hooks now/gpio/yield: %s / %s / %s\n",
+                log_bool_str(snap.hasNowMsHook),
+                log_bool_str(snap.hasGpioReadHook),
+                log_bool_str(snap.hasCooperativeYieldHook));
+  Serial.printf("  Offline threshold: %u\n", snap.offlineThreshold);
   Serial.printf("  Sample valid / ts: %s / %lu ms\n",
                 log_bool_str(snap.lastSampleValid),
                 static_cast<unsigned long>(snap.sampleTimestampMs));
-  Serial.printf("  Last lux: %.6f lx\n", snap.lastLux);
+  Serial.printf("  Last lux / adc / ctr: %.6f lx / %lu / %u\n",
+                snap.lastLux,
+                static_cast<unsigned long>(snap.lastAdcCodes),
+                snap.lastCounter);
+  Serial.printf("  Thresholds low=(%u,0x%03X) high=(%u,0x%03X)\n",
+                snap.lowThreshold.exponent, snap.lowThreshold.result,
+                snap.highThreshold.exponent, snap.highThreshold.result);
 }
 
 void printLiveConfig() {
@@ -180,10 +258,68 @@ void printLiveConfig() {
   if (!st.ok()) { printStatus(st); return; }
   st = device.getThresholds(low, high);
   if (!st.ok()) { printStatus(st); return; }
+  OPT4001::ConfigurationInfo cfgInfo;
+  OPT4001::IntConfigurationInfo intInfo;
+  OPT4001::DeviceIdInfo didInfo;
+  device.decodeConfiguration(cfg, cfgInfo);
+  device.decodeIntConfiguration(intcfg, intInfo);
+  device.decodeDeviceId(did, didInfo);
   Serial.println("=== Live Device Registers ===");
   Serial.printf("  DEVICE_ID=0x%04X CONFIG=0x%04X INTCFG=0x%04X\n", did, cfg, intcfg);
+  Serial.printf("  DIDH=0x%03X DIDL=%u match=%s\n",
+                didInfo.didh,
+                didInfo.didl,
+                log_bool_str(didInfo.matchesExpected));
+  Serial.printf("  CONFIG: qwake=%s range=%s ctime=%s mode=%s latch=%s pol=%s faults=%s valid=%s\n",
+                log_bool_str(cfgInfo.quickWake),
+                rangeToStr(cfgInfo.range),
+                conversionTimeToStr(cfgInfo.conversionTime),
+                modeToStr(cfgInfo.mode),
+                latchToStr(cfgInfo.interruptLatch),
+                polarityToStr(cfgInfo.interruptPolarity),
+                faultCountToStr(cfgInfo.faultCount),
+                log_bool_str(cfgInfo.valid));
+  Serial.printf("  INTCFG: dir=%s cfg=%s burst=%s fixed=%s valid=%s\n",
+                intDirectionToStr(intInfo.intDirection),
+                intConfigToStr(intInfo.intConfig),
+                log_bool_str(intInfo.burstMode),
+                log_bool_str(intInfo.fixedPatternValid),
+                log_bool_str(intInfo.valid));
   Serial.printf("  Thresholds low=(%u,0x%03X) high=(%u,0x%03X)\n",
                 low.exponent, low.result, high.exponent, high.result);
+}
+
+void printThresholdLux() {
+  float lowLux = 0.0f;
+  float highLux = 0.0f;
+  OPT4001::Status st = device.getThresholdsLux(lowLux, highLux);
+  if (!st.ok()) {
+    printStatus(st);
+    return;
+  }
+  Serial.printf("  Threshold lux low=%.6f high=%.6f\n", lowLux, highLux);
+}
+
+void printScale() {
+  Serial.println("=== Scale / Timing ===");
+  Serial.printf("  Package: %s\n", packageToStr(device.getPackageVariant()));
+  Serial.printf("  LSB: %.9f lx/code\n", device.getLuxLsb());
+  Serial.printf("  Current full-scale: %.3f lx\n", device.getCurrentFullScaleLux());
+  Serial.printf("  Current resolution: %.9f lx\n", device.getCurrentResolutionLux());
+  Serial.printf("  Effective bits: %u\n", static_cast<unsigned>(device.getEffectiveBits()));
+  Serial.printf("  Conversion time: %s (%lu us)\n",
+                conversionTimeToStr(device.getConversionTime()),
+                static_cast<unsigned long>(device.getConversionTimeUs()));
+  Serial.printf("  One-shot budgets: regular=%lu us forced=%lu us\n",
+                static_cast<unsigned long>(device.getOneShotBudgetUs(OPT4001::Mode::ONE_SHOT)),
+                static_cast<unsigned long>(device.getOneShotBudgetUs(OPT4001::Mode::ONE_SHOT_FORCED_AUTO)));
+}
+
+bool rebeginWithConfig(const OPT4001::Config& cfg) {
+  device.end();
+  OPT4001::Status st = device.begin(cfg);
+  printStatus(st);
+  return st.ok();
 }
 
 void printRegisterDump() {
@@ -292,6 +428,7 @@ void printHelp() {
   item("scan", "Scan I2C bus");
   item("init", "Reinitialize device");
   item("end", "Shut down driver");
+  item("addr [0x44|0x45|0x46]", "Show or set target I2C address");
   section("Data");
   item("read", "Blocking one-shot read");
   item("read force", "Blocking forced-auto read");
@@ -300,11 +437,14 @@ void printHelp() {
   item("start [force]", "Start one-shot conversion");
   item("poll", "Check conversion ready");
   item("readburst [force]", "Read RESULT + FIFO frame");
+  item("slot <0..3>", "Read one history slot (0=newest)");
   item("sample / sampleage", "Cached sample and age");
+  item("lux / mlux / ulux", "Read scaled lux helpers");
   section("Configuration");
   item("cfg / settings", "Show live config and cache");
   item("snapshot", "Show cached settings only");
   item("id / identify", "Read device ID");
+  item("scale", "Show package scaling and timing helpers");
   item("mode [power|cont]", "Set or show stable mode");
   item("range [0..8|auto]", "Set or show range");
   item("ctime [0..11]", "Set or show conversion time");
@@ -319,8 +459,10 @@ void printHelp() {
   item("config write <hex>", "Write full CONFIGURATION");
   item("intcfg write <hex>", "Write full INT_CONFIGURATION");
   item("flags / flags raw / flags clear", "Read or clear FLAGS");
+  item("flags readyclear", "Clear ready flag only by write");
   item("dump", "Dump key registers");
   item("reg <addr>", "Read 16-bit register");
+  item("regs <start> <len>", "Read raw register bytes");
   item("wreg <addr> <val>", "Write 16-bit register");
   section("Diagnostics");
   item("drv", "Show driver health");
@@ -344,6 +486,8 @@ void processCommand(const String& cmdLine) {
   if (cmd == "scan") { bus_diag::scan(); return; }
   if (cmd == "init") { device.end(); printStatus(device.begin(makeDefaultConfig())); return; }
   if (cmd == "end") { device.end(); LOGI("Driver state: UNINIT"); return; }
+  if (cmd == "addr") { Serial.printf("  Address: 0x%02X\n", device.getConfig().i2cAddress); return; }
+  if (cmd.startsWith("addr ")) { uint32_t addr = 0; if (!parseU32(cmd.substring(5), addr) || addr > 0x7Fu) LOGW("Usage: addr [0x44|0x45|0x46]"); else { OPT4001::Config cfg = device.isInitialized() ? device.getConfig() : makeDefaultConfig(); cfg.i2cAddress = static_cast<uint8_t>(addr); (void)rebeginWithConfig(cfg); } return; }
   if (cmd == "drv") { printHealth(); return; }
   if (cmd == "probe") { printStatus(device.probe()); return; }
   if (cmd == "recover") { printStatus(device.recover()); return; }
@@ -351,13 +495,14 @@ void processCommand(const String& cmdLine) {
   if (cmd == "resetreapply") { LOGW("Issuing general-call reset + re-apply."); printStatus(device.resetAndReapply()); return; }
   if (cmd == "cfg" || cmd == "settings") { printLiveConfig(); printSnapshot(); return; }
   if (cmd == "snapshot") { printSnapshot(); return; }
-  if (cmd == "id" || cmd == "identify") { uint16_t v = 0; OPT4001::Status st = device.readDeviceId(v); if (!st.ok()) printStatus(st); else Serial.printf("  Device ID: 0x%04X\n", v); return; }
-  if (cmd == "config") { uint16_t v = 0; OPT4001::Status st = device.readConfiguration(v); if (!st.ok()) printStatus(st); else Serial.printf("  CONFIG=0x%04X\n", v); return; }
+  if (cmd == "id" || cmd == "identify") { OPT4001::DeviceIdInfo id; OPT4001::Status st = device.readDeviceId(id); if (!st.ok()) printStatus(st); else Serial.printf("  Device ID: 0x%04X DIDH=0x%03X DIDL=%u match=%s\n", id.raw, id.didh, id.didl, log_bool_str(id.matchesExpected)); return; }
+  if (cmd == "config") { OPT4001::ConfigurationInfo info; OPT4001::Status st = device.readConfiguration(info); if (!st.ok()) printStatus(st); else Serial.printf("  CONFIG=0x%04X qwake=%s range=%s ctime=%s mode=%s latch=%s pol=%s faults=%s valid=%s\n", info.raw, log_bool_str(info.quickWake), rangeToStr(info.range), conversionTimeToStr(info.conversionTime), modeToStr(info.mode), latchToStr(info.interruptLatch), polarityToStr(info.interruptPolarity), faultCountToStr(info.faultCount), log_bool_str(info.valid)); return; }
   if (cmd.startsWith("config write ")) { uint32_t v = 0; if (!parseU32(cmd.substring(13), v) || v > 0xFFFFu) LOGW("Usage: config write <0..0xFFFF>"); else printStatus(device.writeConfiguration(static_cast<uint16_t>(v))); return; }
-  if (cmd == "intcfg") { uint16_t v = 0; OPT4001::Status st = device.readIntConfiguration(v); if (!st.ok()) printStatus(st); else Serial.printf("  INTCFG=0x%04X\n", v); return; }
+  if (cmd == "intcfg") { OPT4001::IntConfigurationInfo info; OPT4001::Status st = device.readIntConfiguration(info); if (!st.ok()) printStatus(st); else Serial.printf("  INTCFG=0x%04X dir=%s cfg=%s burst=%s fixed=%s valid=%s\n", info.raw, intDirectionToStr(info.intDirection), intConfigToStr(info.intConfig), log_bool_str(info.burstMode), log_bool_str(info.fixedPatternValid), log_bool_str(info.valid)); return; }
   if (cmd.startsWith("intcfg write ")) { uint32_t v = 0; if (!parseU32(cmd.substring(13), v) || v > 0xFFFFu) LOGW("Usage: intcfg write <0..0xFFFF>"); else printStatus(device.writeIntConfiguration(static_cast<uint16_t>(v))); return; }
   if (cmd == "flags") { OPT4001::Flags f; OPT4001::Status st = device.readFlags(f); if (!st.ok()) printStatus(st); else Serial.printf("  FLAGS=0x%04X ovl=%s ready=%s hi=%s lo=%s\n", f.raw, log_bool_str(f.overload), log_bool_str(f.conversionReady), log_bool_str(f.highThreshold), log_bool_str(f.lowThreshold)); return; }
-  if (cmd == "flags raw") { uint16_t v = 0; OPT4001::Status st = device.readRegister16(OPT4001::cmd::REG_FLAGS, v); if (!st.ok()) printStatus(st); else Serial.printf("  FLAGS raw=0x%04X (clear-on-read)\n", v); return; }
+  if (cmd == "flags raw") { uint16_t v = 0; OPT4001::Status st = device.readFlagsRaw(v); if (!st.ok()) printStatus(st); else Serial.printf("  FLAGS raw=0x%04X (clear-on-read)\n", v); return; }
+  if (cmd == "flags readyclear") { printStatus(device.clearConversionReadyFlag()); return; }
   if (cmd == "flags clear") { printStatus(device.clearFlags()); return; }
   if (cmd == "dump") { printRegisterDump(); return; }
   if (cmd == "read") { (void)blockingRead(OPT4001::Mode::ONE_SHOT); return; }
@@ -369,8 +514,13 @@ void processCommand(const String& cmdLine) {
   if (cmd == "start force") { printStatus(device.startConversion(OPT4001::Mode::ONE_SHOT_FORCED_AUTO)); return; }
   if (cmd == "poll") { Serial.printf("  Ready: %s\n", device.conversionReady() ? "YES" : "no"); return; }
   if (cmd == "readburst" || cmd == "readburst force") { OPT4001::Mode mode = (cmd.endsWith("force")) ? OPT4001::Mode::ONE_SHOT_FORCED_AUTO : OPT4001::Mode::ONE_SHOT; if (device.getMode() == OPT4001::Mode::POWER_DOWN) (void)blockingRead(mode); OPT4001::BurstFrame f; OPT4001::Status st = device.readBurst(f); if (!st.ok() && st.code != OPT4001::Err::CRC_ERROR) printStatus(st); else { printSample(f.newest); printSample(f.fifo0); printSample(f.fifo1); printSample(f.fifo2); if (!st.ok()) printStatus(st); } return; }
+  if (cmd.startsWith("slot ")) { uint32_t slot = 0; if (!parseU32(cmd.substring(5), slot) || slot > 3U) LOGW("Usage: slot <0..3>"); else { OPT4001::Sample s; OPT4001::Status st = device.readSampleSlot(static_cast<uint8_t>(slot), s); if (!st.ok() && st.code != OPT4001::Err::CRC_ERROR) printStatus(st); else { printSample(s); Serial.printf("  Full-scale=%.3f lx resolution=%.9f lx\n", device.getSampleFullScaleLux(s), device.getSampleResolutionLux(s)); if (!st.ok()) printStatus(st); } } return; }
   if (cmd == "sample") { OPT4001::Sample s; OPT4001::Status st = device.getLastSample(s); if (!st.ok()) printStatus(st); else printSample(s); return; }
   if (cmd == "sampleage") { Serial.printf("  Sample age: %lu ms\n", static_cast<unsigned long>(device.sampleAgeMs(millis()))); return; }
+  if (cmd == "lux") { float lux = 0.0f; OPT4001::Status st = device.readBlockingLux(lux, 1500); if (!st.ok() && st.code != OPT4001::Err::CRC_ERROR) printStatus(st); else { Serial.printf("  Lux: %.6f lx\n", lux); if (!st.ok()) printStatus(st); } return; }
+  if (cmd == "mlux") { if (device.getMode() == OPT4001::Mode::POWER_DOWN) (void)blockingRead(OPT4001::Mode::ONE_SHOT); uint32_t milliLux = 0; OPT4001::Status st = device.readMilliLux(milliLux); if (!st.ok() && st.code != OPT4001::Err::CRC_ERROR) printStatus(st); else { Serial.printf("  Milli-lux: %lu mlux\n", static_cast<unsigned long>(milliLux)); if (!st.ok()) printStatus(st); } return; }
+  if (cmd == "ulux") { if (device.getMode() == OPT4001::Mode::POWER_DOWN) (void)blockingRead(OPT4001::Mode::ONE_SHOT); uint64_t microLux = 0; OPT4001::Status st = device.readMicroLux(microLux); if (!st.ok() && st.code != OPT4001::Err::CRC_ERROR) printStatus(st); else { Serial.printf("  Micro-lux: %llu ulux\n", static_cast<unsigned long long>(microLux)); if (!st.ok()) printStatus(st); } return; }
+  if (cmd == "scale") { printScale(); return; }
   if (cmd == "mode") { Serial.printf("  Mode: %s\n", modeToStr(device.getMode())); return; }
   if (cmd.startsWith("mode ")) { String t = cmd.substring(5); t.trim(); printStatus((t == "cont" || t == "continuous") ? device.setMode(OPT4001::Mode::CONTINUOUS) : (t == "power" || t == "pd") ? device.setMode(OPT4001::Mode::POWER_DOWN) : OPT4001::Status::Error(OPT4001::Err::INVALID_PARAM, "Usage: mode [power|cont]")); return; }
   if (cmd == "range") { Serial.printf("  Range: %u\n", static_cast<unsigned>(device.getRange())); return; }
@@ -385,15 +535,17 @@ void processCommand(const String& cmdLine) {
   if (cmd.startsWith("pkg ")) { String t = cmd.substring(4); t.trim(); OPT4001::PackageVariant v = (t == "pico" || t == "picostar") ? OPT4001::PackageVariant::PICOSTAR : (t == "sot" || t == "sot_5x3") ? OPT4001::PackageVariant::SOT_5X3 : static_cast<OPT4001::PackageVariant>(0xFF); if (v != OPT4001::PackageVariant::PICOSTAR && v != OPT4001::PackageVariant::SOT_5X3) LOGW("Usage: pkg [pico|sot]"); else printStatus(device.setPackageVariant(v)); return; }
   if (cmd == "burst") { Serial.printf("  Burst mode: %s\n", log_bool_str(device.getBurstMode())); return; }
   if (cmd.startsWith("burst ")) { printStatus(device.setBurstMode(cmd.substring(6).toInt() != 0)); return; }
-  if (cmd == "threshold") { printLiveConfig(); return; }
+  if (cmd == "threshold") { printLiveConfig(); printThresholdLux(); return; }
+  if (cmd == "threshold lux") { printThresholdLux(); return; }
   if (cmd.startsWith("threshold ")) { String args = cmd.substring(10); args.trim(); int sp = args.indexOf(' '); if (sp < 0) { LOGW("Usage: threshold <lowLux> <highLux>"); return; } float low = 0.0f, high = 0.0f; if (!parseF32(args.substring(0, sp), low) || !parseF32(args.substring(sp + 1), high)) LOGW("Usage: threshold <lowLux> <highLux>"); else printStatus(device.setThresholdsLux(low, high)); return; }
   if (cmd.startsWith("int latch ")) { int v = cmd.substring(10).toInt(); if (v != 0 && v != 1) LOGW("Usage: int latch [0|1]"); else printStatus(device.setInterruptLatch(v == 0 ? OPT4001::InterruptLatch::TRANSPARENT : OPT4001::InterruptLatch::LATCHED)); return; }
   if (cmd.startsWith("int pol ")) { String t = cmd.substring(8); t.trim(); printStatus((t == "low") ? device.setInterruptPolarity(OPT4001::InterruptPolarity::ACTIVE_LOW) : (t == "high") ? device.setInterruptPolarity(OPT4001::InterruptPolarity::ACTIVE_HIGH) : OPT4001::Status::Error(OPT4001::Err::INVALID_PARAM, "Usage: int pol [low|high]")); return; }
   if (cmd.startsWith("int faults ")) { String t = cmd.substring(11); t.trim(); OPT4001::FaultCount f = (t == "1") ? OPT4001::FaultCount::FAULTS_1 : (t == "2") ? OPT4001::FaultCount::FAULTS_2 : (t == "4") ? OPT4001::FaultCount::FAULTS_4 : (t == "8") ? OPT4001::FaultCount::FAULTS_8 : static_cast<OPT4001::FaultCount>(0xFF); if (f != OPT4001::FaultCount::FAULTS_1 && f != OPT4001::FaultCount::FAULTS_2 && f != OPT4001::FaultCount::FAULTS_4 && f != OPT4001::FaultCount::FAULTS_8) LOGW("Usage: int faults [1|2|4|8]"); else printStatus(device.setFaultCount(f)); return; }
   if (cmd.startsWith("int dir ")) { String t = cmd.substring(8); t.trim(); OPT4001::IntDirection d = (t == "in" || t == "input") ? OPT4001::IntDirection::PIN_INPUT : (t == "out" || t == "output") ? OPT4001::IntDirection::PIN_OUTPUT : static_cast<OPT4001::IntDirection>(0xFF); if (d != OPT4001::IntDirection::PIN_INPUT && d != OPT4001::IntDirection::PIN_OUTPUT) LOGW("Usage: int dir [in|out]"); else printStatus(device.setIntDirection(d)); return; }
   if (cmd.startsWith("int cfg ")) { String t = cmd.substring(8); t.trim(); OPT4001::IntConfig c = (t == "threshold" || t == "thresh") ? OPT4001::IntConfig::THRESHOLD : (t == "conv" || t == "every") ? OPT4001::IntConfig::EVERY_CONVERSION : (t == "fifo" || t == "full") ? OPT4001::IntConfig::FIFO_FULL : static_cast<OPT4001::IntConfig>(0xFF); if (c != OPT4001::IntConfig::THRESHOLD && c != OPT4001::IntConfig::EVERY_CONVERSION && c != OPT4001::IntConfig::FIFO_FULL) LOGW("Usage: int cfg [threshold|conv|fifo]"); else printStatus(device.setIntConfig(c)); return; }
-  if (cmd == "int") { uint16_t v = 0; OPT4001::Status st = device.readIntConfiguration(v); if (!st.ok()) printStatus(st); else Serial.printf("  INTCFG=0x%04X latch=%u pol=%u faults=%u\n", v, static_cast<unsigned>(device.getInterruptLatch()), static_cast<unsigned>(device.getInterruptPolarity()), static_cast<unsigned>(device.getFaultCount())); return; }
+  if (cmd == "int") { OPT4001::IntConfigurationInfo v; OPT4001::Status st = device.readIntConfiguration(v); if (!st.ok()) printStatus(st); else Serial.printf("  INTCFG=0x%04X dir=%s cfg=%s burst=%s latch=%s pol=%s faults=%s\n", v.raw, intDirectionToStr(v.intDirection), intConfigToStr(v.intConfig), log_bool_str(v.burstMode), latchToStr(device.getInterruptLatch()), polarityToStr(device.getInterruptPolarity()), faultCountToStr(device.getFaultCount())); return; }
   if (cmd.startsWith("reg ")) { uint32_t a = 0; if (!parseU32(cmd.substring(4), a) || a > 0xFFu) LOGW("Usage: reg <addr>"); else { uint16_t v = 0; OPT4001::Status st = device.readRegister16(static_cast<uint8_t>(a), v); if (!st.ok()) printStatus(st); else Serial.printf("  Reg 0x%02lX = 0x%04X (%u)\n", static_cast<unsigned long>(a), v, v); } return; }
+  if (cmd.startsWith("regs ")) { String args = cmd.substring(5); args.trim(); int sp = args.indexOf(' '); uint32_t start = 0, len = 0; if (sp < 0 || !parseU32(args.substring(0, sp), start) || !parseU32(args.substring(sp + 1), len) || start > 0xFFu || len == 0 || len > 64U) LOGW("Usage: regs <start> <lenBytes>"); else { uint8_t buf[64] = {}; OPT4001::Status st = device.readRegisters(static_cast<uint8_t>(start), buf, static_cast<size_t>(len)); if (!st.ok()) printStatus(st); else { for (uint32_t i = 0; i < len; ++i) Serial.printf("  [0x%02lX] = 0x%02X\n", static_cast<unsigned long>(start + i), buf[i]); } } return; }
   if (cmd.startsWith("wreg ")) { String args = cmd.substring(5); args.trim(); int sp = args.indexOf(' '); uint32_t a = 0, v = 0; if (sp < 0 || !parseU32(args.substring(0, sp), a) || !parseU32(args.substring(sp + 1), v) || a > 0xFFu || v > 0xFFFFu) LOGW("Usage: wreg <addr> <val>"); else printStatus(device.writeRegister16(static_cast<uint8_t>(a), static_cast<uint16_t>(v))); return; }
   if (cmd == "verbose") { Serial.printf("  Verbose: %s\n", verboseMode ? "ON" : "OFF"); return; }
   if (cmd.startsWith("verbose ")) { verboseMode = cmd.substring(8).toInt() != 0; Serial.printf("  Verbose: %s\n", verboseMode ? "ON" : "OFF"); return; }

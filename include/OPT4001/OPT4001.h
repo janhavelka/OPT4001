@@ -50,6 +50,39 @@ struct Flags {
   bool lowThreshold = false;
 };
 
+/// Decoded device identification register.
+struct DeviceIdInfo {
+  uint16_t raw = 0;
+  uint16_t didh = 0;
+  uint8_t didl = 0;
+  bool matchesExpected = false;
+};
+
+/// Decoded CONFIGURATION register fields.
+struct ConfigurationInfo {
+  uint16_t raw = 0;
+  bool quickWake = false;
+  bool reservedBitSet = false;
+  Range range = Range::AUTO;
+  ConversionTime conversionTime = ConversionTime::MS_100;
+  Mode mode = Mode::POWER_DOWN;
+  InterruptLatch interruptLatch = InterruptLatch::LATCHED;
+  InterruptPolarity interruptPolarity = InterruptPolarity::ACTIVE_LOW;
+  FaultCount faultCount = FaultCount::FAULTS_1;
+  bool valid = true;
+};
+
+/// Decoded INT_CONFIGURATION register fields.
+struct IntConfigurationInfo {
+  uint16_t raw = 0;
+  bool fixedPatternValid = false;
+  bool reservedBitSet = false;
+  IntDirection intDirection = IntDirection::PIN_OUTPUT;
+  IntConfig intConfig = IntConfig::THRESHOLD;
+  bool burstMode = true;
+  bool valid = true;
+};
+
 /// Snapshot of cached configuration and runtime state without I2C access.
 struct SettingsSnapshot {
   bool initialized = false;
@@ -107,6 +140,7 @@ public:
   /// General-call reset followed by re-applying the cached configuration.
   Status resetAndReapply();
   Status readDeviceId(uint16_t& value);
+  Status readDeviceId(DeviceIdInfo& out);
   Status getSettings(SettingsSnapshot& out) const;
 
   // === Driver State ===
@@ -130,6 +164,8 @@ public:
   bool conversionReady();
   Status readSample(Sample& out);
   Status readBurst(BurstFrame& out);
+  /// Read one slot from the 4-deep history window: 0 = newest RESULT, 1-3 = FIFO shadows.
+  Status readSampleSlot(uint8_t slot, Sample& out);
   Status getLastSample(Sample& out) const;
   uint32_t sampleTimestampMs() const;
   uint32_t sampleAgeMs(uint32_t nowMs) const;
@@ -144,6 +180,10 @@ public:
   // === Flags / Status ===
   /// Read FLAGS register. Reading register 0x0C clears latched flags and ready flag.
   Status readFlags(Flags& out);
+  Status readFlagsRaw(uint16_t& value);
+  /// Clear CONVERSION_READY_FLAG only by writing a non-zero value to 0x0C.
+  Status clearConversionReadyFlag();
+  /// Clear all sticky status indications using the documented clear-on-read behavior.
   Status clearFlags();
 
   // === Configuration ===
@@ -186,11 +226,14 @@ public:
 
   Status setThresholds(const Threshold& low, const Threshold& high);
   Status getThresholds(Threshold& low, Threshold& high);
+  Status getThresholdsLux(float& lowLux, float& highLux);
   Status setThresholdsLux(float lowLux, float highLux);
 
   Status readConfiguration(uint16_t& value);
+  Status readConfiguration(ConfigurationInfo& out);
   Status writeConfiguration(uint16_t value);
   Status readIntConfiguration(uint16_t& value);
+  Status readIntConfiguration(IntConfigurationInfo& out);
   Status writeIntConfiguration(uint16_t value);
   Status readConfig(uint16_t& value) { return readConfiguration(value); }
   Status writeConfig(uint16_t value) { return writeConfiguration(value); }
@@ -198,21 +241,35 @@ public:
   Status writeIntConfig(uint16_t value) { return writeIntConfiguration(value); }
 
   // === Raw Register Access ===
+  Status readRegisters(uint8_t startReg, uint8_t* buf, size_t len);
   Status readRegister16(uint8_t reg, uint16_t& value);
   Status writeRegister16(uint8_t reg, uint16_t value);
   Status readRegister(uint8_t reg, uint16_t& value) { return readRegister16(reg, value); }
   Status writeRegister(uint8_t reg, uint16_t value) { return writeRegister16(reg, value); }
 
   // === Utility ===
+  void decodeDeviceId(uint16_t raw, DeviceIdInfo& out) const;
+  void decodeConfiguration(uint16_t raw, ConfigurationInfo& out) const;
+  void decodeIntConfiguration(uint16_t raw, IntConfigurationInfo& out) const;
   float adcCodesToLux(uint32_t adcCodes) const;
   float rawToLux(uint8_t exponent, uint32_t mantissa) const;
+  float thresholdToLux(const Threshold& threshold) const;
   float getLuxLsb() const;
+  float getRangeFullScaleLux(Range range) const;
+  float getCurrentFullScaleLux() const;
+  float getSampleFullScaleLux(const Sample& sample) const;
+  uint8_t getEffectiveBits(ConversionTime time) const;
+  uint8_t getEffectiveBits() const;
+  float getRangeResolutionLux(Range range, ConversionTime time) const;
+  float getCurrentResolutionLux() const;
+  float getSampleResolutionLux(const Sample& sample) const;
   uint32_t getConversionTimeUs() const;
   uint32_t getConversionTimeMs() const;
   uint32_t getOneShotBudgetUs(Mode mode) const;
   uint32_t getOneShotBudgetMs(Mode mode) const;
   Status luxToThreshold(float lux, Threshold& out) const;
   uint32_t thresholdToAdcCodes(const Threshold& threshold) const;
+  uint8_t sampleCounterDelta(uint8_t previousCounter, uint8_t currentCounter) const;
 
 private:
   // === Transport Wrappers ===

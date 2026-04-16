@@ -12,11 +12,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `softReset()` and `resetAndReapply()` to align OPT4001 reset handling with the stronger sibling libraries while preserving the datasheet's general-call reset behavior.
 - Sample-cache helpers: `getLastSample()`, `sampleTimestampMs()`, and `sampleAgeMs()`.
 - `readDeviceId()` and `setVerifyCrc()` typed helpers.
+- Decoded helper structs and register helpers: `DeviceIdInfo`, `ConfigurationInfo`,
+  `IntConfigurationInfo`, `readRegisters()`, `readSampleSlot()`,
+  `getThresholdsLux()`, `clearConversionReadyFlag()`, full-scale / resolution helpers,
+  and sample-counter delta math.
 - Broader native coverage for reset, CRC-policy, sample-cache, and device-ID paths.
 
 ### Changed
 
 - Expanded the bring-up CLI to cover version info, reset flows, config/intcfg readback, cached samples, FIFO burst reads, interrupt setup, and self-test.
+- Expanded the bring-up CLI again to cover decoded ID/config output, address switching,
+  raw register-block reads, per-slot history reads, scaled lux helpers, threshold lux
+  reporting, and scale/timing diagnostics.
+- Corrected the modeled `FLAGS` semantics so write-to-clear affects only
+  `CONVERSION_READY_FLAG`, while full sticky-flag clearing follows the datasheet's
+  clear-on-read behavior.
 - Tightened the CLI contract check so the richer diagnostic commands remain present.
 - Updated README and assumptions to document the bus-wide reset path and the intentionally omitted controller/application-layer behaviors.
 

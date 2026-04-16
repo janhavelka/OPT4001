@@ -44,3 +44,17 @@ that stays consistent with the other I2C driver repositories in this workspace.
    The application notes discuss those corrections, but they depend on system
    mechanics such as cover-glass transmission and enclosure geometry, so the
    library does not bake them into the core lux conversion path.
+
+8. Full-scale and resolution helpers treat `Range::AUTO` as the maximum range.
+   In auto-range mode the sensor can land on any exponent from 0 to 8, so the
+   driver cannot know a single fixed full-scale or resolution value from config
+   alone. Helpers such as `getCurrentFullScaleLux()` and
+   `getCurrentResolutionLux()` therefore return the conservative worst-case
+   values for range 8 when the configured range is `AUTO`.
+
+9. INT-pin hardware trigger is not wrapped as a core driver helper.
+   The datasheet documents using the SOT-5X3 INT pin as a one-shot trigger
+   input, but the repo documentation does not pin down a portable pulse-driving
+   contract, and the driver intentionally does not own GPIO output policy.
+   Applications can still configure `INT_DIR = PIN_INPUT` and implement the
+   actual pulse at the board layer.

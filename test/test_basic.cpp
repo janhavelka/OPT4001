@@ -97,7 +97,9 @@ Status fakeWrite(uint8_t, const uint8_t* data, size_t len, uint32_t, void* user)
   if (len >= 3) {
     const uint8_t reg = data[0];
     const uint16_t value = static_cast<uint16_t>((data[1] << 8) | data[2]);
-    bus->registers[reg] = value;
+    if (reg != cmd::REG_FLAGS) {
+      bus->registers[reg] = value;
+    }
 
     if (reg == cmd::REG_CONFIGURATION) {
       const Mode mode =
@@ -112,9 +114,9 @@ Status fakeWrite(uint8_t, const uint8_t* data, size_t len, uint32_t, void* user)
       }
     } else if (reg == cmd::REG_FLAGS && value != 0) {
       bus->registers[cmd::REG_FLAGS] &=
-          static_cast<uint16_t>(~(cmd::MASK_CONVERSION_READY_FLAG |
-                                  cmd::MASK_FLAG_H |
-                                  cmd::MASK_FLAG_L));
+          static_cast<uint16_t>(~cmd::MASK_CONVERSION_READY_FLAG);
+    } else if (reg == cmd::REG_FLAGS) {
+      bus->registers[cmd::REG_FLAGS] = value;
     }
   }
 
@@ -268,6 +270,24 @@ void test_begin_rejects_one_shot_startup_mode() {
   cfg.mode = Mode::ONE_SHOT;
   Status st = dev.begin(cfg);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_CONFIG), static_cast<uint8_t>(st.code));
+}
+
+void test_begin_rejects_invalid_package_address_combo() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.packageVariant = PackageVariant::PICOSTAR;
+  cfg.i2cAddress = cmd::I2C_ADDR_GND;
+  Status st = dev.begin(cfg);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_CONFIG),
+                          static_cast<uint8_t>(st.code));
+
+  cfg = makeConfig(bus);
+  cfg.packageVariant = PackageVariant::SOT_5X3;
+  cfg.i2cAddress = 0x47;
+  st = dev.begin(cfg);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_CONFIG),
+                          static_cast<uint8_t>(st.code));
 }
 
 void test_begin_success_sets_ready_and_counters() {
@@ -440,6 +460,30 @@ void test_read_burst_decodes_fifo() {
   TEST_ASSERT_EQUAL_UINT32(0x44444u, frame.fifo2.mantissa);
 }
 
+void test_read_burst_nonburst_path_decodes_fifo() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  cfg.burstMode = false;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  seedSample(bus, cmd::REG_RESULT, 0, 0x11111, 1, true);
+  seedSample(bus, cmd::REG_FIFO0_MSB, 1, 0x22222, 2, true);
+  seedSample(bus, cmd::REG_FIFO1_MSB, 2, 0x33333, 3, true);
+  seedSample(bus, cmd::REG_FIFO2_MSB, 3, 0x44444, 4, true);
+  bus.nowMs += 150;
+  dev.tick(bus.nowMs);
+
+  BurstFrame frame;
+  Status st = dev.readBurst(frame);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT32(0x11111u, frame.newest.mantissa);
+  TEST_ASSERT_EQUAL_UINT32(0x22222u, frame.fifo0.mantissa);
+  TEST_ASSERT_EQUAL_UINT32(0x33333u, frame.fifo1.mantissa);
+  TEST_ASSERT_EQUAL_UINT32(0x44444u, frame.fifo2.mantissa);
+}
+
 void test_set_thresholds_lux_updates_threshold_registers() {
   FakeBus bus;
   OPT4001::OPT4001 dev;
@@ -455,6 +499,25 @@ void test_set_thresholds_lux_updates_threshold_registers() {
   TEST_ASSERT_TRUE(dev.thresholdToAdcCodes(high) > dev.thresholdToAdcCodes(low));
 }
 
+void test_threshold_lux_helpers_roundtrip() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+  TEST_ASSERT_TRUE(dev.setThresholdsLux(10.0f, 1000.0f).ok());
+
+  float lowLux = 0.0f;
+  float highLux = 0.0f;
+  TEST_ASSERT_TRUE(dev.getThresholdsLux(lowLux, highLux).ok());
+  TEST_ASSERT_TRUE(lowLux > 0.0f);
+  TEST_ASSERT_TRUE(highLux > lowLux);
+
+  Threshold low;
+  Threshold high;
+  TEST_ASSERT_TRUE(dev.getThresholds(low, high).ok());
+  TEST_ASSERT_FLOAT_WITHIN(0.5f, dev.thresholdToLux(low), lowLux);
+  TEST_ASSERT_FLOAT_WITHIN(5.0f, dev.thresholdToLux(high), highLux);
+}
+
 void test_read_flags_parses_and_clears_ready_flag() {
   FakeBus bus;
   OPT4001::OPT4001 dev;
@@ -468,6 +531,35 @@ void test_read_flags_parses_and_clears_ready_flag() {
   TEST_ASSERT_TRUE(flags.conversionReady);
   TEST_ASSERT_TRUE(flags.highThreshold);
   TEST_ASSERT_EQUAL_UINT16(0u, bus.registers[cmd::REG_FLAGS] & cmd::MASK_CONVERSION_READY_FLAG);
+}
+
+void test_clear_conversion_ready_flag_preserves_window_flags() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  bus.registers[cmd::REG_FLAGS] = static_cast<uint16_t>(cmd::MASK_CONVERSION_READY_FLAG |
+                                                        cmd::MASK_FLAG_H |
+                                                        cmd::MASK_FLAG_L);
+  TEST_ASSERT_TRUE(dev.clearConversionReadyFlag().ok());
+  TEST_ASSERT_EQUAL_UINT16(0u, bus.registers[cmd::REG_FLAGS] & cmd::MASK_CONVERSION_READY_FLAG);
+  TEST_ASSERT_NOT_EQUAL(0u, bus.registers[cmd::REG_FLAGS] & cmd::MASK_FLAG_H);
+  TEST_ASSERT_NOT_EQUAL(0u, bus.registers[cmd::REG_FLAGS] & cmd::MASK_FLAG_L);
+}
+
+void test_clear_flags_uses_clear_on_read_semantics() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  bus.registers[cmd::REG_FLAGS] = static_cast<uint16_t>(cmd::MASK_CONVERSION_READY_FLAG |
+                                                        cmd::MASK_FLAG_H |
+                                                        cmd::MASK_FLAG_L);
+  TEST_ASSERT_TRUE(dev.clearFlags().ok());
+  TEST_ASSERT_EQUAL_UINT16(0u, bus.registers[cmd::REG_FLAGS] &
+                                  static_cast<uint16_t>(cmd::MASK_CONVERSION_READY_FLAG |
+                                                        cmd::MASK_FLAG_H |
+                                                        cmd::MASK_FLAG_L));
 }
 
 void test_write_int_configuration_rejects_bad_fixed_pattern() {
@@ -498,6 +590,86 @@ void test_set_verify_crc_updates_cached_setting() {
   TEST_ASSERT_TRUE(dev.getVerifyCrc());
   TEST_ASSERT_TRUE(dev.setVerifyCrc(false).ok());
   TEST_ASSERT_FALSE(dev.getVerifyCrc());
+}
+
+void test_decoded_register_helpers() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  TEST_ASSERT_TRUE(dev.setQuickWake(true).ok());
+  TEST_ASSERT_TRUE(dev.setRange(Range::RANGE_3).ok());
+  TEST_ASSERT_TRUE(dev.setConversionTime(ConversionTime::MS_25).ok());
+  TEST_ASSERT_TRUE(dev.setFaultCount(FaultCount::FAULTS_4).ok());
+  TEST_ASSERT_TRUE(dev.setIntDirection(IntDirection::PIN_OUTPUT).ok());
+  TEST_ASSERT_TRUE(dev.setIntConfig(IntConfig::FIFO_FULL).ok());
+  TEST_ASSERT_TRUE(dev.setBurstMode(false).ok());
+
+  DeviceIdInfo did;
+  TEST_ASSERT_TRUE(dev.readDeviceId(did).ok());
+  TEST_ASSERT_EQUAL_HEX16(cmd::DEVICE_ID_RESET, did.raw);
+  TEST_ASSERT_EQUAL_HEX16(cmd::DIDH_EXPECTED, did.didh);
+  TEST_ASSERT_EQUAL_UINT8(0u, did.didl);
+  TEST_ASSERT_TRUE(did.matchesExpected);
+
+  ConfigurationInfo cfgInfo;
+  TEST_ASSERT_TRUE(dev.readConfiguration(cfgInfo).ok());
+  TEST_ASSERT_TRUE(cfgInfo.valid);
+  TEST_ASSERT_TRUE(cfgInfo.quickWake);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Range::RANGE_3),
+                          static_cast<uint8_t>(cfgInfo.range));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ConversionTime::MS_25),
+                          static_cast<uint8_t>(cfgInfo.conversionTime));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(FaultCount::FAULTS_4),
+                          static_cast<uint8_t>(cfgInfo.faultCount));
+
+  IntConfigurationInfo intInfo;
+  TEST_ASSERT_TRUE(dev.readIntConfiguration(intInfo).ok());
+  TEST_ASSERT_TRUE(intInfo.valid);
+  TEST_ASSERT_TRUE(intInfo.fixedPatternValid);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(IntConfig::FIFO_FULL),
+                          static_cast<uint8_t>(intInfo.intConfig));
+  TEST_ASSERT_FALSE(intInfo.burstMode);
+}
+
+void test_read_register_block_and_sample_slot_helpers() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  seedSample(bus, cmd::REG_RESULT, 0, 0x11111, 1, true);
+  seedSample(bus, cmd::REG_FIFO0_MSB, 1, 0x22222, 2, true);
+  seedSample(bus, cmd::REG_FIFO1_MSB, 2, 0x33333, 3, true);
+  seedSample(bus, cmd::REG_FIFO2_MSB, 3, 0x44444, 4, true);
+  bus.nowMs += 150;
+  dev.tick(bus.nowMs);
+
+  uint8_t raw[16] = {};
+  TEST_ASSERT_TRUE(dev.readRegisters(cmd::REG_RESULT, raw, sizeof(raw)).ok());
+  TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(bus.registers[cmd::REG_RESULT] >> 8), raw[0]);
+  TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(bus.registers[cmd::REG_FIFO2_LSB_CRC] & 0xFF), raw[15]);
+
+  Sample slot;
+  TEST_ASSERT_TRUE(dev.readSampleSlot(2, slot).ok());
+  TEST_ASSERT_EQUAL_UINT32(0x33333u, slot.mantissa);
+}
+
+void test_scale_and_counter_helpers() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, 459.0f, dev.getRangeFullScaleLux(Range::RANGE_0));
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, 117441.0f, dev.getCurrentFullScaleLux());
+  TEST_ASSERT_EQUAL_UINT8(20u, dev.getEffectiveBits(ConversionTime::MS_800));
+  TEST_ASSERT_EQUAL_UINT8(17u, dev.getEffectiveBits());
+  TEST_ASSERT_TRUE(dev.getCurrentResolutionLux() > 0.0f);
+  TEST_ASSERT_EQUAL_UINT8(2u, dev.sampleCounterDelta(15, 1));
+
+  TEST_ASSERT_TRUE(dev.setPackageVariant(PackageVariant::PICOSTAR).ok());
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, 328.0f, dev.getRangeFullScaleLux(Range::RANGE_0));
 }
 
 void test_soft_reset_moves_driver_to_uninit() {
@@ -576,6 +748,7 @@ int main() {
   RUN_TEST(test_get_last_sample_before_any_read);
   RUN_TEST(test_begin_rejects_missing_callbacks);
   RUN_TEST(test_begin_rejects_one_shot_startup_mode);
+  RUN_TEST(test_begin_rejects_invalid_package_address_combo);
   RUN_TEST(test_begin_success_sets_ready_and_counters);
   RUN_TEST(test_probe_failure_does_not_update_health);
   RUN_TEST(test_recover_failure_updates_health);
@@ -585,11 +758,18 @@ int main() {
   RUN_TEST(test_crc_mismatch_returns_error_when_enabled);
   RUN_TEST(test_crc_mismatch_allowed_when_verification_disabled);
   RUN_TEST(test_read_burst_decodes_fifo);
+  RUN_TEST(test_read_burst_nonburst_path_decodes_fifo);
   RUN_TEST(test_set_thresholds_lux_updates_threshold_registers);
+  RUN_TEST(test_threshold_lux_helpers_roundtrip);
   RUN_TEST(test_read_flags_parses_and_clears_ready_flag);
+  RUN_TEST(test_clear_conversion_ready_flag_preserves_window_flags);
+  RUN_TEST(test_clear_flags_uses_clear_on_read_semantics);
   RUN_TEST(test_write_int_configuration_rejects_bad_fixed_pattern);
   RUN_TEST(test_read_device_id_returns_raw_register_value);
   RUN_TEST(test_set_verify_crc_updates_cached_setting);
+  RUN_TEST(test_decoded_register_helpers);
+  RUN_TEST(test_read_register_block_and_sample_slot_helpers);
+  RUN_TEST(test_scale_and_counter_helpers);
   RUN_TEST(test_soft_reset_moves_driver_to_uninit);
   RUN_TEST(test_reset_and_reapply_restores_ready_and_config);
   RUN_TEST(test_raw_transport_rejects_invalid_buffers);

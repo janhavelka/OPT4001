@@ -25,6 +25,7 @@ pattern used by the other device libraries in this workspace:
   - decoded exponent / mantissa sample format
   - lux, milli-lux, and micro-lux helpers
   - 4-sample burst read (`RESULT` + FIFO shadows)
+  - per-slot history reads (`slot 0` = newest, `1-3` = FIFO shadows)
   - per-sample CRC verification
 - Configuration support:
   - range selection or auto-range
@@ -34,9 +35,12 @@ pattern used by the other device libraries in this workspace:
   - interrupt polarity, latch, fault count, direction, function, and burst mode
 - Diagnostics:
   - raw register access
+  - raw contiguous register-block reads
   - probe without health side effects
   - tracked recover path
+  - decoded device-ID / configuration / INT-configuration helpers
   - cached settings snapshot
+  - full-scale, effective-bit, resolution, and counter-delta utility helpers
 
 ## Installation
 
@@ -143,11 +147,19 @@ void loop() {
   libraries: reset the device, then restore the cached configuration.
 - `readSample()`, `readBurst()`, and the blocking helpers may return `CRC_ERROR`
   while still populating the decoded sample data.
+- `readSampleSlot(0..3)` provides direct access to the newest sample plus the
+  three FIFO shadow samples without forcing a full burst decode.
 - `getLastSample()` / `sampleTimestampMs()` / `sampleAgeMs()` provide RAM-only
   access to the last successfully decoded sample.
 - `readFlags()` reads register `0x0C`; that register is clear-on-read on the device.
+- `clearConversionReadyFlag()` performs the datasheet's write-nonzero clear of
+  only `CONVERSION_READY_FLAG`, while `clearFlags()` uses the clear-on-read path
+  to clear the full sticky status view.
 - `writeIntConfiguration()` verifies the fixed register pattern documented for `0x0B`
   before writing.
+- Decoded register helpers (`DeviceIdInfo`, `ConfigurationInfo`,
+  `IntConfigurationInfo`) are available so bring-up code does not need to unpack
+  bit fields manually.
 
 ## Public Surface
 
@@ -161,6 +173,7 @@ void loop() {
 - `softReset()`
 - `resetAndReapply()`
 - `readDeviceId(uint16_t&)`
+- `readDeviceId(DeviceIdInfo&)`
 - `getSettings(SettingsSnapshot&)`
 
 ### Measurements
@@ -170,6 +183,7 @@ void loop() {
 - `conversionReady()`
 - `readSample(Sample&)`
 - `readBurst(BurstFrame&)`
+- `readSampleSlot(slot, Sample&)`
 - `getLastSample(Sample&)`
 - `sampleTimestampMs()`
 - `sampleAgeMs(nowMs)`
@@ -185,19 +199,30 @@ void loop() {
 - `setInterruptLatch()`, `setInterruptPolarity()`, `setFaultCount()`
 - `setIntDirection()`, `setIntConfig()`, `setBurstMode()`
 - `setThresholds()`, `getThresholds()`, `setThresholdsLux()`
-- `readConfiguration()`, `writeConfiguration()`
-- `readIntConfiguration()`, `writeIntConfiguration()`
-- `readFlags()`, `clearFlags()`
-- `readRegister16()`, `writeRegister16()`
+- `getThresholdsLux()`
+- `readConfiguration(...)`, `writeConfiguration()`
+- `readIntConfiguration(...)`, `writeIntConfiguration()`
+- `readFlags()`, `readFlagsRaw()`, `clearConversionReadyFlag()`, `clearFlags()`
+- `readRegisters()`, `readRegister16()`, `writeRegister16()`
+
+### Decode And Scaling Helpers
+
+- `decodeDeviceId()`, `decodeConfiguration()`, `decodeIntConfiguration()`
+- `thresholdToLux()`, `thresholdToAdcCodes()`
+- `getRangeFullScaleLux()`, `getCurrentFullScaleLux()`, `getSampleFullScaleLux()`
+- `getEffectiveBits()`
+- `getRangeResolutionLux()`, `getCurrentResolutionLux()`, `getSampleResolutionLux()`
+- `sampleCounterDelta()`
 
 ## Examples
 
 - `examples/01_basic_bringup_cli/`
   - interactive bring-up shell
-  - scan, probe, recover, reset, reset-and-reapply
-  - config / intcfg / flags / device-ID readback
-  - one-shot reads, burst FIFO reads, cached-sample inspection, stress/selftest
-  - threshold and interrupt configuration, plus raw register access
+  - scan, probe, recover, reset, reset-and-reapply, and runtime address selection
+  - decoded config / intcfg / flags / device-ID readback
+  - one-shot reads, burst FIFO reads, single-slot history reads, cached-sample inspection, stress/selftest
+  - lux / milli-lux / micro-lux commands plus scale / timing diagnostics
+  - threshold and interrupt configuration, plus raw register and raw block access
 - `examples/common/`
   - board config and serial logging helpers
   - I2C transport adapter and bus scanner
@@ -209,6 +234,8 @@ void loop() {
 - `config`, `intcfg`, `flags`, `reg`, and `wreg` are intended for bring-up and
   diagnostics; raw writes can desynchronize the cached config until `recover()`
   or `resetAndReapply()` is used.
+- `flags readyclear` uses the write-to-clear-ready path, while `flags` and
+  `flags clear` use the register read path that also clears latched threshold flags.
 - The example defaults to the SOT-5X3 package path. For PicoStar, switch the
   package variant and leave the INT hook disabled.
 
@@ -226,6 +253,8 @@ void loop() {
 - High-speed I2C entry sequencing is transport-owned and not modeled in the driver.
 - SMBus alert response arbitration is controller-level bus behavior and is not
   wrapped as a dedicated driver API.
+- INT-input hardware triggering is left to the board/application layer; the
+  driver exposes the configuration bits but does not generate GPIO trigger pulses.
 - Window transmission compensation and similar application-note calibration
   factors are intentionally left at the application layer rather than baked into
   the core lux conversion path.
