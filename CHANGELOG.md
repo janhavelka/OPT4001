@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Standardized the bring-up CLI on the stronger family patterns for colored health
   reporting, `state` / `status` diagnostics, richer stress and stress-mix summaries,
   deeper selftest coverage, and raw threshold programming.
+- Extended the bring-up CLI with consolidated `diag` reporting, optional periodic
+  `healthmon` monitoring, helper-conversion commands (`adc2lux`, `raw2lux`,
+  `thcalc`, `thdecode`), and stronger chip-specific stress/selftest auditing for
+  counter continuity and conversion math.
 - Corrected the modeled `FLAGS` semantics so write-to-clear affects only
   `CONVERSION_READY_FLAG`, while full sticky-flag clearing follows the datasheet's
   clear-on-read behavior.

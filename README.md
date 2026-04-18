@@ -221,12 +221,13 @@ void loop() {
   - scan, probe, recover, reset, reset-and-reapply, compact state view, and runtime address selection
   - decoded config / intcfg / flags / status / device-ID readback with colored health reporting
   - one-shot reads, burst FIFO reads, single-slot history reads, cached-sample inspection, stress, stress-mix, and selftest
-  - lux / milli-lux / micro-lux commands plus scale / timing diagnostics and per-range scale table
-  - threshold lux helpers, raw threshold programming, interrupt configuration, and raw register / block access
+  - lux / milli-lux / micro-lux commands plus `adc2lux`, `raw2lux`, scale / timing diagnostics, and the per-range scale table
+  - threshold lux helpers, `thcalc`, `thdecode`, raw threshold programming, interrupt configuration, and raw register / block access
+  - consolidated `diag` report and optional periodic `healthmon` output using the shared health diagnostic helper
 - `examples/common/`
   - board config and serial logging helpers
   - I2C transport adapter and bus scanner
-  - reusable CLI parsing / diagnostics glue
+  - reusable CLI parsing / diagnostics glue, including `HealthView.h` and `HealthDiag.h`
 
 ### CLI Notes
 
@@ -239,6 +240,12 @@ void loop() {
 - `status` / `status_raw` are CLI aliases for the decoded and raw `FLAGS` views.
 - `threshold raw <low> <high>` accepts packed 16-bit threshold register values for
   register-level bring-up, while `threshold <lowLux> <highLux>` uses the lux helpers.
+- `thcalc <lux>` and `thdecode <raw16>` expose the datasheet threshold packing math
+  without touching the sensor registers.
+- `diag` intentionally skips `FLAGS` so the report does not clear the device's
+  sticky status bits; use `status` or `status_raw` explicitly when you want that read.
+- `healthmon 1 [intervalMs]` enables periodic colorized health reporting from the
+  shared example diagnostics helper while the loop keeps running.
 - The example defaults to the SOT-5X3 package path. For PicoStar, switch the
   package variant and leave the INT hook disabled.
 

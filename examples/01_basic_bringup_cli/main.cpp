@@ -7,6 +7,7 @@
 
 #include "examples/common/BoardConfig.h"
 #include "examples/common/BusDiag.h"
+#include "examples/common/HealthDiag.h"
 #include "examples/common/HealthView.h"
 #include "examples/common/I2cScanner.h"
 #include "examples/common/I2cTransport.h"
@@ -18,6 +19,12 @@ OPT4001::OPT4001 device;
 bool verboseMode = false;
 static constexpr uint32_t STRESS_PROGRESS_UPDATES = 10U;
 static constexpr uint32_t BLOCKING_READ_TIMEOUT_MS = 1500U;
+static constexpr uint32_t HEALTH_MONITOR_DEFAULT_INTERVAL_MS = 1000U;
+bool healthMonitorEnabled = false;
+uint32_t healthMonitorIntervalMs = HEALTH_MONITOR_DEFAULT_INTERVAL_MS;
+diag::HealthMonitor healthMonitor;
+
+void printScale();
 
 const char* errToStr(OPT4001::Err err) {
   using OPT4001::Err;
@@ -119,6 +126,19 @@ const char* intConfigToStr(OPT4001::IntConfig config) {
     case OPT4001::IntConfig::EVERY_CONVERSION: return "EVERY_CONVERSION";
     case OPT4001::IntConfig::FIFO_FULL: return "FIFO_FULL";
     default: return "UNKNOWN";
+  }
+}
+
+const char* intConfigBehaviorToStr(OPT4001::IntConfig config) {
+  switch (config) {
+    case OPT4001::IntConfig::THRESHOLD:
+      return "threshold / SMBus-alert mode";
+    case OPT4001::IntConfig::EVERY_CONVERSION:
+      return "pulse after every conversion";
+    case OPT4001::IntConfig::FIFO_FULL:
+      return "pulse every 4 conversions (FIFO full)";
+    default:
+      return "invalid / reserved";
   }
 }
 
@@ -387,6 +407,30 @@ void printDriverHealth() {
   }
 }
 
+void printHealthMonitorState() {
+  Serial.printf("  Health monitor: %s%s%s interval=%lu ms\n",
+                onOffColor(healthMonitorEnabled),
+                healthMonitorEnabled ? "ON" : "OFF",
+                LOG_COLOR_RESET,
+                static_cast<unsigned long>(healthMonitorIntervalMs));
+}
+
+uint16_t packThresholdRaw(const OPT4001::Threshold& threshold) {
+  return static_cast<uint16_t>(
+      (static_cast<uint16_t>(threshold.exponent) << OPT4001::cmd::BIT_THRESHOLD_EXPONENT) |
+      (threshold.result & OPT4001::cmd::MASK_THRESHOLD_RESULT));
+}
+
+void printThresholdDetails(const char* name, const OPT4001::Threshold& threshold) {
+  Serial.printf("  %-4s raw=(%u,0x%03X) packed=0x%04X adc=%lu lux=%.6f\n",
+                name,
+                threshold.exponent,
+                threshold.result,
+                packThresholdRaw(threshold),
+                static_cast<unsigned long>(device.thresholdToAdcCodes(threshold)),
+                device.thresholdToLux(threshold));
+}
+
 void printAddressInfo() {
   const OPT4001::Config cfg = device.isInitialized() ? device.getConfig() : makeDefaultConfig();
   Serial.println("=== Addressing ===");
@@ -493,6 +537,7 @@ void printDeviceIdInfo() {
   Serial.printf("  Raw: 0x%04X\n", info.raw);
   Serial.printf("  DIDH: 0x%03X\n", info.didh);
   Serial.printf("  DIDL: %u\n", info.didl);
+  Serial.printf("  Expected DIDH / DIDL: 0x%03X / 0\n", OPT4001::cmd::DIDH_EXPECTED);
   Serial.printf("  Matches expected: %s%s%s\n",
                 info.matchesExpected ? LOG_COLOR_GREEN : LOG_COLOR_RED,
                 log_bool_str(info.matchesExpected),
@@ -516,6 +561,9 @@ void printConfigurationInfo() {
   Serial.printf("  Interrupt latch: %s\n", latchToStr(info.interruptLatch));
   Serial.printf("  Interrupt polarity: %s\n", polarityToStr(info.interruptPolarity));
   Serial.printf("  Fault count: %s\n", faultCountToStr(info.faultCount));
+  Serial.printf("  Full-scale / resolution: %.3f lx / %.9f lx\n",
+                device.getRangeFullScaleLux(info.range),
+                device.getRangeResolutionLux(info.range, info.conversionTime));
   Serial.printf("  Reserved bit set: %s\n", log_bool_str(info.reservedBitSet));
   Serial.printf("  Decode valid: %s\n", log_bool_str(info.valid));
 }
@@ -532,10 +580,21 @@ void printIntConfigurationInfo() {
   Serial.printf("  Raw: 0x%04X\n", info.raw);
   Serial.printf("  INT direction: %s\n", intDirectionToStr(info.intDirection));
   Serial.printf("  INT config: %s\n", intConfigToStr(info.intConfig));
+  Serial.printf("  INT behavior: %s\n", intConfigBehaviorToStr(info.intConfig));
   Serial.printf("  Burst mode: %s\n", log_bool_str(info.burstMode));
   Serial.printf("  Fixed pattern valid: %s\n", log_bool_str(info.fixedPatternValid));
   Serial.printf("  Reserved bit set: %s\n", log_bool_str(info.reservedBitSet));
   Serial.printf("  Decode valid: %s\n", log_bool_str(info.valid));
+  if (info.intDirection == OPT4001::IntDirection::PIN_INPUT) {
+    Serial.printf("  Note: %sboard/application must generate the INT trigger pulse%s\n",
+                  LOG_COLOR_YELLOW,
+                  LOG_COLOR_RESET);
+  }
+  if (!info.valid) {
+    Serial.printf("  Note: %sINT_CFG=2 is reserved/invalid per datasheet%s\n",
+                  LOG_COLOR_RED,
+                  LOG_COLOR_RESET);
+  }
 }
 
 OPT4001::Threshold unpackThreshold(uint16_t raw) {
@@ -555,23 +614,9 @@ void printThresholdLux() {
     return;
   }
 
-  float lowLux = 0.0f;
-  float highLux = 0.0f;
-  st = device.getThresholdsLux(lowLux, highLux);
-  if (!st.ok()) {
-    printStatus(st);
-    return;
-  }
-
   Serial.println("=== Thresholds ===");
-  Serial.printf("  Low:  raw=(%u,0x%03X)  lux=%.6f\n",
-                low.exponent,
-                low.result,
-                lowLux);
-  Serial.printf("  High: raw=(%u,0x%03X)  lux=%.6f\n",
-                high.exponent,
-                high.result,
-                highLux);
+  printThresholdDetails("Low", low);
+  printThresholdDetails("High", high);
 }
 
 void printLiveConfig() {
@@ -585,6 +630,35 @@ void printLiveConfig() {
   printConfigurationInfo();
   printIntConfigurationInfo();
   printThresholdLux();
+}
+
+void printDiagnosticReport() {
+  Serial.println("=== OPT4001 Diagnostic Report ===");
+  printHealthView(device);
+  printDriverHealth();
+  printHealthMonitorState();
+  if (!device.isInitialized()) {
+    Serial.printf("  Note: %sdriver not initialized; register diagnostics skipped%s\n",
+                  LOG_COLOR_YELLOW,
+                  LOG_COLOR_RESET);
+    return;
+  }
+  printAddressInfo();
+  printDeviceIdInfo();
+  printConfigurationInfo();
+  printIntConfigurationInfo();
+  printScale();
+  printThresholdLux();
+  printSampleAge();
+  OPT4001::Sample sample;
+  if (device.getLastSample(sample).ok()) {
+    Serial.println("=== Cached Sample ===");
+    printSample(sample);
+  }
+  printSnapshot();
+  Serial.printf("  FLAGS note: %suse 'status' or 'status_raw' explicitly; FLAGS is clear-on-read%s\n",
+                LOG_COLOR_YELLOW,
+                LOG_COLOR_RESET);
 }
 
 void printScale() {
@@ -609,6 +683,44 @@ void printScale() {
                   device.getRangeFullScaleLux(range),
                   device.getRangeResolutionLux(range, device.getConversionTime()));
   }
+}
+
+void printAdcToLux(uint32_t adcCodes) {
+  Serial.println("=== ADC Codes -> Lux ===");
+  Serial.printf("  Package: %s\n", packageToStr(device.getPackageVariant()));
+  Serial.printf("  ADC codes: %lu\n", static_cast<unsigned long>(adcCodes));
+  Serial.printf("  Lux: %.6f lx\n", device.adcCodesToLux(adcCodes));
+}
+
+void printRawFieldsToLux(uint8_t exponent, uint32_t mantissa) {
+  Serial.println("=== Raw Fields -> Lux ===");
+  Serial.printf("  Package: %s\n", packageToStr(device.getPackageVariant()));
+  Serial.printf("  Exponent / mantissa: %u / 0x%05lX\n",
+                static_cast<unsigned>(exponent),
+                static_cast<unsigned long>(mantissa));
+  Serial.printf("  ADC codes: %lu\n",
+                static_cast<unsigned long>(mantissa << exponent));
+  Serial.printf("  Lux: %.6f lx\n", device.rawToLux(exponent, mantissa));
+}
+
+void printThresholdEncodingFromLux(float lux) {
+  OPT4001::Threshold threshold;
+  OPT4001::Status st = device.luxToThreshold(lux, threshold);
+  if (!st.ok()) {
+    printStatus(st);
+    return;
+  }
+
+  Serial.println("=== Threshold Encode ===");
+  Serial.printf("  Input lux: %.6f lx\n", lux);
+  printThresholdDetails("Calc", threshold);
+}
+
+void printThresholdDecodingFromRaw(uint16_t raw) {
+  const OPT4001::Threshold threshold = unpackThreshold(raw);
+  Serial.println("=== Threshold Decode ===");
+  Serial.printf("  Raw register: 0x%04X\n", raw);
+  printThresholdDetails("Calc", threshold);
 }
 
 bool rebeginWithConfig(const OPT4001::Config& cfg) {
@@ -710,6 +822,16 @@ void printFlagsDecoded() {
                 yesNoColor(flags.lowThreshold),
                 flags.lowThreshold ? "YES" : "NO",
                 LOG_COLOR_RESET);
+  if (flags.overload) {
+    Serial.printf("  Hint: %smanual-range operation may need a higher range; auto-range should recover on the next conversion%s\n",
+                  LOG_COLOR_YELLOW,
+                  LOG_COLOR_RESET);
+  }
+  if (flags.highThreshold || flags.lowThreshold) {
+    Serial.printf("  Threshold mode: latch=%s int_cfg=%s\n",
+                  latchToStr(device.getInterruptLatch()),
+                  intConfigBehaviorToStr(device.getIntConfig()));
+  }
   Serial.printf("  Note: %sreading FLAGS clears latched flags on the device%s\n",
                 LOG_COLOR_YELLOW,
                 LOG_COLOR_RESET);
@@ -762,8 +884,16 @@ void runStress(int32_t count) {
   uint32_t okCount = 0;
   uint32_t warnCount = 0;
   uint32_t failCount = 0;
+  uint32_t counterGapCount = 0;
   bool hasWarn = false;
   bool hasFail = false;
+  bool haveSample = false;
+  bool havePrevCounter = false;
+  float minLux = 0.0f;
+  float maxLux = 0.0f;
+  uint32_t minAdc = 0U;
+  uint32_t maxAdc = 0U;
+  uint8_t prevCounter = 0U;
   OPT4001::Status firstWarn = OPT4001::Status::Ok();
   OPT4001::Status lastWarn = OPT4001::Status::Ok();
   OPT4001::Status firstFail = OPT4001::Status::Ok();
@@ -772,11 +902,33 @@ void runStress(int32_t count) {
   before.capture(device);
   const uint32_t startMs = millis();
 
+  auto recordSampleStats = [&](const OPT4001::Sample& sample) {
+    if (!haveSample) {
+      haveSample = true;
+      minLux = sample.lux;
+      maxLux = sample.lux;
+      minAdc = sample.adcCodes;
+      maxAdc = sample.adcCodes;
+    } else {
+      if (sample.lux < minLux) minLux = sample.lux;
+      if (sample.lux > maxLux) maxLux = sample.lux;
+      if (sample.adcCodes < minAdc) minAdc = sample.adcCodes;
+      if (sample.adcCodes > maxAdc) maxAdc = sample.adcCodes;
+    }
+
+    if (havePrevCounter && device.sampleCounterDelta(prevCounter, sample.counter) != 1U) {
+      counterGapCount++;
+    }
+    prevCounter = sample.counter;
+    havePrevCounter = true;
+  };
+
   for (int32_t i = 0; i < count; ++i) {
     OPT4001::Sample sample;
     OPT4001::Status st = device.readBlocking(sample, BLOCKING_READ_TIMEOUT_MS);
     if (st.ok()) {
       okCount++;
+      recordSampleStats(sample);
       LOGV(verboseMode, "[%ld] lux=%.6f adc=%lu ctr=%u",
            static_cast<long>(i + 1),
            sample.lux,
@@ -784,6 +936,7 @@ void runStress(int32_t count) {
            sample.counter);
     } else if (sampleStatusWarn(st)) {
       warnCount++;
+      recordSampleStats(sample);
       if (!hasWarn) {
         firstWarn = st;
         hasWarn = true;
@@ -839,6 +992,16 @@ void runStress(int32_t count) {
     Serial.printf("  Rate: %.2f ops/s\n",
                   (1000.0f * static_cast<float>(count)) / static_cast<float>(elapsedMs));
   }
+  if (haveSample) {
+    Serial.printf("  Lux range: %.6f .. %.6f lx\n", minLux, maxLux);
+    Serial.printf("  ADC range: %lu .. %lu\n",
+                  static_cast<unsigned long>(minAdc),
+                  static_cast<unsigned long>(maxAdc));
+    Serial.printf("  Counter gaps: %s%lu%s\n",
+                  warnCountColor(counterGapCount),
+                  static_cast<unsigned long>(counterGapCount),
+                  LOG_COLOR_RESET);
+  }
   Serial.println("  Health changes:");
   printHealthDiff(before, after);
 
@@ -882,8 +1045,15 @@ void runStressMix(int32_t count) {
   uint32_t okCount = 0;
   uint32_t warnCount = 0;
   uint32_t failCount = 0;
+  uint32_t probeSideEffectCount = 0;
   bool hasWarn = false;
   bool hasFail = false;
+  bool haveSample = false;
+  bool havePrevCounter = false;
+  float minLux = 0.0f;
+  float maxLux = 0.0f;
+  uint32_t counterGapCount = 0;
+  uint8_t prevCounter = 0U;
   OPT4001::Status firstWarn = OPT4001::Status::Ok();
   OPT4001::Status lastWarn = OPT4001::Status::Ok();
   OPT4001::Status firstFail = OPT4001::Status::Ok();
@@ -918,6 +1088,23 @@ void runStressMix(int32_t count) {
     lastFail = st;
   };
 
+  auto recordSampleStats = [&](const OPT4001::Sample& sample) {
+    if (!haveSample) {
+      haveSample = true;
+      minLux = sample.lux;
+      maxLux = sample.lux;
+    } else {
+      if (sample.lux < minLux) minLux = sample.lux;
+      if (sample.lux > maxLux) maxLux = sample.lux;
+    }
+
+    if (havePrevCounter && device.sampleCounterDelta(prevCounter, sample.counter) != 1U) {
+      counterGapCount++;
+    }
+    prevCounter = sample.counter;
+    havePrevCounter = true;
+  };
+
   for (int32_t i = 0; i < count; ++i) {
     const size_t op = static_cast<size_t>(i) % opCount;
     OPT4001::Status st = OPT4001::Status::Ok();
@@ -926,16 +1113,25 @@ void runStressMix(int32_t count) {
       case 0: {
         OPT4001::Sample sample;
         st = device.readBlocking(sample, BLOCKING_READ_TIMEOUT_MS);
+        if (sampleStatusHasData(st)) {
+          recordSampleStats(sample);
+        }
         break;
       }
       case 1: {
         OPT4001::BurstFrame frame;
         st = device.readBurst(frame);
+        if (sampleStatusHasData(st)) {
+          recordSampleStats(frame.newest);
+        }
         break;
       }
       case 2: {
         OPT4001::Sample sample;
         st = device.readSampleSlot(0, sample);
+        if (sampleStatusHasData(st)) {
+          recordSampleStats(sample);
+        }
         break;
       }
       case 3: {
@@ -959,7 +1155,20 @@ void runStressMix(int32_t count) {
         break;
       }
       case 7: {
+        HealthSnapshot<OPT4001::OPT4001> probeBefore;
+        probeBefore.capture(device);
         st = device.probe();
+        HealthSnapshot<OPT4001::OPT4001> probeAfter;
+        probeAfter.capture(device);
+        if (probeBefore.state != probeAfter.state ||
+            probeBefore.online != probeAfter.online ||
+            probeBefore.consecutiveFailures != probeAfter.consecutiveFailures ||
+            probeBefore.totalFailures != probeAfter.totalFailures ||
+            probeBefore.totalSuccess != probeAfter.totalSuccess) {
+          probeSideEffectCount++;
+          LOGV(verboseMode, "[%ld] probe changed tracked health unexpectedly",
+               static_cast<long>(i + 1));
+        }
         break;
       }
       default:
@@ -1007,6 +1216,17 @@ void runStressMix(int32_t count) {
     Serial.printf("  Rate: %.2f ops/s\n",
                   (1000.0f * static_cast<float>(count)) / static_cast<float>(elapsedMs));
   }
+  if (haveSample) {
+    Serial.printf("  Sample lux range: %.6f .. %.6f lx\n", minLux, maxLux);
+    Serial.printf("  Sample counter gaps: %s%lu%s\n",
+                  warnCountColor(counterGapCount),
+                  static_cast<unsigned long>(counterGapCount),
+                  LOG_COLOR_RESET);
+  }
+  Serial.printf("  Probe side effects: %s%lu%s\n",
+                goodIfZeroColor(probeSideEffectCount),
+                static_cast<unsigned long>(probeSideEffectCount),
+                LOG_COLOR_RESET);
   for (size_t i = 0; i < opCount; ++i) {
     Serial.printf("  %-12s %sok=%lu%s %swarn=%lu%s %sfail=%lu%s\n",
                   stats[i].name,
@@ -1098,12 +1318,23 @@ void runSelfTest() {
   reportCheck("probe responds", pst.ok(), pst.ok() ? "" : errToStr(pst.code));
   reportCheck("probe no-health-side-effects", probeHealthUnchanged, "");
 
+  uint16_t didRaw = 0;
+  OPT4001::Status st = device.readDeviceId(didRaw);
+  reportCheck("readDeviceId(raw)", st.ok(), st.ok() ? "" : errToStr(st.code));
+  if (st.ok()) {
+    reportCheck("device id raw expected", didRaw == OPT4001::cmd::DEVICE_ID_RESET, "");
+  }
+
   OPT4001::DeviceIdInfo did;
-  OPT4001::Status st = device.readDeviceId(did);
+  st = device.readDeviceId(did);
   reportCheck("readDeviceId(decoded)", st.ok(), st.ok() ? "" : errToStr(st.code));
   if (st.ok()) {
     reportCheck("device id matches", did.matchesExpected, "");
   }
+
+  uint16_t cfgRaw = 0;
+  st = device.readConfiguration(cfgRaw);
+  reportCheck("readConfiguration(raw)", st.ok(), st.ok() ? "" : errToStr(st.code));
 
   OPT4001::ConfigurationInfo cfgInfo;
   st = device.readConfiguration(cfgInfo);
@@ -1112,6 +1343,10 @@ void runSelfTest() {
     reportCheck("configuration decode valid", cfgInfo.valid, "");
   }
 
+  uint16_t intCfgRaw = 0;
+  st = device.readIntConfiguration(intCfgRaw);
+  reportCheck("readIntConfiguration(raw)", st.ok(), st.ok() ? "" : errToStr(st.code));
+
   OPT4001::IntConfigurationInfo intInfo;
   st = device.readIntConfiguration(intInfo);
   reportCheck("readIntConfiguration(decoded)", st.ok(), st.ok() ? "" : errToStr(st.code));
@@ -1119,6 +1354,10 @@ void runSelfTest() {
     reportCheck("intcfg decode valid", intInfo.valid, "");
     reportCheck("intcfg fixed pattern valid", intInfo.fixedPatternValid, "");
   }
+
+  uint8_t regBlock[8] = {};
+  st = device.readRegisters(OPT4001::cmd::REG_RESULT, regBlock, sizeof(regBlock));
+  reportCheck("readRegisters(0x00,8)", st.ok(), st.ok() ? "" : errToStr(st.code));
 
   OPT4001::Threshold low;
   OPT4001::Threshold high;
@@ -1140,6 +1379,21 @@ void runSelfTest() {
   reportCheck("readBlocking", sampleStatusHasData(st), sampleStatusHasData(st) ? "" : errToStr(st.code));
   if (sampleStatusHasData(st)) {
     reportCheck("sample lux non-negative", sample.lux >= 0.0f, "");
+    const float helperLux = device.adcCodesToLux(sample.adcCodes);
+    const float rawLux = device.rawToLux(sample.exponent, sample.mantissa);
+    const float tol = (sample.lux * 0.000001f) + 0.000001f;
+    const float adcDiff = (helperLux >= sample.lux) ? (helperLux - sample.lux) : (sample.lux - helperLux);
+    const float rawDiff = (rawLux >= sample.lux) ? (rawLux - sample.lux) : (sample.lux - rawLux);
+    reportCheck("adcCodesToLux matches sample", adcDiff <= tol, "");
+    reportCheck("rawToLux matches sample", rawDiff <= tol, "");
+
+    OPT4001::Threshold encodedThreshold;
+    OPT4001::Status helperSt = device.luxToThreshold(sample.lux, encodedThreshold);
+    reportCheck("luxToThreshold", helperSt.ok(), helperSt.ok() ? "" : errToStr(helperSt.code));
+    if (helperSt.ok()) {
+      reportCheck("threshold helper packs 12-bit result", encodedThreshold.result <= 0x0FFFu, "");
+      reportCheck("threshold roundtrip sane", device.thresholdToLux(encodedThreshold) >= 0.0f, "");
+    }
   }
 
   OPT4001::Sample cached;
@@ -1215,6 +1469,8 @@ void printHelp() {
   item("slot <0..3>", "Read one history slot (0=newest)");
   item("sample / sampleage", "Cached sample and age");
   item("lux / mlux / ulux", "Read scaled lux helpers");
+  item("adc2lux <codes>", "Convert linearized ADC codes to lux");
+  item("raw2lux <exp> <mant>", "Convert raw exponent(0..8)/mantissa fields to lux");
   item("scale / timing", "Show package scaling and timing helpers");
 
   section("Configuration");
@@ -1233,6 +1489,8 @@ void printHelp() {
   item("burst [0|1]", "Set or show I2C burst mode");
   item("threshold [low high]", "Read or set thresholds in lux");
   item("threshold raw <low> <high>", "Set thresholds from raw 16-bit register values");
+  item("thcalc <lux>", "Calculate threshold register fields for lux");
+  item("thdecode <raw16>", "Decode packed threshold register value");
   item("int latch|pol|faults|dir|cfg ...", "Interrupt configuration");
 
   section("Registers");
@@ -1246,13 +1504,15 @@ void printHelp() {
   item("wreg <addr> <val>", "Write 16-bit register");
 
   section("Diagnostics");
-  item("drv", "Show driver state and health");
+  item("drv / health", "Show driver state and health");
   item("state", "Show compact one-line health summary");
+  item("diag", "Print consolidated diagnostic report");
   item("online", "Show online/offline state");
   item("probe", "Probe device (no health tracking)");
   item("recover", "Manual recovery attempt");
   item("reset", "General-call reset (bus-wide)");
   item("resetreapply", "General-call reset + re-apply");
+  item("healthmon [0|1] [interval]", "Toggle periodic health monitor output");
   item("verbose [0|1]", "Enable/disable verbose output");
   item("stress [N]", "Run blocking read stress");
   item("stress_mix [N]", "Run mixed-operation stress");
@@ -1315,8 +1575,9 @@ void processCommand(const String& cmdLine) {
     (void)rebeginWithConfig(cfg);
     return;
   }
-  if (cmd == "drv") { printDriverHealth(); return; }
+  if (cmd == "drv" || cmd == "health") { printDriverHealth(); return; }
   if (cmd == "state") { printHealthView(device); return; }
+  if (cmd == "diag") { printDiagnosticReport(); return; }
   if (cmd == "online") {
     const bool online = device.isOnline();
     Serial.printf("  Online: %s%s%s\n",
@@ -1533,6 +1794,32 @@ void processCommand(const String& cmdLine) {
     }
     return;
   }
+  if (cmd.startsWith("adc2lux ")) {
+    uint32_t adcCodes = 0;
+    if (!parseU32(cmd.substring(8), adcCodes)) {
+      LOGW("Usage: adc2lux <adcCodes>");
+      return;
+    }
+    printAdcToLux(adcCodes);
+    return;
+  }
+  if (cmd.startsWith("raw2lux ")) {
+    String args = cmd.substring(8);
+    args.trim();
+    const int split = args.indexOf(' ');
+    uint32_t exponent = 0;
+    uint32_t mantissa = 0;
+    if (split < 0 ||
+        !parseU32(args.substring(0, split), exponent) ||
+        !parseU32(args.substring(split + 1), mantissa) ||
+        exponent > 8U ||
+        mantissa > 0xFFFFFu) {
+      LOGW("Usage: raw2lux <exp0..8> <mant0..0xFFFFF>");
+      return;
+    }
+    printRawFieldsToLux(static_cast<uint8_t>(exponent), mantissa);
+    return;
+  }
   if (cmd == "scale" || cmd == "timing") { printScale(); return; }
   if (cmd == "mode") { Serial.printf("  Mode: %s\n", modeToStr(device.getMode())); return; }
   if (cmd.startsWith("mode ")) {
@@ -1670,6 +1957,24 @@ void processCommand(const String& cmdLine) {
     printStatus(device.setThresholdsLux(low, high));
     return;
   }
+  if (cmd.startsWith("thcalc ")) {
+    float lux = 0.0f;
+    if (!parseF32(cmd.substring(7), lux)) {
+      LOGW("Usage: thcalc <lux>");
+      return;
+    }
+    printThresholdEncodingFromLux(lux);
+    return;
+  }
+  if (cmd.startsWith("thdecode ")) {
+    uint32_t raw = 0;
+    if (!parseU32(cmd.substring(9), raw) || raw > 0xFFFFu) {
+      LOGW("Usage: thdecode <0..0xFFFF>");
+      return;
+    }
+    printThresholdDecodingFromRaw(static_cast<uint16_t>(raw));
+    return;
+  }
   if (cmd.startsWith("int latch ")) {
     bool value = false;
     if (!parseBool01(cmd.substring(10), value)) {
@@ -1804,6 +2109,37 @@ void processCommand(const String& cmdLine) {
     printStatus(device.writeRegister16(static_cast<uint8_t>(addr), static_cast<uint16_t>(value)));
     return;
   }
+  if (cmd == "healthmon") {
+    printHealthMonitorState();
+    return;
+  }
+  if (cmd.startsWith("healthmon ")) {
+    String args = cmd.substring(10);
+    args.trim();
+    const int split = args.indexOf(' ');
+    bool enable = false;
+    uint32_t intervalMs = healthMonitorIntervalMs;
+    if (split < 0) {
+      if (!parseBool01(args, enable)) {
+        LOGW("Usage: healthmon [0|1] [intervalMs]");
+        return;
+      }
+    } else {
+      if (!parseBool01(args.substring(0, split), enable) ||
+          !parseU32(args.substring(split + 1), intervalMs)) {
+        LOGW("Usage: healthmon [0|1] [intervalMs]");
+        return;
+      }
+    }
+    healthMonitorEnabled = enable;
+    healthMonitorIntervalMs = intervalMs;
+    if (healthMonitorEnabled) {
+      healthMonitor.begin(healthMonitorIntervalMs);
+      healthMonitor.tick(device, true);
+    }
+    printHealthMonitorState();
+    return;
+  }
   if (cmd == "verbose") {
     LOGI("Verbose mode: %s%s%s", onOffColor(verboseMode), verboseMode ? "ON" : "OFF", LOG_COLOR_RESET);
     return;
@@ -1874,6 +2210,9 @@ void setup() {
 
 void loop() {
   device.tick(millis());
+  if (healthMonitorEnabled) {
+    healthMonitor.tick(device);
+  }
   static String inputBuffer;
   static constexpr size_t kMaxInputLen = 128;
   while (Serial.available()) {
