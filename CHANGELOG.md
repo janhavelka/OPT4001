@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Expanded the bring-up CLI again to cover decoded ID/config output, address switching,
   raw register-block reads, per-slot history reads, scaled lux helpers, threshold lux
   reporting, and scale/timing diagnostics.
+- Standardized the bring-up CLI on the stronger family patterns for colored health
+  reporting, `state` / `status` diagnostics, richer stress and stress-mix summaries,
+  deeper selftest coverage, and raw threshold programming.
 - Corrected the modeled `FLAGS` semantics so write-to-clear affects only
   `CONVERSION_READY_FLAG`, while full sticky-flag clearing follows the datasheet's
   clear-on-read behavior.

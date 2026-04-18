@@ -28,18 +28,22 @@ MANDATORY_COMMANDS = [
     "probe",
     "recover",
     "drv",
+    "state",
     "read",
     "addr",
     "scale",
     "slot",
     "config",
     "intcfg",
+    "status",
     "flags",
     "regs",
     "reset",
+    "resetreapply",
     "selftest",
     "verbose",
     "stress",
+    "stress_mix",
 ]
 
 

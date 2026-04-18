@@ -218,11 +218,11 @@ void loop() {
 
 - `examples/01_basic_bringup_cli/`
   - interactive bring-up shell
-  - scan, probe, recover, reset, reset-and-reapply, and runtime address selection
-  - decoded config / intcfg / flags / device-ID readback
-  - one-shot reads, burst FIFO reads, single-slot history reads, cached-sample inspection, stress/selftest
-  - lux / milli-lux / micro-lux commands plus scale / timing diagnostics
-  - threshold and interrupt configuration, plus raw register and raw block access
+  - scan, probe, recover, reset, reset-and-reapply, compact state view, and runtime address selection
+  - decoded config / intcfg / flags / status / device-ID readback with colored health reporting
+  - one-shot reads, burst FIFO reads, single-slot history reads, cached-sample inspection, stress, stress-mix, and selftest
+  - lux / milli-lux / micro-lux commands plus scale / timing diagnostics and per-range scale table
+  - threshold lux helpers, raw threshold programming, interrupt configuration, and raw register / block access
 - `examples/common/`
   - board config and serial logging helpers
   - I2C transport adapter and bus scanner
@@ -236,6 +236,9 @@ void loop() {
   or `resetAndReapply()` is used.
 - `flags readyclear` uses the write-to-clear-ready path, while `flags` and
   `flags clear` use the register read path that also clears latched threshold flags.
+- `status` / `status_raw` are CLI aliases for the decoded and raw `FLAGS` views.
+- `threshold raw <low> <high>` accepts packed 16-bit threshold register values for
+  register-level bring-up, while `threshold <lowLux> <highLux>` uses the lux helpers.
 - The example defaults to the SOT-5X3 package path. For PicoStar, switch the
   package variant and leave the INT hook disabled.
 
