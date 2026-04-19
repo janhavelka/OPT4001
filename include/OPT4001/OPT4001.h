@@ -176,6 +176,12 @@ public:
   Status readBlocking(Sample& out, Mode mode, uint32_t timeoutMs);
   Status readBlockingLux(float& lux, uint32_t timeoutMs = 1000);
   Status readBlockingLux(float& lux, Mode mode, uint32_t timeoutMs);
+  /// Poll-friendly helper: returns OK with didRead=false if no sample is ready yet.
+  /// If a sample was read successfully, or read with CRC warning, didRead is set true.
+  Status tryReadSample(Sample& out, bool& didRead);
+  /// Poll-friendly helper returning lux directly without treating "not ready" as an error.
+  /// If a sample was read successfully, or read with CRC warning, didRead is set true.
+  Status tryReadLux(float& lux, bool& didRead);
 
   // === Flags / Status ===
   /// Read FLAGS register. Reading register 0x0C clears latched flags and ready flag.
@@ -228,6 +234,18 @@ public:
   Status getThresholds(Threshold& low, Threshold& high);
   Status getThresholdsLux(float& lowLux, float& highLux);
   Status setThresholdsLux(float lowLux, float highLux);
+  /// Apply range / conversion-time / stable-mode / quick-wake together in one coherent update.
+  Status configureMeasurement(Range range, ConversionTime time, Mode mode, bool quickWake = false);
+  /// Restore threshold registers to their documented reset defaults.
+  Status restoreDefaultThresholds();
+  /// Convenience helper for common output-mode threshold interrupt use.
+  Status enableThresholdInterrupt(const Threshold& low, const Threshold& high);
+  /// Convenience helper for common output-mode threshold interrupt use with lux values.
+  Status enableThresholdInterruptLux(float lowLux, float highLux);
+  /// Configure INT as an output pulse after every conversion.
+  Status enableConversionReadyInterrupt();
+  /// Configure INT as an output pulse when the 4-deep FIFO window is full.
+  Status enableFifoFullInterrupt();
 
   Status readConfiguration(uint16_t& value);
   Status readConfiguration(ConfigurationInfo& out);

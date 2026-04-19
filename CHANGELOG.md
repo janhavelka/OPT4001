@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `IntConfigurationInfo`, `readRegisters()`, `readSampleSlot()`,
   `getThresholdsLux()`, `clearConversionReadyFlag()`, full-scale / resolution helpers,
   and sample-counter delta math.
+- End-user convenience helpers: `configureMeasurement()`, `tryReadSample()`,
+  `tryReadLux()`, `restoreDefaultThresholds()`, and interrupt preset helpers for
+  threshold, conversion-ready, and FIFO-full modes.
 - Broader native coverage for reset, CRC-policy, sample-cache, and device-ID paths.
 
 ### Changed
@@ -34,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Corrected the modeled `FLAGS` semantics so write-to-clear affects only
   `CONVERSION_READY_FLAG`, while full sticky-flag clearing follows the datasheet's
   clear-on-read behavior.
+- Corrected the scaled non-blocking read helpers so `CRC_ERROR` still returns the
+  decoded lux / milli-lux / micro-lux outputs to the caller.
 - Tightened the CLI contract check so the richer diagnostic commands remain present.
 - Updated README and assumptions to document the bus-wide reset path and the intentionally omitted controller/application-layer behaviors.
 

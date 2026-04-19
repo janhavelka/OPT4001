@@ -147,10 +147,18 @@ void loop() {
   libraries: reset the device, then restore the cached configuration.
 - `readSample()`, `readBurst()`, and the blocking helpers may return `CRC_ERROR`
   while still populating the decoded sample data.
+- `readLux()`, `readMilliLux()`, `readMicroLux()`, and `tryReadLux()` follow the
+  same rule: on `CRC_ERROR`, the scaled output value is still written.
 - `readSampleSlot(0..3)` provides direct access to the newest sample plus the
   three FIFO shadow samples without forcing a full burst decode.
 - `getLastSample()` / `sampleTimestampMs()` / `sampleAgeMs()` provide RAM-only
   access to the last successfully decoded sample.
+- `tryReadSample()` / `tryReadLux()` are intended for cooperative polling loops:
+  they return `OK` with `didRead=false` when no sample is ready yet, so the
+  application does not have to treat `MEASUREMENT_NOT_READY` as control flow.
+- `configureMeasurement()` applies range, conversion time, quick-wake, and the
+  stable operating mode in one coherent update while still using the same cached
+  config model and injected transport.
 - `readFlags()` reads register `0x0C`; that register is clear-on-read on the device.
 - `clearConversionReadyFlag()` performs the datasheet's write-nonzero clear of
   only `CONVERSION_READY_FLAG`, while `clearFlags()` uses the clear-on-read path
@@ -160,6 +168,13 @@ void loop() {
 - Decoded register helpers (`DeviceIdInfo`, `ConfigurationInfo`,
   `IntConfigurationInfo`) are available so bring-up code does not need to unpack
   bit fields manually.
+- Interrupt preset helpers (`enableThresholdInterrupt*()`,
+  `enableConversionReadyInterrupt()`, `enableFifoFullInterrupt()`) are convenience
+  wrappers over the existing register model; they do not take ownership of GPIOs,
+  alert handling, or the I2C transport.
+- The threshold-interrupt convenience helpers reject inverted windows
+  (`low > high`) up front; the lower-level raw threshold setters remain available
+  when an application really needs exact register control.
 
 ## Public Surface
 
@@ -192,14 +207,19 @@ void loop() {
 - `readMicroLux(uint64_t&)`
 - `readBlocking(...)`
 - `readBlockingLux(...)`
+- `tryReadSample(Sample&, bool&)`
+- `tryReadLux(float&, bool&)`
 
 ### Configuration And Raw Access
 
 - `setRange()`, `setConversionTime()`, `setMode()`, `setQuickWake()`, `setVerifyCrc()`
+- `configureMeasurement(range, time, mode, quickWake)`
 - `setInterruptLatch()`, `setInterruptPolarity()`, `setFaultCount()`
 - `setIntDirection()`, `setIntConfig()`, `setBurstMode()`
 - `setThresholds()`, `getThresholds()`, `setThresholdsLux()`
-- `getThresholdsLux()`
+- `getThresholdsLux()`, `restoreDefaultThresholds()`
+- `enableThresholdInterrupt(...)`, `enableThresholdInterruptLux(...)`
+- `enableConversionReadyInterrupt()`, `enableFifoFullInterrupt()`
 - `readConfiguration(...)`, `writeConfiguration()`
 - `readIntConfiguration(...)`, `writeIntConfiguration()`
 - `readFlags()`, `readFlagsRaw()`, `clearConversionReadyFlag()`, `clearFlags()`

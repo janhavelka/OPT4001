@@ -437,6 +437,38 @@ void test_crc_mismatch_allowed_when_verification_disabled() {
   TEST_ASSERT_FALSE(sample.crcValid);
 }
 
+void test_lux_helpers_preserve_outputs_on_crc_warning() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  seedSample(bus, cmd::REG_RESULT, 1, 0x12345, 6, false);
+  bus.nowMs += 150;
+  dev.tick(bus.nowMs);
+
+  const uint32_t adcCodes = 0x12345u << 1U;
+  const float expectedLux = dev.adcCodesToLux(adcCodes);
+  const uint64_t expectedMicroLux =
+      (static_cast<uint64_t>(adcCodes) * cmd::MICRO_LUX_NUMERATOR_SOT_5X3 + 5ULL) / 10ULL;
+
+  float lux = 0.0f;
+  Status st = dev.readLux(lux);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::CRC_ERROR), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_FLOAT_WITHIN(0.001f, expectedLux, lux);
+
+  uint64_t microLux = 0;
+  st = dev.readMicroLux(microLux);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::CRC_ERROR), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT64(expectedMicroLux, microLux);
+
+  uint32_t milliLux = 0;
+  st = dev.readMilliLux(milliLux);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::CRC_ERROR), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>((expectedMicroLux + 500ULL) / 1000ULL), milliLux);
+}
+
 void test_read_burst_decodes_fifo() {
   FakeBus bus;
   OPT4001::OPT4001 dev;
@@ -656,6 +688,43 @@ void test_read_register_block_and_sample_slot_helpers() {
   TEST_ASSERT_EQUAL_UINT32(0x33333u, slot.mantissa);
 }
 
+void test_try_read_helpers_report_not_ready_without_error() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  Sample sample;
+  bool didRead = true;
+  Status st = dev.tryReadSample(sample, didRead);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_FALSE(didRead);
+
+  float lux = -1.0f;
+  didRead = true;
+  st = dev.tryReadLux(lux, didRead);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_FALSE(didRead);
+  TEST_ASSERT_FLOAT_WITHIN(0.0f, -1.0f, lux);
+
+  seedSample(bus, cmd::REG_RESULT, 0, 0x23456, 5, true);
+  bus.nowMs += 150;
+  dev.tick(bus.nowMs);
+
+  st = dev.tryReadSample(sample, didRead);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_TRUE(didRead);
+  TEST_ASSERT_EQUAL_UINT32(0x23456u, sample.mantissa);
+
+  didRead = false;
+  lux = 0.0f;
+  st = dev.tryReadLux(lux, didRead);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_TRUE(didRead);
+  TEST_ASSERT_TRUE(lux > 0.0f);
+}
+
 void test_scale_and_counter_helpers() {
   FakeBus bus;
   OPT4001::OPT4001 dev;
@@ -670,6 +739,89 @@ void test_scale_and_counter_helpers() {
 
   TEST_ASSERT_TRUE(dev.setPackageVariant(PackageVariant::PICOSTAR).ok());
   TEST_ASSERT_FLOAT_WITHIN(0.01f, 328.0f, dev.getRangeFullScaleLux(Range::RANGE_0));
+}
+
+void test_configuration_and_interrupt_convenience_helpers() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  Status st = dev.configureMeasurement(Range::RANGE_2,
+                                       ConversionTime::MS_25,
+                                       Mode::CONTINUOUS,
+                                       true);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_TRUE(dev.getQuickWake());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Range::RANGE_2),
+                          static_cast<uint8_t>(dev.getRange()));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ConversionTime::MS_25),
+                          static_cast<uint8_t>(dev.getConversionTime()));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Mode::CONTINUOUS),
+                          static_cast<uint8_t>(dev.getMode()));
+
+  uint16_t cfgReg = 0;
+  TEST_ASSERT_TRUE(dev.readConfiguration(cfgReg).ok());
+  TEST_ASSERT_NOT_EQUAL(0u, cfgReg & cmd::MASK_QWAKE);
+  TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(Range::RANGE_2),
+                           static_cast<uint16_t>((cfgReg & cmd::MASK_RANGE) >> cmd::BIT_RANGE));
+  TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(ConversionTime::MS_25),
+                           static_cast<uint16_t>((cfgReg & cmd::MASK_CONVERSION_TIME) >>
+                                                 cmd::BIT_CONVERSION_TIME));
+  TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(Mode::CONTINUOUS),
+                           static_cast<uint16_t>((cfgReg & cmd::MASK_MODE) >> cmd::BIT_MODE));
+
+  TEST_ASSERT_TRUE(dev.enableConversionReadyInterrupt().ok());
+  uint16_t intCfgReg = 0;
+  TEST_ASSERT_TRUE(dev.readIntConfiguration(intCfgReg).ok());
+  TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(IntDirection::PIN_OUTPUT),
+                           static_cast<uint16_t>((intCfgReg & cmd::MASK_INT_DIR) >>
+                                                 cmd::BIT_INT_DIR));
+  TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(IntConfig::EVERY_CONVERSION),
+                           static_cast<uint16_t>((intCfgReg & cmd::MASK_INT_CFG) >>
+                                                 cmd::BIT_INT_CFG));
+
+  TEST_ASSERT_TRUE(dev.enableFifoFullInterrupt().ok());
+  TEST_ASSERT_TRUE(dev.readIntConfiguration(intCfgReg).ok());
+  TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(IntConfig::FIFO_FULL),
+                           static_cast<uint16_t>((intCfgReg & cmd::MASK_INT_CFG) >>
+                                                 cmd::BIT_INT_CFG));
+
+  Threshold low{1, 0x0020};
+  Threshold high{2, 0x0100};
+  TEST_ASSERT_TRUE(dev.enableThresholdInterrupt(low, high).ok());
+  TEST_ASSERT_TRUE(dev.readIntConfiguration(intCfgReg).ok());
+  TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(IntConfig::THRESHOLD),
+                           static_cast<uint16_t>((intCfgReg & cmd::MASK_INT_CFG) >>
+                                                 cmd::BIT_INT_CFG));
+
+  Threshold lowRead;
+  Threshold highRead;
+  TEST_ASSERT_TRUE(dev.getThresholds(lowRead, highRead).ok());
+  TEST_ASSERT_EQUAL_UINT8(low.exponent, lowRead.exponent);
+  TEST_ASSERT_EQUAL_UINT16(low.result, lowRead.result);
+  TEST_ASSERT_EQUAL_UINT8(high.exponent, highRead.exponent);
+  TEST_ASSERT_EQUAL_UINT16(high.result, highRead.result);
+
+  st = dev.enableThresholdInterruptLux(5.0f, 50.0f);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_TRUE(dev.getThresholds(lowRead, highRead).ok());
+  TEST_ASSERT_TRUE(dev.thresholdToLux(highRead) > dev.thresholdToLux(lowRead));
+
+  st = dev.enableThresholdInterruptLux(50.0f, 5.0f);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM), static_cast<uint8_t>(st.code));
+
+  TEST_ASSERT_TRUE(dev.restoreDefaultThresholds().ok());
+  TEST_ASSERT_TRUE(dev.getThresholds(lowRead, highRead).ok());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>((cmd::THRESHOLD_L_RESET & cmd::MASK_THRESHOLD_EXPONENT) >>
+                                               cmd::BIT_THRESHOLD_EXPONENT),
+                          lowRead.exponent);
+  TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(cmd::THRESHOLD_L_RESET & cmd::MASK_THRESHOLD_RESULT),
+                           lowRead.result);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>((cmd::THRESHOLD_H_RESET & cmd::MASK_THRESHOLD_EXPONENT) >>
+                                               cmd::BIT_THRESHOLD_EXPONENT),
+                          highRead.exponent);
+  TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(cmd::THRESHOLD_H_RESET & cmd::MASK_THRESHOLD_RESULT),
+                           highRead.result);
 }
 
 void test_soft_reset_moves_driver_to_uninit() {
@@ -757,6 +909,7 @@ int main() {
   RUN_TEST(test_read_sample_decodes_lux_and_crc);
   RUN_TEST(test_crc_mismatch_returns_error_when_enabled);
   RUN_TEST(test_crc_mismatch_allowed_when_verification_disabled);
+  RUN_TEST(test_lux_helpers_preserve_outputs_on_crc_warning);
   RUN_TEST(test_read_burst_decodes_fifo);
   RUN_TEST(test_read_burst_nonburst_path_decodes_fifo);
   RUN_TEST(test_set_thresholds_lux_updates_threshold_registers);
@@ -769,7 +922,9 @@ int main() {
   RUN_TEST(test_set_verify_crc_updates_cached_setting);
   RUN_TEST(test_decoded_register_helpers);
   RUN_TEST(test_read_register_block_and_sample_slot_helpers);
+  RUN_TEST(test_try_read_helpers_report_not_ready_without_error);
   RUN_TEST(test_scale_and_counter_helpers);
+  RUN_TEST(test_configuration_and_interrupt_convenience_helpers);
   RUN_TEST(test_soft_reset_moves_driver_to_uninit);
   RUN_TEST(test_reset_and_reapply_restores_ready_and_config);
   RUN_TEST(test_raw_transport_rejects_invalid_buffers);

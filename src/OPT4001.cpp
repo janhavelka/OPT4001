@@ -538,27 +538,27 @@ uint32_t OPT4001::sampleAgeMs(uint32_t nowMs) const {
 Status OPT4001::readLux(float& lux) {
   Sample sample;
   Status st = readSample(sample);
-  if (!st.ok()) {
+  if (!st.ok() && st.code != Err::CRC_ERROR) {
     return st;
   }
   lux = sample.lux;
-  return Status::Ok();
+  return st;
 }
 
 Status OPT4001::readMilliLux(uint32_t& milliLux) {
   uint64_t microLux = 0;
   Status st = readMicroLux(microLux);
-  if (!st.ok()) {
+  if (!st.ok() && st.code != Err::CRC_ERROR) {
     return st;
   }
   milliLux = static_cast<uint32_t>((microLux + 500ULL) / 1000ULL);
-  return Status::Ok();
+  return st;
 }
 
 Status OPT4001::readMicroLux(uint64_t& microLux) {
   Sample sample;
   Status st = readSample(sample);
-  if (!st.ok()) {
+  if (!st.ok() && st.code != Err::CRC_ERROR) {
     return st;
   }
 
@@ -567,7 +567,7 @@ Status OPT4001::readMicroLux(uint64_t& microLux) {
           ? cmd::MICRO_LUX_NUMERATOR_PICOSTAR
           : cmd::MICRO_LUX_NUMERATOR_SOT_5X3;
   microLux = (static_cast<uint64_t>(sample.adcCodes) * numerator + 5ULL) / 10ULL;
-  return Status::Ok();
+  return st;
 }
 
 Status OPT4001::readBlocking(Sample& out, uint32_t timeoutMs) {
@@ -640,6 +640,48 @@ Status OPT4001::readBlockingLux(float& lux, Mode mode, uint32_t timeoutMs) {
     return st;
   }
   lux = sample.lux;
+  return st;
+}
+
+Status OPT4001::tryReadSample(Sample& out, bool& didRead) {
+  didRead = false;
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+
+  bool ready = false;
+  if (_config.mode == Mode::CONTINUOUS) {
+    ready = conversionReady();
+  } else if (_conversionStarted) {
+    ready = conversionReady();
+  } else {
+    ready = _sampleAvailable;
+  }
+
+  if (!ready) {
+    return Status::Ok();
+  }
+
+  Status st = readSample(out);
+  if (st.ok() || st.code == Err::CRC_ERROR) {
+    didRead = true;
+    return st;
+  }
+  if (st.code == Err::MEASUREMENT_NOT_READY) {
+    return Status::Ok();
+  }
+  return st;
+}
+
+Status OPT4001::tryReadLux(float& lux, bool& didRead) {
+  Sample sample;
+  Status st = tryReadSample(sample, didRead);
+  if (!st.ok() && st.code != Err::CRC_ERROR) {
+    return st;
+  }
+  if (didRead) {
+    lux = sample.lux;
+  }
   return st;
 }
 
@@ -896,6 +938,105 @@ Status OPT4001::setThresholdsLux(float lowLux, float highLux) {
     return st;
   }
   return setThresholds(low, high);
+}
+
+Status OPT4001::configureMeasurement(Range range,
+                                     ConversionTime time,
+                                     Mode mode,
+                                     bool quickWake) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+  if (!isValidRange(range)) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid range");
+  }
+  if (!isValidConversionTime(time)) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid conversion time");
+  }
+  if (!isStableMode(mode)) {
+    return Status::Error(Err::INVALID_PARAM, "Mode must be POWER_DOWN or CONTINUOUS");
+  }
+
+  _config.range = range;
+  _config.conversionTime = time;
+  _config.mode = mode;
+  _config.quickWake = quickWake;
+  return _applyConfig();
+}
+
+Status OPT4001::restoreDefaultThresholds() {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+
+  const Threshold low{
+      static_cast<uint8_t>((cmd::THRESHOLD_L_RESET & cmd::MASK_THRESHOLD_EXPONENT) >>
+                           cmd::BIT_THRESHOLD_EXPONENT),
+      static_cast<uint16_t>(cmd::THRESHOLD_L_RESET & cmd::MASK_THRESHOLD_RESULT)};
+  const Threshold high{
+      static_cast<uint8_t>((cmd::THRESHOLD_H_RESET & cmd::MASK_THRESHOLD_EXPONENT) >>
+                           cmd::BIT_THRESHOLD_EXPONENT),
+      static_cast<uint16_t>(cmd::THRESHOLD_H_RESET & cmd::MASK_THRESHOLD_RESULT)};
+  return setThresholds(low, high);
+}
+
+Status OPT4001::enableThresholdInterrupt(const Threshold& low, const Threshold& high) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+  if (!_thresholdValid(low) || !_thresholdValid(high)) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid threshold");
+  }
+  if (thresholdToAdcCodes(low) > thresholdToAdcCodes(high)) {
+    return Status::Error(Err::INVALID_PARAM, "Low threshold must be <= high threshold");
+  }
+
+  _config.lowThreshold = low;
+  _config.highThreshold = high;
+  _config.intDirection = IntDirection::PIN_OUTPUT;
+  _config.intConfig = IntConfig::THRESHOLD;
+  return _applyConfig();
+}
+
+Status OPT4001::enableThresholdInterruptLux(float lowLux, float highLux) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+  if (lowLux > highLux) {
+    return Status::Error(Err::INVALID_PARAM, "Low lux threshold must be <= high lux threshold");
+  }
+
+  Threshold low;
+  Threshold high;
+  Status st = luxToThreshold(lowLux, low);
+  if (!st.ok()) {
+    return st;
+  }
+  st = luxToThreshold(highLux, high);
+  if (!st.ok()) {
+    return st;
+  }
+  return enableThresholdInterrupt(low, high);
+}
+
+Status OPT4001::enableConversionReadyInterrupt() {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+
+  _config.intDirection = IntDirection::PIN_OUTPUT;
+  _config.intConfig = IntConfig::EVERY_CONVERSION;
+  return _applyConfig();
+}
+
+Status OPT4001::enableFifoFullInterrupt() {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+
+  _config.intDirection = IntDirection::PIN_OUTPUT;
+  _config.intConfig = IntConfig::FIFO_FULL;
+  return _applyConfig();
 }
 
 Status OPT4001::readConfiguration(uint16_t& value) {
