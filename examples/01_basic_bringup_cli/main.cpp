@@ -20,11 +20,44 @@ bool verboseMode = false;
 static constexpr uint32_t STRESS_PROGRESS_UPDATES = 10U;
 static constexpr uint32_t BLOCKING_READ_TIMEOUT_MS = 1500U;
 static constexpr uint32_t HEALTH_MONITOR_DEFAULT_INTERVAL_MS = 1000U;
+static constexpr uint32_t WATCH_DEFAULT_INTERVAL_MS = 250U;
 bool healthMonitorEnabled = false;
 uint32_t healthMonitorIntervalMs = HEALTH_MONITOR_DEFAULT_INTERVAL_MS;
 diag::HealthMonitor healthMonitor;
 
+struct WatchState {
+  bool active = false;
+  bool forceAuto = false;
+  bool waitingConversion = false;
+  uint32_t intervalMs = WATCH_DEFAULT_INTERVAL_MS;
+  int32_t remaining = 0;
+  uint32_t startMs = 0;
+  uint32_t lastStepMs = 0;
+  uint32_t okCount = 0;
+  uint32_t warnCount = 0;
+  uint32_t failCount = 0;
+  uint32_t counterGapCount = 0;
+  bool haveSample = false;
+  bool havePrevCounter = false;
+  bool hasWarn = false;
+  bool hasFail = false;
+  float minLux = 0.0f;
+  float maxLux = 0.0f;
+  uint32_t minAdc = 0U;
+  uint32_t maxAdc = 0U;
+  uint8_t prevCounter = 0U;
+  OPT4001::Status firstWarn = OPT4001::Status::Ok();
+  OPT4001::Status lastWarn = OPT4001::Status::Ok();
+  OPT4001::Status firstFail = OPT4001::Status::Ok();
+  OPT4001::Status lastFail = OPT4001::Status::Ok();
+  HealthSnapshot<OPT4001::OPT4001> before;
+};
+
+WatchState watchState;
+
 void printScale();
+void printWatchState();
+void finishWatch(bool cancelled);
 
 const char* errToStr(OPT4001::Err err) {
   using OPT4001::Err;
@@ -226,6 +259,59 @@ bool parseBool01(const String& token, bool& out) {
   return true;
 }
 
+bool parseRangeToken(const String& token, OPT4001::Range& out) {
+  String normalized = token;
+  normalized.trim();
+  if (normalized == "auto") {
+    out = OPT4001::Range::AUTO;
+    return true;
+  }
+
+  int32_t value = 0;
+  if (!parseI32(normalized, value) || value < 0 || value > 8) {
+    return false;
+  }
+
+  out = static_cast<OPT4001::Range>(value);
+  return true;
+}
+
+bool parseStableModeToken(const String& token, OPT4001::Mode& out) {
+  String normalized = token;
+  normalized.trim();
+  if (normalized == "cont" || normalized == "continuous") {
+    out = OPT4001::Mode::CONTINUOUS;
+    return true;
+  }
+  if (normalized == "power" || normalized == "pd") {
+    out = OPT4001::Mode::POWER_DOWN;
+    return true;
+  }
+  return false;
+}
+
+bool parseOptionalCountInterval(const String& args,
+                                int32_t defaultCount,
+                                uint32_t defaultIntervalMs,
+                                int32_t& countOut,
+                                uint32_t& intervalOut) {
+  String normalized = args;
+  normalized.trim();
+  countOut = defaultCount;
+  intervalOut = defaultIntervalMs;
+  if (normalized.length() == 0) {
+    return true;
+  }
+
+  const int split = normalized.indexOf(' ');
+  if (split < 0) {
+    return parseI32(normalized, countOut);
+  }
+
+  return parseI32(normalized.substring(0, split), countOut) &&
+         parseU32(normalized.substring(split + 1), intervalOut);
+}
+
 bool sampleStatusHasData(const OPT4001::Status& st) {
   return st.ok() || st.code == OPT4001::Err::CRC_ERROR;
 }
@@ -408,11 +494,275 @@ void printDriverHealth() {
 }
 
 void printHealthMonitorState() {
-  Serial.printf("  Health monitor: %s%s%s interval=%lu ms\n",
+  Serial.printf("  Health monitor: %s%s%s",
                 onOffColor(healthMonitorEnabled),
                 healthMonitorEnabled ? "ON" : "OFF",
+                LOG_COLOR_RESET);
+  if (!healthMonitorEnabled) {
+    Serial.println();
+    return;
+  }
+  if (healthMonitorIntervalMs == 0U) {
+    Serial.printf(" mode=%schanges-only%s\n", LOG_COLOR_CYAN, LOG_COLOR_RESET);
+    return;
+  }
+  Serial.printf(" interval=%lu ms\n", static_cast<unsigned long>(healthMonitorIntervalMs));
+}
+
+void resetWatchState() {
+  watchState = WatchState{};
+}
+
+void recordWatchSample(const OPT4001::Sample& sample) {
+  if (!watchState.haveSample) {
+    watchState.haveSample = true;
+    watchState.minLux = sample.lux;
+    watchState.maxLux = sample.lux;
+    watchState.minAdc = sample.adcCodes;
+    watchState.maxAdc = sample.adcCodes;
+  } else {
+    if (sample.lux < watchState.minLux) watchState.minLux = sample.lux;
+    if (sample.lux > watchState.maxLux) watchState.maxLux = sample.lux;
+    if (sample.adcCodes < watchState.minAdc) watchState.minAdc = sample.adcCodes;
+    if (sample.adcCodes > watchState.maxAdc) watchState.maxAdc = sample.adcCodes;
+  }
+
+  if (watchState.havePrevCounter &&
+      device.sampleCounterDelta(watchState.prevCounter, sample.counter) != 1U) {
+    watchState.counterGapCount++;
+  }
+  watchState.prevCounter = sample.counter;
+  watchState.havePrevCounter = true;
+}
+
+void recordWatchStatus(const OPT4001::Status& st) {
+  if (st.ok()) {
+    watchState.okCount++;
+    return;
+  }
+  if (sampleStatusWarn(st)) {
+    watchState.warnCount++;
+    if (!watchState.hasWarn) {
+      watchState.firstWarn = st;
+      watchState.hasWarn = true;
+    }
+    watchState.lastWarn = st;
+    return;
+  }
+  watchState.failCount++;
+  if (!watchState.hasFail) {
+    watchState.firstFail = st;
+    watchState.hasFail = true;
+  }
+  watchState.lastFail = st;
+}
+
+void printWatchState() {
+  Serial.printf("  Watch: %s%s%s",
+                onOffColor(watchState.active),
+                watchState.active ? "ON" : "OFF",
+                LOG_COLOR_RESET);
+  if (!watchState.active) {
+    Serial.println();
+    return;
+  }
+
+  const bool continuous = (device.getMode() == OPT4001::Mode::CONTINUOUS);
+  Serial.printf(" mode=%s%s%s",
+                LOG_COLOR_CYAN,
+                continuous ? "CONTINUOUS" :
+                    (watchState.forceAuto ? "ONE_SHOT_FORCED_AUTO" : "ONE_SHOT"),
+                LOG_COLOR_RESET);
+  Serial.printf(" remaining=%ld", static_cast<long>(watchState.remaining));
+  if (!continuous) {
+    Serial.printf(" waiting=%s%s%s",
+                  yesNoColor(watchState.waitingConversion),
+                  watchState.waitingConversion ? "YES" : "NO",
+                  LOG_COLOR_RESET);
+  }
+  Serial.printf(" interval=%lu ms\n", static_cast<unsigned long>(watchState.intervalMs));
+}
+
+void finishWatch(bool cancelled) {
+  if (!watchState.active) {
+    return;
+  }
+
+  HealthSnapshot<OPT4001::OPT4001> after;
+  after.capture(device);
+  const uint32_t elapsedMs = millis() - watchState.startMs;
+  const uint32_t completed = watchState.okCount + watchState.warnCount + watchState.failCount;
+  const uint32_t successLike = watchState.okCount + watchState.warnCount;
+  const float pct = (completed > 0U)
+                        ? (100.0f * static_cast<float>(successLike) / static_cast<float>(completed))
+                        : 0.0f;
+
+  Serial.println(cancelled ? "=== watch cancelled ===" : "=== watch summary ===");
+  Serial.printf("  Results: %sok=%lu%s %swarn=%lu%s %sfail=%lu%s (%s%.2f%%%s success-like)\n",
+                goodIfNonZeroColor(watchState.okCount),
+                static_cast<unsigned long>(watchState.okCount),
                 LOG_COLOR_RESET,
-                static_cast<unsigned long>(healthMonitorIntervalMs));
+                warnCountColor(watchState.warnCount),
+                static_cast<unsigned long>(watchState.warnCount),
+                LOG_COLOR_RESET,
+                goodIfZeroColor(watchState.failCount),
+                static_cast<unsigned long>(watchState.failCount),
+                LOG_COLOR_RESET,
+                successRateColor(pct),
+                pct,
+                LOG_COLOR_RESET);
+  Serial.printf("  Duration: %lu ms\n", static_cast<unsigned long>(elapsedMs));
+  if (elapsedMs > 0U) {
+    Serial.printf("  Rate: %.2f samples/s\n",
+                  (1000.0f * static_cast<float>(completed)) / static_cast<float>(elapsedMs));
+  }
+  if (watchState.haveSample) {
+    Serial.printf("  Lux range: %.6f .. %.6f lx\n", watchState.minLux, watchState.maxLux);
+    Serial.printf("  ADC range: %lu .. %lu\n",
+                  static_cast<unsigned long>(watchState.minAdc),
+                  static_cast<unsigned long>(watchState.maxAdc));
+    Serial.printf("  Counter gaps: %s%lu%s\n",
+                  warnCountColor(watchState.counterGapCount),
+                  static_cast<unsigned long>(watchState.counterGapCount),
+                  LOG_COLOR_RESET);
+  }
+  Serial.println("  Health changes:");
+  printHealthDiff(watchState.before, after);
+
+  if (watchState.hasWarn) {
+    Serial.println("  First warning:");
+    printStatus(watchState.firstWarn);
+    if (watchState.warnCount > 1U) {
+      Serial.println("  Last warning:");
+      printStatus(watchState.lastWarn);
+    }
+  }
+  if (watchState.hasFail) {
+    Serial.println("  First failure:");
+    printStatus(watchState.firstFail);
+    if (watchState.failCount > 1U) {
+      Serial.println("  Last failure:");
+      printStatus(watchState.lastFail);
+    }
+  }
+
+  resetWatchState();
+}
+
+bool startWatch(int32_t count, uint32_t intervalMs, bool forceAuto) {
+  if (!device.isInitialized()) {
+    LOGW("Driver not initialized.");
+    return false;
+  }
+  if (count <= 0) {
+    LOGW("Invalid watch count (must be > 0).");
+    return false;
+  }
+  if (watchState.active) {
+    LOGW("Watch already active. Use 'stop' first.");
+    return false;
+  }
+
+  resetWatchState();
+  watchState.active = true;
+  watchState.forceAuto = forceAuto;
+  watchState.intervalMs = intervalMs;
+  watchState.remaining = count;
+  watchState.startMs = millis();
+  watchState.before.capture(device);
+  watchState.lastStepMs = (watchState.startMs > intervalMs)
+                              ? (watchState.startMs - intervalMs)
+                              : 0U;
+  LOGI("Starting watch: count=%ld mode=%s interval=%lu ms",
+       static_cast<long>(count),
+       (device.getMode() == OPT4001::Mode::CONTINUOUS)
+           ? "CONTINUOUS"
+           : (forceAuto ? "ONE_SHOT_FORCED_AUTO" : "ONE_SHOT"),
+       static_cast<unsigned long>(intervalMs));
+  printWatchState();
+  return true;
+}
+
+void handleWatch() {
+  if (!watchState.active || watchState.remaining <= 0) {
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (device.getMode() == OPT4001::Mode::CONTINUOUS) {
+    if (watchState.intervalMs > 0U && (now - watchState.lastStepMs) < watchState.intervalMs) {
+      return;
+    }
+    if (!device.conversionReady()) {
+      return;
+    }
+
+    OPT4001::Sample sample;
+    OPT4001::Status st = device.readSample(sample);
+    if (!sampleStatusHasData(st)) {
+      recordWatchStatus(st);
+      printStatus(st);
+      watchState.lastStepMs = now;
+      watchState.remaining--;
+    } else {
+      recordWatchSample(sample);
+      recordWatchStatus(st);
+      Serial.printf("  %s[#%lu]%s ", LOG_COLOR_CYAN,
+                    static_cast<unsigned long>(watchState.okCount + watchState.warnCount + watchState.failCount),
+                    LOG_COLOR_RESET);
+      printSample(sample);
+      if (sampleStatusWarn(st)) {
+        printStatus(st);
+      }
+      watchState.lastStepMs = now;
+      watchState.remaining--;
+    }
+  } else {
+    if (!watchState.waitingConversion) {
+      if (watchState.intervalMs > 0U && (now - watchState.lastStepMs) < watchState.intervalMs) {
+        return;
+      }
+      OPT4001::Status st = device.startConversion(
+          watchState.forceAuto ? OPT4001::Mode::ONE_SHOT_FORCED_AUTO : OPT4001::Mode::ONE_SHOT);
+      if (!st.ok()) {
+        recordWatchStatus(st);
+        printStatus(st);
+        watchState.lastStepMs = now;
+        watchState.remaining--;
+      } else {
+        watchState.waitingConversion = true;
+        watchState.lastStepMs = now;
+      }
+    } else {
+      OPT4001::Sample sample;
+      bool didRead = false;
+      OPT4001::Status st = device.tryReadSample(sample, didRead);
+      if (!st.ok() && !sampleStatusWarn(st)) {
+        recordWatchStatus(st);
+        printStatus(st);
+        watchState.waitingConversion = false;
+        watchState.lastStepMs = now;
+        watchState.remaining--;
+      } else if (didRead) {
+        recordWatchSample(sample);
+        recordWatchStatus(st);
+        Serial.printf("  %s[#%lu]%s ", LOG_COLOR_CYAN,
+                      static_cast<unsigned long>(watchState.okCount + watchState.warnCount + watchState.failCount),
+                      LOG_COLOR_RESET);
+        printSample(sample);
+        if (sampleStatusWarn(st)) {
+          printStatus(st);
+        }
+        watchState.waitingConversion = false;
+        watchState.lastStepMs = now;
+        watchState.remaining--;
+      }
+    }
+  }
+
+  if (watchState.active && watchState.remaining <= 0) {
+    finishWatch(false);
+  }
 }
 
 uint16_t packThresholdRaw(const OPT4001::Threshold& threshold) {
@@ -443,6 +793,11 @@ void printAddressInfo() {
                   OPT4001::cmd::I2C_ADDR_GND,
                   OPT4001::cmd::I2C_ADDR_DEFAULT,
                   OPT4001::cmd::I2C_ADDR_SDA);
+  }
+  if (cfg.packageVariant == OPT4001::PackageVariant::PICOSTAR) {
+    Serial.printf("  INT support: %sno INT pin on PicoStar; use polled ready/status flows%s\n",
+                  LOG_COLOR_YELLOW,
+                  LOG_COLOR_RESET);
   }
 }
 
@@ -590,6 +945,11 @@ void printIntConfigurationInfo() {
                   LOG_COLOR_YELLOW,
                   LOG_COLOR_RESET);
   }
+  if (device.getPackageVariant() == OPT4001::PackageVariant::PICOSTAR) {
+    Serial.printf("  Note: %sPicoStar has no physical INT pin; INT configuration is register-visible only%s\n",
+                  LOG_COLOR_YELLOW,
+                  LOG_COLOR_RESET);
+  }
   if (!info.valid) {
     Serial.printf("  Note: %sINT_CFG=2 is reserved/invalid per datasheet%s\n",
                   LOG_COLOR_RED,
@@ -637,6 +997,7 @@ void printDiagnosticReport() {
   printHealthView(device);
   printDriverHealth();
   printHealthMonitorState();
+  printWatchState();
   if (!device.isInitialized()) {
     Serial.printf("  Note: %sdriver not initialized; register diagnostics skipped%s\n",
                   LOG_COLOR_YELLOW,
@@ -1373,6 +1734,14 @@ void runSelfTest() {
                   device.getCurrentResolutionLux() > 0.0f &&
                   device.getEffectiveBits() > 0U,
               "");
+  const OPT4001::Range baseRange = device.getRange();
+  const OPT4001::ConversionTime baseTime = device.getConversionTime();
+  const OPT4001::Mode baseMode = device.getMode();
+  const bool baseQuickWake = device.getQuickWake();
+  const OPT4001::IntDirection baseIntDirection = device.getIntDirection();
+  const OPT4001::IntConfig baseIntConfig = device.getIntConfig();
+  const OPT4001::Threshold baseLowThreshold = low;
+  const OPT4001::Threshold baseHighThreshold = high;
 
   OPT4001::Sample sample;
   st = device.readBlocking(sample, BLOCKING_READ_TIMEOUT_MS);
@@ -1395,6 +1764,18 @@ void runSelfTest() {
       reportCheck("threshold roundtrip sane", device.thresholdToLux(encodedThreshold) >= 0.0f, "");
     }
   }
+
+  bool didRead = false;
+  OPT4001::Sample trySample;
+  st = device.tryReadSample(trySample, didRead);
+  reportCheck("tryReadSample", st.ok() || sampleStatusWarn(st), st.ok() || sampleStatusWarn(st) ? "" : errToStr(st.code));
+  reportCheck("tryReadSample returned data", didRead, "");
+
+  float tryLux = -1.0f;
+  didRead = false;
+  st = device.tryReadLux(tryLux, didRead);
+  reportCheck("tryReadLux", st.ok() || sampleStatusWarn(st), st.ok() || sampleStatusWarn(st) ? "" : errToStr(st.code));
+  reportCheck("tryReadLux returned data", didRead && tryLux >= 0.0f, "");
 
   OPT4001::Sample cached;
   st = device.getLastSample(cached);
@@ -1421,6 +1802,62 @@ void runSelfTest() {
   uint16_t flagsRaw = 0;
   st = device.readFlagsRaw(flagsRaw);
   reportCheck("readFlagsRaw", st.ok(), st.ok() ? "" : errToStr(st.code));
+
+  st = device.configureMeasurement(baseRange, baseTime, baseMode, baseQuickWake);
+  reportCheck("configureMeasurement(baseline)", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("configureMeasurement roundtrip",
+              device.getRange() == baseRange &&
+                  device.getConversionTime() == baseTime &&
+                  device.getMode() == baseMode &&
+                  device.getQuickWake() == baseQuickWake,
+              "");
+
+  st = device.restoreDefaultThresholds();
+  reportCheck("restoreDefaultThresholds", st.ok(), st.ok() ? "" : errToStr(st.code));
+  if (st.ok()) {
+    OPT4001::Threshold defaultLow;
+    OPT4001::Threshold defaultHigh;
+    OPT4001::Status thresholdSt = device.getThresholds(defaultLow, defaultHigh);
+    reportCheck("default thresholds readable", thresholdSt.ok(), thresholdSt.ok() ? "" : errToStr(thresholdSt.code));
+    if (thresholdSt.ok()) {
+      reportCheck("default low threshold matches reset",
+                  packThresholdRaw(defaultLow) == OPT4001::cmd::THRESHOLD_L_RESET,
+                  "");
+      reportCheck("default high threshold matches reset",
+                  packThresholdRaw(defaultHigh) == OPT4001::cmd::THRESHOLD_H_RESET,
+                  "");
+    }
+  }
+  st = device.setThresholds(baseLowThreshold, baseHighThreshold);
+  reportCheck("restore original thresholds", st.ok(), st.ok() ? "" : errToStr(st.code));
+
+  st = device.enableConversionReadyInterrupt();
+  reportCheck("enableConversionReadyInterrupt", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("verify intcfg=EVERY_CONVERSION",
+              device.getIntDirection() == OPT4001::IntDirection::PIN_OUTPUT &&
+                  device.getIntConfig() == OPT4001::IntConfig::EVERY_CONVERSION,
+              "");
+
+  st = device.enableFifoFullInterrupt();
+  reportCheck("enableFifoFullInterrupt", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("verify intcfg=FIFO_FULL",
+              device.getIntDirection() == OPT4001::IntDirection::PIN_OUTPUT &&
+                  device.getIntConfig() == OPT4001::IntConfig::FIFO_FULL,
+              "");
+
+  st = device.enableThresholdInterruptLux(lowLux, highLux);
+  reportCheck("enableThresholdInterruptLux", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("verify intcfg=THRESHOLD",
+              device.getIntDirection() == OPT4001::IntDirection::PIN_OUTPUT &&
+                  device.getIntConfig() == OPT4001::IntConfig::THRESHOLD,
+              "");
+
+  st = device.setThresholds(baseLowThreshold, baseHighThreshold);
+  reportCheck("restore thresholds after INT presets", st.ok(), st.ok() ? "" : errToStr(st.code));
+  st = device.setIntDirection(baseIntDirection);
+  reportCheck("restore int direction", st.ok(), st.ok() ? "" : errToStr(st.code));
+  st = device.setIntConfig(baseIntConfig);
+  reportCheck("restore int config", st.ok(), st.ok() ? "" : errToStr(st.code));
 
   st = device.clearConversionReadyFlag();
   reportCheck("clearConversionReadyFlag", st.ok(), st.ok() ? "" : errToStr(st.code));
@@ -1463,8 +1900,12 @@ void printHelp() {
   item("read force", "Blocking forced-auto read");
   item("read N", "Run N blocking reads");
   item("readblocking [force]", "Explicit blocking alias");
+  item("tryread / trylux", "Poll-friendly read helpers");
   item("start [force]", "Start one-shot conversion");
   item("poll / drdy", "Check conversion ready");
+  item("watch [N] [interval]", "Stream samples using current mode");
+  item("watch force [N] [interval]", "Repeat forced-auto one-shots");
+  item("stop", "Stop active watch session");
   item("readburst [force]", "Read RESULT plus FIFO history");
   item("slot <0..3>", "Read one history slot (0=newest)");
   item("sample / sampleage", "Cached sample and age");
@@ -1484,14 +1925,18 @@ void printHelp() {
   item("mode [power|cont]", "Set or show stable mode");
   item("range [0..8|auto]", "Set or show range");
   item("ctime [0..11]", "Set or show conversion time");
+  item("measure <rng> <ct> <mode> [qw]", "Apply range/ctime/mode/qwake together");
   item("qwake [0|1]", "Set or show quick wake");
   item("crc [0|1]", "Set or show host-side CRC verification");
   item("burst [0|1]", "Set or show I2C burst mode");
   item("threshold [low high]", "Read or set thresholds in lux");
+  item("threshold default", "Restore default threshold window");
   item("threshold raw <low> <high>", "Set thresholds from raw 16-bit register values");
   item("thcalc <lux>", "Calculate threshold register fields for lux");
   item("thdecode <raw16>", "Decode packed threshold register value");
-  item("int latch|pol|faults|dir|cfg ...", "Interrupt configuration");
+  item("int ready|fifo", "Apply INT preset helpers");
+  item("int th <low> <high>", "Threshold INT preset with lux window");
+  item("int latch|pol|faults|dir|cfg ...", "Low-level interrupt configuration");
 
   section("Registers");
   item("status / flags", "Read and decode FLAGS (clear-on-read)");
@@ -1512,7 +1957,7 @@ void printHelp() {
   item("recover", "Manual recovery attempt");
   item("reset", "General-call reset (bus-wide)");
   item("resetreapply", "General-call reset + re-apply");
-  item("healthmon [0|1] [interval]", "Toggle periodic health monitor output");
+  item("healthmon [0|1] [interval]", "Toggle health monitor (0=change-only)");
   item("verbose [0|1]", "Enable/disable verbose output");
   item("stress [N]", "Run blocking read stress");
   item("stress_mix [N]", "Run mixed-operation stress");
@@ -1531,16 +1976,23 @@ void processCommand(const String& cmdLine) {
   if (cmd == "scan") { bus_diag::scan(); return; }
   if (cmd == "init") {
     LOGI("Initializing OPT4001...");
+    if (watchState.active) {
+      finishWatch(true);
+    }
     device.end();
     OPT4001::Status st = device.begin(makeDefaultConfig());
     printStatus(st);
     if (st.ok()) {
       printDriverHealth();
+      printAddressInfo();
     }
     return;
   }
   if (cmd == "end") {
     LOGI("Shutting down driver...");
+    if (watchState.active) {
+      finishWatch(true);
+    }
     device.end();
     LOGI("Driver state: UNINIT");
     return;
@@ -1554,7 +2006,9 @@ void processCommand(const String& cmdLine) {
     }
     OPT4001::Config cfg = device.isInitialized() ? device.getConfig() : makeDefaultConfig();
     cfg.i2cAddress = static_cast<uint8_t>(addr);
-    (void)rebeginWithConfig(cfg);
+    if (rebeginWithConfig(cfg)) {
+      printAddressInfo();
+    }
     return;
   }
   if (cmd == "pkg") { printAddressInfo(); return; }
@@ -1572,7 +2026,10 @@ void processCommand(const String& cmdLine) {
     }
     OPT4001::Config cfg = device.isInitialized() ? device.getConfig() : makeDefaultConfig();
     cfg.packageVariant = variant;
-    (void)rebeginWithConfig(cfg);
+    if (rebeginWithConfig(cfg)) {
+      printAddressInfo();
+      printScale();
+    }
     return;
   }
   if (cmd == "drv" || cmd == "health") { printDriverHealth(); return; }
@@ -1613,6 +2070,9 @@ void processCommand(const String& cmdLine) {
   }
   if (cmd == "reset") {
     LOGW("Issuing general-call reset (bus-wide).");
+    if (watchState.active) {
+      finishWatch(true);
+    }
     HealthSnapshot<OPT4001::OPT4001> before;
     before.capture(device);
     OPT4001::Status st = device.softReset();
@@ -1626,6 +2086,9 @@ void processCommand(const String& cmdLine) {
   }
   if (cmd == "resetreapply") {
     LOGW("Issuing general-call reset + re-apply.");
+    if (watchState.active) {
+      finishWatch(true);
+    }
     HealthSnapshot<OPT4001::OPT4001> before;
     before.capture(device);
     OPT4001::Status st = device.resetAndReapply();
@@ -1679,6 +2142,46 @@ void processCommand(const String& cmdLine) {
   if (cmd == "read force") { (void)blockingReadAndPrint(OPT4001::Mode::ONE_SHOT_FORCED_AUTO); return; }
   if (cmd == "readblocking") { (void)blockingReadAndPrint(OPT4001::Mode::ONE_SHOT); return; }
   if (cmd == "readblocking force") { (void)blockingReadAndPrint(OPT4001::Mode::ONE_SHOT_FORCED_AUTO); return; }
+  if (cmd == "tryread") {
+    OPT4001::Sample sample;
+    bool didRead = false;
+    OPT4001::Status st = device.tryReadSample(sample, didRead);
+    if (!st.ok() && !sampleStatusWarn(st)) {
+      printStatus(st);
+      return;
+    }
+    Serial.printf("  Sample ready: %s%s%s\n",
+                  didRead ? LOG_COLOR_GREEN : LOG_COLOR_YELLOW,
+                  didRead ? "YES" : "NO",
+                  LOG_COLOR_RESET);
+    if (didRead) {
+      printSample(sample);
+    }
+    if (sampleStatusWarn(st)) {
+      printStatus(st);
+    }
+    return;
+  }
+  if (cmd == "trylux") {
+    float lux = 0.0f;
+    bool didRead = false;
+    OPT4001::Status st = device.tryReadLux(lux, didRead);
+    if (!st.ok() && !sampleStatusWarn(st)) {
+      printStatus(st);
+      return;
+    }
+    Serial.printf("  Sample ready: %s%s%s\n",
+                  didRead ? LOG_COLOR_GREEN : LOG_COLOR_YELLOW,
+                  didRead ? "YES" : "NO",
+                  LOG_COLOR_RESET);
+    if (didRead) {
+      Serial.printf("  Lux: %.6f lx\n", lux);
+    }
+    if (sampleStatusWarn(st)) {
+      printStatus(st);
+    }
+    return;
+  }
   if (cmd.startsWith("read ")) {
     int32_t count = 0;
     if (!parseI32(cmd.substring(5), count) || count <= 0 || count > 10000) {
@@ -1697,6 +2200,44 @@ void processCommand(const String& cmdLine) {
   if (cmd == "poll" || cmd == "drdy") {
     const bool ready = device.conversionReady();
     LOGI("Conversion ready: %s%s%s", yesNoColor(ready), ready ? "YES" : "NO", LOG_COLOR_RESET);
+    return;
+  }
+  if (cmd == "watch") {
+    printWatchState();
+    return;
+  }
+  if (cmd == "stop") {
+    if (!watchState.active) {
+      LOGW("Watch not active.");
+      return;
+    }
+    finishWatch(true);
+    return;
+  }
+  if (cmd == "watch force" || cmd.startsWith("watch force ")) {
+    int32_t count = 10;
+    uint32_t intervalMs = WATCH_DEFAULT_INTERVAL_MS;
+    if (!parseOptionalCountInterval(cmd.substring(11), 10, WATCH_DEFAULT_INTERVAL_MS, count, intervalMs) ||
+        count <= 0 || count > 100000) {
+      LOGW("Usage: watch force [count] [intervalMs]");
+      return;
+    }
+    if (device.getMode() == OPT4001::Mode::CONTINUOUS) {
+      LOGW("watch force is intended for power-down mode; current mode is CONTINUOUS.");
+      return;
+    }
+    (void)startWatch(count, intervalMs, true);
+    return;
+  }
+  if (cmd.startsWith("watch ")) {
+    int32_t count = 10;
+    uint32_t intervalMs = WATCH_DEFAULT_INTERVAL_MS;
+    if (!parseOptionalCountInterval(cmd.substring(6), 10, WATCH_DEFAULT_INTERVAL_MS, count, intervalMs) ||
+        count <= 0 || count > 100000) {
+      LOGW("Usage: watch [count] [intervalMs]");
+      return;
+    }
+    (void)startWatch(count, intervalMs, false);
     return;
   }
   if (cmd == "readburst" || cmd == "readburst force") {
@@ -1832,6 +2373,9 @@ void processCommand(const String& cmdLine) {
                   ? device.setMode(OPT4001::Mode::POWER_DOWN)
                   : OPT4001::Status::Error(OPT4001::Err::INVALID_PARAM, "Usage: mode [power|cont]");
     printStatus(st);
+    if (st.ok()) {
+      printConfigurationInfo();
+    }
     return;
   }
   if (cmd == "range") {
@@ -1853,7 +2397,12 @@ void processCommand(const String& cmdLine) {
       }
       range = static_cast<OPT4001::Range>(value);
     }
-    printStatus(device.setRange(range));
+    OPT4001::Status st = device.setRange(range);
+    printStatus(st);
+    if (st.ok()) {
+      printConfigurationInfo();
+      printScale();
+    }
     return;
   }
   if (cmd == "ctime") {
@@ -1869,7 +2418,61 @@ void processCommand(const String& cmdLine) {
       LOGW("Usage: ctime [0..11]");
       return;
     }
-    printStatus(device.setConversionTime(static_cast<OPT4001::ConversionTime>(value)));
+    OPT4001::Status st = device.setConversionTime(static_cast<OPT4001::ConversionTime>(value));
+    printStatus(st);
+    if (st.ok()) {
+      printConfigurationInfo();
+      printScale();
+    }
+    return;
+  }
+  if (cmd.startsWith("measure ")) {
+    String args = cmd.substring(8);
+    args.trim();
+    String parts[4];
+    int count = 0;
+    bool tooManyTokens = false;
+    while (args.length() > 0) {
+      if (count >= 4) {
+        tooManyTokens = true;
+        break;
+      }
+      const int split = args.indexOf(' ');
+      if (split < 0) {
+        parts[count++] = args;
+        break;
+      }
+      parts[count++] = args.substring(0, split);
+      args = args.substring(split + 1);
+      args.trim();
+    }
+    if (tooManyTokens || count < 3 || count > 4) {
+      LOGW("Usage: measure <range|auto> <ctime0..11> <power|cont> [qwake0|1]");
+      return;
+    }
+
+    OPT4001::Range range = OPT4001::Range::AUTO;
+    OPT4001::Mode mode = OPT4001::Mode::POWER_DOWN;
+    int32_t ctime = 0;
+    bool quickWake = device.getQuickWake();
+    if (!parseRangeToken(parts[0], range) ||
+        !parseI32(parts[1], ctime) || ctime < 0 || ctime > 11 ||
+        !parseStableModeToken(parts[2], mode) ||
+        (count == 4 && !parseBool01(parts[3], quickWake))) {
+      LOGW("Usage: measure <range|auto> <ctime0..11> <power|cont> [qwake0|1]");
+      return;
+    }
+
+    OPT4001::Status st = device.configureMeasurement(
+        range,
+        static_cast<OPT4001::ConversionTime>(ctime),
+        mode,
+        quickWake);
+    printStatus(st);
+    if (st.ok()) {
+      printConfigurationInfo();
+      printScale();
+    }
     return;
   }
   if (cmd == "qwake") {
@@ -1885,7 +2488,11 @@ void processCommand(const String& cmdLine) {
       LOGW("Usage: qwake [0|1]");
       return;
     }
-    printStatus(device.setQuickWake(value));
+    OPT4001::Status st = device.setQuickWake(value);
+    printStatus(st);
+    if (st.ok()) {
+      printConfigurationInfo();
+    }
     return;
   }
   if (cmd == "crc") {
@@ -1901,7 +2508,14 @@ void processCommand(const String& cmdLine) {
       LOGW("Usage: crc [0|1]");
       return;
     }
-    printStatus(device.setVerifyCrc(value));
+    OPT4001::Status st = device.setVerifyCrc(value);
+    printStatus(st);
+    if (st.ok()) {
+      Serial.printf("  Verify CRC: %s%s%s\n",
+                    onOffColor(device.getVerifyCrc()),
+                    log_bool_str(device.getVerifyCrc()),
+                    LOG_COLOR_RESET);
+    }
     return;
   }
   if (cmd == "burst") {
@@ -1917,10 +2531,22 @@ void processCommand(const String& cmdLine) {
       LOGW("Usage: burst [0|1]");
       return;
     }
-    printStatus(device.setBurstMode(value));
+    OPT4001::Status st = device.setBurstMode(value);
+    printStatus(st);
+    if (st.ok()) {
+      printIntConfigurationInfo();
+    }
     return;
   }
   if (cmd == "threshold" || cmd == "threshold lux") { printThresholdLux(); return; }
+  if (cmd == "threshold default") {
+    OPT4001::Status st = device.restoreDefaultThresholds();
+    printStatus(st);
+    if (st.ok()) {
+      printThresholdLux();
+    }
+    return;
+  }
   if (cmd.startsWith("threshold raw ")) {
     String args = cmd.substring(14);
     args.trim();
@@ -1936,7 +2562,11 @@ void processCommand(const String& cmdLine) {
     }
     const OPT4001::Threshold low = unpackThreshold(static_cast<uint16_t>(lowRaw));
     const OPT4001::Threshold high = unpackThreshold(static_cast<uint16_t>(highRaw));
-    printStatus(device.setThresholds(low, high));
+    OPT4001::Status st = device.setThresholds(low, high);
+    printStatus(st);
+    if (st.ok()) {
+      printThresholdLux();
+    }
     return;
   }
   if (cmd.startsWith("threshold ")) {
@@ -1954,7 +2584,11 @@ void processCommand(const String& cmdLine) {
       LOGW("Usage: threshold <lowLux> <highLux>");
       return;
     }
-    printStatus(device.setThresholdsLux(low, high));
+    OPT4001::Status st = device.setThresholdsLux(low, high);
+    printStatus(st);
+    if (st.ok()) {
+      printThresholdLux();
+    }
     return;
   }
   if (cmd.startsWith("thcalc ")) {
@@ -1981,8 +2615,12 @@ void processCommand(const String& cmdLine) {
       LOGW("Usage: int latch [0|1]");
       return;
     }
-    printStatus(device.setInterruptLatch(value ? OPT4001::InterruptLatch::LATCHED
-                                               : OPT4001::InterruptLatch::TRANSPARENT));
+    OPT4001::Status st = device.setInterruptLatch(value ? OPT4001::InterruptLatch::LATCHED
+                                                        : OPT4001::InterruptLatch::TRANSPARENT);
+    printStatus(st);
+    if (st.ok()) {
+      printConfigurationInfo();
+    }
     return;
   }
   if (cmd.startsWith("int pol ")) {
@@ -1995,6 +2633,9 @@ void processCommand(const String& cmdLine) {
                   ? device.setInterruptPolarity(OPT4001::InterruptPolarity::ACTIVE_HIGH)
                   : OPT4001::Status::Error(OPT4001::Err::INVALID_PARAM, "Usage: int pol [low|high]");
     printStatus(st);
+    if (st.ok()) {
+      printConfigurationInfo();
+    }
     return;
   }
   if (cmd.startsWith("int faults ")) {
@@ -2013,7 +2654,47 @@ void processCommand(const String& cmdLine) {
       LOGW("Usage: int faults [1|2|4|8]");
       return;
     }
-    printStatus(device.setFaultCount(faults));
+    OPT4001::Status st = device.setFaultCount(faults);
+    printStatus(st);
+    if (st.ok()) {
+      printConfigurationInfo();
+    }
+    return;
+  }
+  if (cmd == "int ready") {
+    OPT4001::Status st = device.enableConversionReadyInterrupt();
+    printStatus(st);
+    if (st.ok()) {
+      printIntConfigurationInfo();
+    }
+    return;
+  }
+  if (cmd == "int fifo") {
+    OPT4001::Status st = device.enableFifoFullInterrupt();
+    printStatus(st);
+    if (st.ok()) {
+      printIntConfigurationInfo();
+    }
+    return;
+  }
+  if (cmd.startsWith("int th ")) {
+    String args = cmd.substring(7);
+    args.trim();
+    const int split = args.indexOf(' ');
+    float low = 0.0f;
+    float high = 0.0f;
+    if (split < 0 ||
+        !parseF32(args.substring(0, split), low) ||
+        !parseF32(args.substring(split + 1), high)) {
+      LOGW("Usage: int th <lowLux> <highLux>");
+      return;
+    }
+    OPT4001::Status st = device.enableThresholdInterruptLux(low, high);
+    printStatus(st);
+    if (st.ok()) {
+      printIntConfigurationInfo();
+      printThresholdLux();
+    }
     return;
   }
   if (cmd.startsWith("int dir ")) {
@@ -2028,7 +2709,11 @@ void processCommand(const String& cmdLine) {
       LOGW("Usage: int dir [in|out]");
       return;
     }
-    printStatus(device.setIntDirection(direction));
+    OPT4001::Status st = device.setIntDirection(direction);
+    printStatus(st);
+    if (st.ok()) {
+      printIntConfigurationInfo();
+    }
     return;
   }
   if (cmd.startsWith("int cfg ")) {
@@ -2045,7 +2730,11 @@ void processCommand(const String& cmdLine) {
       LOGW("Usage: int cfg [threshold|conv|fifo]");
       return;
     }
-    printStatus(device.setIntConfig(config));
+    OPT4001::Status st = device.setIntConfig(config);
+    printStatus(st);
+    if (st.ok()) {
+      printIntConfigurationInfo();
+    }
     return;
   }
   if (cmd == "int") { printIntConfigurationInfo(); printThresholdLux(); return; }
@@ -2213,6 +2902,7 @@ void loop() {
   if (healthMonitorEnabled) {
     healthMonitor.tick(device);
   }
+  handleWatch();
   static String inputBuffer;
   static constexpr size_t kMaxInputLen = 128;
   while (Serial.available()) {

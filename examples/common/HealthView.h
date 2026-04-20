@@ -2,13 +2,15 @@
 
 #include <Arduino.h>
 
+#include "examples/common/Log.h"
+
 namespace health_view {
 
-inline const char* colorGreen() { return "\033[32m"; }
-inline const char* colorYellow() { return "\033[33m"; }
-inline const char* colorRed() { return "\033[31m"; }
-inline const char* colorGray() { return "\033[90m"; }
-inline const char* colorReset() { return "\033[0m"; }
+inline const char* colorGreen() { return LOG_COLOR_GREEN; }
+inline const char* colorYellow() { return LOG_COLOR_YELLOW; }
+inline const char* colorRed() { return LOG_COLOR_RED; }
+inline const char* colorGray() { return LOG_COLOR_GRAY; }
+inline const char* colorReset() { return LOG_COLOR_RESET; }
 
 inline const char* boolColor(bool value) {
   return value ? colorGreen() : colorRed();
@@ -48,6 +50,13 @@ inline const char* stateToString(int state) {
   }
 }
 
+inline const char* stateColor(int state, bool online, uint8_t consecutiveFailures) {
+  if (state == 0) {
+    return colorYellow();
+  }
+  return LOG_COLOR_STATE(online, consecutiveFailures);
+}
+
 template <typename DriverT>
 struct Snapshot {
   int state = 0;
@@ -75,8 +84,8 @@ inline void printHealthView(const DriverT& driver) {
                            static_cast<float>(total))
                         : 0.0f;
 
-  Serial.printf("Health: state=%s%s%s online=%s%s%s consec=%s%u%s ok=%s%lu%s fail=%s%lu%s rate=%s%.1f%%%s\n",
-                failureColor(static_cast<uint32_t>(snap.consecutiveFailures)),
+  Serial.printf("Health: state=%s%s%s online=%s%s%s consecFail=%s%u%s ok=%s%lu%s fail=%s%lu%s rate=%s%.1f%%%s\n",
+                stateColor(snap.state, snap.online, snap.consecutiveFailures),
                 stateToString(snap.state),
                 colorReset(),
                 boolColor(snap.online),
@@ -103,10 +112,10 @@ inline void printHealthDiff(const Snapshot<DriverT>& before,
 
   if (before.state != after.state) {
     Serial.printf("  State: %s%s%s -> %s%s%s\n",
-                  failureColor(static_cast<uint32_t>(before.consecutiveFailures)),
+                  stateColor(before.state, before.online, before.consecutiveFailures),
                   stateToString(before.state),
                   colorReset(),
-                  failureColor(static_cast<uint32_t>(after.consecutiveFailures)),
+                  stateColor(after.state, after.online, after.consecutiveFailures),
                   stateToString(after.state),
                   colorReset());
     changed = true;
@@ -122,8 +131,9 @@ inline void printHealthDiff(const Snapshot<DriverT>& before,
     changed = true;
   }
   if (before.consecutiveFailures != after.consecutiveFailures) {
+    const bool improved = after.consecutiveFailures < before.consecutiveFailures;
     Serial.printf("  ConsecFail: %s%u -> %u%s\n",
-                  failureColor(static_cast<uint32_t>(after.consecutiveFailures)),
+                  improved ? colorGreen() : colorRed(),
                   static_cast<unsigned>(before.consecutiveFailures),
                   static_cast<unsigned>(after.consecutiveFailures),
                   colorReset());

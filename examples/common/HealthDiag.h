@@ -64,7 +64,7 @@ inline const char* stateColor(OPT4001::DriverState state) {
     case OPT4001::DriverState::READY:    return LOG_COLOR_GREEN;
     case OPT4001::DriverState::DEGRADED: return LOG_COLOR_YELLOW;
     case OPT4001::DriverState::OFFLINE:  return LOG_COLOR_RED;
-    case OPT4001::DriverState::UNINIT:   return LOG_COLOR_GRAY;
+    case OPT4001::DriverState::UNINIT:   return LOG_COLOR_YELLOW;
     default:                              return LOG_COLOR_RESET;
   }
 }
@@ -269,15 +269,16 @@ public:
     bool stateChanged = (currentState != _lastState);
     bool failChanged = (currentFail != _lastConsecFail);
     bool intervalElapsed = (_intervalMs > 0 && (now - _lastLogMs >= _intervalMs));
+    bool printSummary = stateChanged || failChanged || intervalElapsed || forceLog;
 
-    if (stateChanged || failChanged || intervalElapsed || forceLog) {
+    if (printSummary) {
       if (stateChanged) {
         LOGI("[HEALTH] State transition: %s%s%s -> %s%s%s",
              stateColor(_lastState), stateToString(_lastState), colorReset(),
              stateColor(currentState), stateToString(currentState), colorReset());
       }
 
-      if (intervalElapsed || forceLog) {
+      if (printSummary) {
         printHealthOneLine(driver);
       }
 

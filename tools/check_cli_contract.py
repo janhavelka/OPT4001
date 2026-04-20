@@ -36,6 +36,9 @@ MANDATORY_COMMANDS = [
     "scale",
     "adc2lux",
     "raw2lux",
+    "tryread",
+    "trylux",
+    "measure",
     "slot",
     "config",
     "intcfg",
@@ -46,10 +49,19 @@ MANDATORY_COMMANDS = [
     "regs",
     "reset",
     "resetreapply",
+    "watch",
+    "stop",
     "selftest",
     "verbose",
     "stress",
     "stress_mix",
+]
+
+MANDATORY_SUBSTRINGS = [
+    "threshold default",
+    "int ready",
+    "int fifo",
+    "int th ",
 ]
 
 
@@ -89,6 +101,10 @@ def main() -> int:
     for cmd in MANDATORY_COMMANDS:
         if re.search(rf"\b{re.escape(cmd)}\b", text) is None:
             fail(f"mandatory command '{cmd}' missing in {bringup_main.as_posix()}")
+
+    for cmd in MANDATORY_SUBSTRINGS:
+        if cmd not in text:
+            fail(f"mandatory CLI phrase '{cmd}' missing in {bringup_main.as_posix()}")
 
     if re.search(r"\bcfg\b", text) is None and re.search(r"\bsettings\b", text) is None:
         fail("either 'cfg' or 'settings' command must be present")

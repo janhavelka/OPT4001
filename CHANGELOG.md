@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tryReadLux()`, `restoreDefaultThresholds()`, and interrupt preset helpers for
   threshold, conversion-ready, and FIFO-full modes.
 - Broader native coverage for reset, CRC-policy, sample-cache, and device-ID paths.
+- CLI coverage for the convenience-helper layer: `tryread`, `trylux`, `measure`,
+  `threshold default`, and interrupt preset commands.
+- Non-blocking CLI watch mode with `watch`, `watch force`, and `stop` for live
+  bench validation of continuous and repeated one-shot measurement flows.
 
 ### Changed
 
@@ -34,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `healthmon` monitoring, helper-conversion commands (`adc2lux`, `raw2lux`,
   `thcalc`, `thdecode`), and stronger chip-specific stress/selftest auditing for
   counter continuity and conversion math.
+- Tightened the compact health view and health monitor output so the state colors and
+  one-line summaries match the verbose health reporting semantics more closely.
+- Improved CLI readback UX so key setters now echo the resulting decoded chip state
+  instead of only returning a status code.
 - Corrected the modeled `FLAGS` semantics so write-to-clear affects only
   `CONVERSION_READY_FLAG`, while full sticky-flag clearing follows the datasheet's
   clear-on-read behavior.

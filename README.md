@@ -240,9 +240,10 @@ void loop() {
   - interactive bring-up shell
   - scan, probe, recover, reset, reset-and-reapply, compact state view, and runtime address selection
   - decoded config / intcfg / flags / status / device-ID readback with colored health reporting
-  - one-shot reads, burst FIFO reads, single-slot history reads, cached-sample inspection, stress, stress-mix, and selftest
+  - one-shot reads, poll-friendly `tryread` / `trylux`, non-blocking `watch` / `stop`, burst FIFO reads, single-slot history reads, cached-sample inspection, stress, stress-mix, and selftest
   - lux / milli-lux / micro-lux commands plus `adc2lux`, `raw2lux`, scale / timing diagnostics, and the per-range scale table
-  - threshold lux helpers, `thcalc`, `thdecode`, raw threshold programming, interrupt configuration, and raw register / block access
+  - threshold lux helpers, `thcalc`, `thdecode`, `threshold default`, raw threshold programming, interrupt configuration, and raw register / block access
+  - measurement and interrupt convenience flows exposed directly in the shell via `measure`, `int ready`, `int fifo`, and `int th`
   - consolidated `diag` report and optional periodic `healthmon` output using the shared health diagnostic helper
 - `examples/common/`
   - board config and serial logging helpers
@@ -260,12 +261,25 @@ void loop() {
 - `status` / `status_raw` are CLI aliases for the decoded and raw `FLAGS` views.
 - `threshold raw <low> <high>` accepts packed 16-bit threshold register values for
   register-level bring-up, while `threshold <lowLux> <highLux>` uses the lux helpers.
+- `threshold default` restores the datasheet reset window without requiring the user
+  to know the packed reset values.
 - `thcalc <lux>` and `thdecode <raw16>` expose the datasheet threshold packing math
   without touching the sensor registers.
+- `measure <range|auto> <ctime0..11> <power|cont> [qwake0|1]` is a CLI wrapper over
+  `configureMeasurement()` so bring-up sessions can update the coherent measurement
+  tuple in one command instead of several register-like steps.
+- `watch [count] [intervalMs]` streams decoded samples using the current driver mode.
+  In `CONTINUOUS`, it polls the ready path and prints each sampled frame; in
+  `POWER_DOWN`, it repeatedly starts one-shot conversions. `watch force ...` uses
+  forced auto-range one-shots, and `stop` ends the active watch cleanly with a
+  summary.
+- `int ready`, `int fifo`, and `int th <lowLux> <highLux>` exercise the interrupt
+  preset helpers while preserving the library's non-owning transport/GPIO model.
 - `diag` intentionally skips `FLAGS` so the report does not clear the device's
   sticky status bits; use `status` or `status_raw` explicitly when you want that read.
 - `healthmon 1 [intervalMs]` enables periodic colorized health reporting from the
-  shared example diagnostics helper while the loop keeps running.
+  shared example diagnostics helper while the loop keeps running. Use interval `0`
+  for change-only reporting.
 - The example defaults to the SOT-5X3 package path. For PicoStar, switch the
   package variant and leave the INT hook disabled.
 
