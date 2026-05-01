@@ -133,6 +133,8 @@ public:
 
   // === Diagnostics (probe uses raw transport, recover uses tracked transport) ===
   Status probe();
+  /// Attempt recovery using tracked Device ID readback and config re-apply.
+  /// Transport failures and Device ID mismatches update health counters.
   Status recover();
   /// Perform the documented general-call reset (address 0x00, data 0x06).
   /// This is bus-wide and leaves the driver in UNINIT state.
@@ -259,8 +261,12 @@ public:
   Status writeIntConfig(uint16_t value) { return writeIntConfiguration(value); }
 
   // === Raw Register Access ===
+  /// Read a contiguous byte window from public 16-bit registers.
+  /// Blocks spanning reserved register gaps are rejected before I2C.
   Status readRegisters(uint8_t startReg, uint8_t* buf, size_t len);
+  /// Read one public 16-bit register; reserved addresses are rejected before I2C.
   Status readRegister16(uint8_t reg, uint16_t& value);
+  /// Write one public 16-bit register; reserved addresses are rejected before I2C.
   Status writeRegister16(uint8_t reg, uint16_t value);
   Status readRegister(uint8_t reg, uint16_t& value) { return readRegister16(reg, value); }
   Status writeRegister(uint8_t reg, uint16_t value) { return writeRegister16(reg, value); }
@@ -307,6 +313,7 @@ private:
 
   // === Health Tracking ===
   Status _updateHealth(const Status& st);
+  Status _recordFailure(const Status& st);
 
   // === Internal Helpers ===
   Status _applyConfig();

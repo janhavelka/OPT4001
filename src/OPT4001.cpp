@@ -5,6 +5,7 @@
 
 #include <Arduino.h>
 #include <climits>
+#include <cmath>
 
 namespace OPT4001 {
 namespace {
@@ -71,8 +72,38 @@ bool isValidSampleSlot(uint8_t slot) {
   return slot < cmd::SAMPLE_SLOT_COUNT;
 }
 
+bool isValidPublicRegisterAddress(uint8_t reg) {
+  return reg <= cmd::REG_FLAGS || reg == cmd::REG_DEVICE_ID;
+}
+
+bool isValidPublicRegisterBlock(uint8_t startReg, size_t len) {
+  if (len == 0) {
+    return false;
+  }
+  const uint16_t endReg = static_cast<uint16_t>(startReg) +
+                          static_cast<uint16_t>((len - 1U) / 2U);
+  if (endReg > UINT8_MAX) {
+    return false;
+  }
+  for (uint16_t reg = startReg; reg <= endReg; ++reg) {
+    if (!isValidPublicRegisterAddress(static_cast<uint8_t>(reg))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 uint32_t ceilUsToMs(uint32_t microseconds) {
   return (microseconds + 999U) / 1000U;
+}
+
+uint32_t blockingPollLimit(uint32_t timeoutMs, uint32_t extraMs = 0) {
+  static constexpr uint32_t MAX_POLLS = 1000000U;
+  uint64_t polls = (static_cast<uint64_t>(timeoutMs) + extraMs + 1ULL) * 16ULL + 16ULL;
+  if (polls > MAX_POLLS) {
+    return MAX_POLLS;
+  }
+  return static_cast<uint32_t>(polls);
 }
 
 }  // namespace
@@ -218,7 +249,8 @@ Status OPT4001::recover() {
     return st;
   }
   if ((deviceId & cmd::MASK_DIDH) != cmd::DIDH_EXPECTED) {
-    return Status::Error(Err::DEVICE_ID_MISMATCH, "Unexpected device ID", deviceId);
+    return _recordFailure(Status::Error(Err::DEVICE_ID_MISMATCH,
+                                        "Unexpected device ID", deviceId));
   }
 
   _clearRuntimeState();
@@ -580,10 +612,13 @@ Status OPT4001::readBlocking(Sample& out, Mode mode, uint32_t timeoutMs) {
   }
   if (_config.mode == Mode::CONTINUOUS) {
     const uint32_t deadlineMs = _nowMs() + timeoutMs;
-    while (static_cast<int32_t>(_nowMs() - deadlineMs) < 0) {
+    uint32_t polls = 0;
+    const uint32_t maxPolls = blockingPollLimit(timeoutMs);
+    while (static_cast<int32_t>(_nowMs() - deadlineMs) < 0 && polls < maxPolls) {
       if (conversionReady()) {
         return readSample(out);
       }
+      ++polls;
       _cooperativeYield();
     }
     return Status::Error(Err::TIMEOUT, "Continuous sample timeout");
@@ -607,8 +642,11 @@ Status OPT4001::readBlocking(Sample& out, Mode mode, uint32_t timeoutMs) {
     readyAtMs = (elapsed >= budgetMs) ? nowMs : (nowMs + budgetMs - elapsed);
   }
 
-  while (static_cast<int32_t>(_nowMs() - deadlineMs) < 0) {
+  uint32_t polls = 0;
+  const uint32_t maxPolls = blockingPollLimit(timeoutMs, budgetMs);
+  while (static_cast<int32_t>(_nowMs() - deadlineMs) < 0 && polls < maxPolls) {
     if (static_cast<int32_t>(_nowMs() - readyAtMs) < 0) {
+      ++polls;
       _cooperativeYield();
       continue;
     }
@@ -620,6 +658,7 @@ Status OPT4001::readBlocking(Sample& out, Mode mode, uint32_t timeoutMs) {
     if (readSt.code != Err::MEASUREMENT_NOT_READY) {
       return readSt;
     }
+    ++polls;
   }
 
   _conversionStarted = false;
@@ -762,8 +801,13 @@ Status OPT4001::setRange(Range range) {
   if (!isValidRange(range)) {
     return Status::Error(Err::INVALID_PARAM, "Invalid range");
   }
+  const Config oldConfig = _config;
   _config.range = range;
-  return _applyConfig();
+  Status st = _applyConfig();
+  if (!st.ok()) {
+    _config = oldConfig;
+  }
+  return st;
 }
 
 Status OPT4001::setConversionTime(ConversionTime time) {
@@ -773,8 +817,13 @@ Status OPT4001::setConversionTime(ConversionTime time) {
   if (!isValidConversionTime(time)) {
     return Status::Error(Err::INVALID_PARAM, "Invalid conversion time");
   }
+  const Config oldConfig = _config;
   _config.conversionTime = time;
-  return _applyConfig();
+  Status st = _applyConfig();
+  if (!st.ok()) {
+    _config = oldConfig;
+  }
+  return st;
 }
 
 Status OPT4001::setMode(Mode mode) {
@@ -784,16 +833,26 @@ Status OPT4001::setMode(Mode mode) {
   if (!isStableMode(mode)) {
     return Status::Error(Err::INVALID_PARAM, "Use startConversion() for one-shot modes");
   }
+  const Config oldConfig = _config;
   _config.mode = mode;
-  return _applyConfig();
+  Status st = _applyConfig();
+  if (!st.ok()) {
+    _config = oldConfig;
+  }
+  return st;
 }
 
 Status OPT4001::setQuickWake(bool enable) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
+  const Config oldConfig = _config;
   _config.quickWake = enable;
-  return _applyConfig();
+  Status st = _applyConfig();
+  if (!st.ok()) {
+    _config = oldConfig;
+  }
+  return st;
 }
 
 Status OPT4001::setVerifyCrc(bool enable) {
@@ -808,8 +867,13 @@ Status OPT4001::setInterruptLatch(InterruptLatch latch) {
   if (!isValidInterruptLatch(latch)) {
     return Status::Error(Err::INVALID_PARAM, "Invalid interrupt latch");
   }
+  const Config oldConfig = _config;
   _config.interruptLatch = latch;
-  return _applyConfig();
+  Status st = _applyConfig();
+  if (!st.ok()) {
+    _config = oldConfig;
+  }
+  return st;
 }
 
 Status OPT4001::setInterruptPolarity(InterruptPolarity polarity) {
@@ -819,8 +883,13 @@ Status OPT4001::setInterruptPolarity(InterruptPolarity polarity) {
   if (!isValidInterruptPolarity(polarity)) {
     return Status::Error(Err::INVALID_PARAM, "Invalid interrupt polarity");
   }
+  const Config oldConfig = _config;
   _config.interruptPolarity = polarity;
-  return _applyConfig();
+  Status st = _applyConfig();
+  if (!st.ok()) {
+    _config = oldConfig;
+  }
+  return st;
 }
 
 Status OPT4001::setFaultCount(FaultCount count) {
@@ -830,8 +899,13 @@ Status OPT4001::setFaultCount(FaultCount count) {
   if (!isValidFaultCount(count)) {
     return Status::Error(Err::INVALID_PARAM, "Invalid fault count");
   }
+  const Config oldConfig = _config;
   _config.faultCount = count;
-  return _applyConfig();
+  Status st = _applyConfig();
+  if (!st.ok()) {
+    _config = oldConfig;
+  }
+  return st;
 }
 
 Status OPT4001::setIntDirection(IntDirection direction) {
@@ -841,8 +915,13 @@ Status OPT4001::setIntDirection(IntDirection direction) {
   if (!isValidIntDirection(direction)) {
     return Status::Error(Err::INVALID_PARAM, "Invalid INT direction");
   }
+  const Config oldConfig = _config;
   _config.intDirection = direction;
-  return _applyConfig();
+  Status st = _applyConfig();
+  if (!st.ok()) {
+    _config = oldConfig;
+  }
+  return st;
 }
 
 Status OPT4001::setIntConfig(IntConfig config) {
@@ -852,16 +931,26 @@ Status OPT4001::setIntConfig(IntConfig config) {
   if (!isValidIntConfig(config)) {
     return Status::Error(Err::INVALID_PARAM, "Invalid INT configuration");
   }
+  const Config oldConfig = _config;
   _config.intConfig = config;
-  return _applyConfig();
+  Status st = _applyConfig();
+  if (!st.ok()) {
+    _config = oldConfig;
+  }
+  return st;
 }
 
 Status OPT4001::setBurstMode(bool enable) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
+  const Config oldConfig = _config;
   _config.burstMode = enable;
-  return _applyConfig();
+  Status st = _applyConfig();
+  if (!st.ok()) {
+    _config = oldConfig;
+  }
+  return st;
 }
 
 Status OPT4001::setThresholds(const Threshold& low, const Threshold& high) {
@@ -872,14 +961,20 @@ Status OPT4001::setThresholds(const Threshold& low, const Threshold& high) {
     return Status::Error(Err::INVALID_PARAM, "Invalid threshold");
   }
 
+  const Config oldConfig = _config;
   _config.lowThreshold = low;
   _config.highThreshold = high;
 
   Status st = writeRegister16(cmd::REG_THRESHOLD_L, _packThreshold(low));
   if (!st.ok()) {
+    _config = oldConfig;
     return st;
   }
-  return writeRegister16(cmd::REG_THRESHOLD_H, _packThreshold(high));
+  st = writeRegister16(cmd::REG_THRESHOLD_H, _packThreshold(high));
+  if (!st.ok()) {
+    _config = oldConfig;
+  }
+  return st;
 }
 
 Status OPT4001::getThresholds(Threshold& low, Threshold& high) {
@@ -957,11 +1052,16 @@ Status OPT4001::configureMeasurement(Range range,
     return Status::Error(Err::INVALID_PARAM, "Mode must be POWER_DOWN or CONTINUOUS");
   }
 
+  const Config oldConfig = _config;
   _config.range = range;
   _config.conversionTime = time;
   _config.mode = mode;
   _config.quickWake = quickWake;
-  return _applyConfig();
+  Status st = _applyConfig();
+  if (!st.ok()) {
+    _config = oldConfig;
+  }
+  return st;
 }
 
 Status OPT4001::restoreDefaultThresholds() {
@@ -991,11 +1091,16 @@ Status OPT4001::enableThresholdInterrupt(const Threshold& low, const Threshold& 
     return Status::Error(Err::INVALID_PARAM, "Low threshold must be <= high threshold");
   }
 
+  const Config oldConfig = _config;
   _config.lowThreshold = low;
   _config.highThreshold = high;
   _config.intDirection = IntDirection::PIN_OUTPUT;
   _config.intConfig = IntConfig::THRESHOLD;
-  return _applyConfig();
+  Status st = _applyConfig();
+  if (!st.ok()) {
+    _config = oldConfig;
+  }
+  return st;
 }
 
 Status OPT4001::enableThresholdInterruptLux(float lowLux, float highLux) {
@@ -1024,9 +1129,14 @@ Status OPT4001::enableConversionReadyInterrupt() {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
 
+  const Config oldConfig = _config;
   _config.intDirection = IntDirection::PIN_OUTPUT;
   _config.intConfig = IntConfig::EVERY_CONVERSION;
-  return _applyConfig();
+  Status st = _applyConfig();
+  if (!st.ok()) {
+    _config = oldConfig;
+  }
+  return st;
 }
 
 Status OPT4001::enableFifoFullInterrupt() {
@@ -1034,9 +1144,14 @@ Status OPT4001::enableFifoFullInterrupt() {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
 
+  const Config oldConfig = _config;
   _config.intDirection = IntDirection::PIN_OUTPUT;
   _config.intConfig = IntConfig::FIFO_FULL;
-  return _applyConfig();
+  Status st = _applyConfig();
+  if (!st.ok()) {
+    _config = oldConfig;
+  }
+  return st;
 }
 
 Status OPT4001::readConfiguration(uint16_t& value) {
@@ -1185,10 +1300,16 @@ Status OPT4001::readRegisters(uint8_t startReg, uint8_t* buf, size_t len) {
   if (buf == nullptr || len == 0) {
     return Status::Error(Err::INVALID_PARAM, "Invalid register block buffer");
   }
+  if (!isValidPublicRegisterBlock(startReg, len)) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid register block");
+  }
   return _i2cWriteReadTracked(&startReg, 1, buf, len);
 }
 
 Status OPT4001::readRegister16(uint8_t reg, uint16_t& value) {
+  if (!isValidPublicRegisterAddress(reg)) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid register address");
+  }
   uint8_t rx[2] = {0, 0};
   Status st = _i2cWriteReadTracked(&reg, 1, rx, sizeof(rx));
   if (!st.ok()) {
@@ -1199,6 +1320,9 @@ Status OPT4001::readRegister16(uint8_t reg, uint16_t& value) {
 }
 
 Status OPT4001::writeRegister16(uint8_t reg, uint16_t value) {
+  if (!isValidPublicRegisterAddress(reg)) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid register address");
+  }
   const uint8_t tx[3] = {
     reg,
     static_cast<uint8_t>((value >> 8) & 0xFF),
@@ -1365,14 +1489,17 @@ uint32_t OPT4001::getOneShotBudgetMs(Mode mode) const {
 }
 
 Status OPT4001::luxToThreshold(float lux, Threshold& out) const {
-  if (lux < 0.0f) {
-    return Status::Error(Err::INVALID_PARAM, "Lux threshold must be >= 0");
+  if (!std::isfinite(lux) || lux < 0.0f) {
+    return Status::Error(Err::INVALID_PARAM, "Lux threshold must be finite and >= 0");
   }
 
   const float lsb = getLuxLsb();
   uint32_t adcCodes = 0;
   if (lsb > 0.0f) {
-    adcCodes = static_cast<uint32_t>((lux / lsb) + 0.5f);
+    const double scaled = (static_cast<double>(lux) / static_cast<double>(lsb)) + 0.5;
+    adcCodes = (scaled >= static_cast<double>(UINT32_MAX))
+                   ? UINT32_MAX
+                   : static_cast<uint32_t>(scaled);
   }
 
   uint8_t exponent = 0;
@@ -1511,7 +1638,11 @@ Status OPT4001::_decodeSampleRegisters(uint16_t resultReg, uint16_t lsbCrcReg,
 Status OPT4001::_updateHealth(const Status& st) {
   const uint32_t nowMs = _nowMs();
 
-  if (st.ok() || st.inProgress()) {
+  if (st.inProgress()) {
+    return st;
+  }
+
+  if (st.ok()) {
     _lastOkMs = nowMs;
     _consecutiveFailures = 0;
     if (_totalSuccess < UINT32_MAX) {
@@ -1523,6 +1654,28 @@ Status OPT4001::_updateHealth(const Status& st) {
     return st;
   }
 
+  _lastErrorMs = nowMs;
+  _lastError = st;
+  if (_consecutiveFailures < UINT8_MAX) {
+    _consecutiveFailures++;
+  }
+  if (_totalFailures < UINT32_MAX) {
+    _totalFailures++;
+  }
+  if (_initialized) {
+    _driverState = (_consecutiveFailures >= _config.offlineThreshold)
+                       ? DriverState::OFFLINE
+                       : DriverState::DEGRADED;
+  }
+  return st;
+}
+
+Status OPT4001::_recordFailure(const Status& st) {
+  if (st.ok() || st.inProgress()) {
+    return st;
+  }
+
+  const uint32_t nowMs = _nowMs();
   _lastErrorMs = nowMs;
   _lastError = st;
   if (_consecutiveFailures < UINT8_MAX) {

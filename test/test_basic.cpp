@@ -3,6 +3,7 @@
 
 #include <unity.h>
 
+#include <limits>
 #include <cstring>
 
 #include "Arduino.h"
@@ -26,6 +27,7 @@ struct FakeBus {
   uint32_t nowMs = 1234;
   uint32_t writeCalls = 0;
   uint32_t readCalls = 0;
+  uint32_t failWriteCall = 0;
   uint32_t oneShotReadyAtMs = UINT32_MAX;
   uint32_t continuousReadyAtMs = UINT32_MAX;
 
@@ -84,6 +86,10 @@ Status fakeWrite(uint8_t, const uint8_t* data, size_t len, uint32_t, void* user)
   bus->writeCalls++;
   if (!bus->writeStatus.ok()) {
     return bus->writeStatus;
+  }
+  if (bus->failWriteCall != 0U && bus->writeCalls == bus->failWriteCall) {
+    bus->failWriteCall = 0;
+    return Status::Error(Err::I2C_ERROR, "forced indexed write error", -22);
   }
   if (data == nullptr || len == 0) {
     return Status::Error(Err::INVALID_PARAM, "invalid fake write");
@@ -319,6 +325,24 @@ void test_probe_failure_does_not_update_health() {
   TEST_ASSERT_EQUAL_UINT32(beforeFailures, dev.totalFailures());
 }
 
+void test_probe_id_mismatch_does_not_update_health() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  const uint32_t beforeSuccess = dev.totalSuccess();
+  const uint32_t beforeFailures = dev.totalFailures();
+  bus.registers[cmd::REG_DEVICE_ID] = 0x0000;
+
+  Status st = dev.probe();
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::DEVICE_ID_MISMATCH),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT32(beforeSuccess, dev.totalSuccess());
+  TEST_ASSERT_EQUAL_UINT32(beforeFailures, dev.totalFailures());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::READY),
+                          static_cast<uint8_t>(dev.state()));
+}
+
 void test_recover_failure_updates_health() {
   FakeBus bus;
   OPT4001::OPT4001 dev;
@@ -330,6 +354,25 @@ void test_recover_failure_updates_health() {
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::DEGRADED),
                           static_cast<uint8_t>(dev.state()));
   TEST_ASSERT_EQUAL_UINT32(1u, dev.totalFailures());
+}
+
+void test_recover_id_mismatch_updates_health() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  bus.nowMs = 2222;
+  bus.registers[cmd::REG_DEVICE_ID] = 0x0000;
+  Status st = dev.recover();
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::DEVICE_ID_MISMATCH),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::DEGRADED),
+                          static_cast<uint8_t>(dev.state()));
+  TEST_ASSERT_EQUAL_UINT32(1u, dev.totalFailures());
+  TEST_ASSERT_EQUAL_UINT8(1u, dev.consecutiveFailures());
+  TEST_ASSERT_EQUAL_UINT32(2222u, dev.lastErrorMs());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::DEVICE_ID_MISMATCH),
+                          static_cast<uint8_t>(dev.lastError().code));
 }
 
 void test_recover_success_returns_ready() {
@@ -371,6 +414,25 @@ void test_start_conversion_wraparound_reaches_ready() {
   TEST_ASSERT_TRUE(st.ok());
   TEST_ASSERT_EQUAL_UINT8(1u, sample.exponent);
   TEST_ASSERT_EQUAL_UINT32(0x12345u, sample.mantissa);
+}
+
+void test_read_blocking_times_out_with_stalled_clock() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  Sample sample;
+  Status st = dev.readBlocking(sample, Mode::ONE_SHOT, 5);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::TIMEOUT), static_cast<uint8_t>(st.code));
+
+  FakeBus continuousBus;
+  OPT4001::OPT4001 continuousDev;
+  Config cfg = makeConfig(continuousBus);
+  cfg.mode = Mode::CONTINUOUS;
+  TEST_ASSERT_TRUE(continuousDev.begin(cfg).ok());
+
+  st = continuousDev.readBlocking(sample, 5);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::TIMEOUT), static_cast<uint8_t>(st.code));
 }
 
 void test_read_sample_decodes_lux_and_crc() {
@@ -824,6 +886,79 @@ void test_configuration_and_interrupt_convenience_helpers() {
                            highRead.result);
 }
 
+void test_cached_configuration_rolls_back_after_i2c_failure() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  bus.writeStatus = Status::Error(Err::I2C_ERROR, "forced write error", -12);
+  Status st = dev.setRange(Range::RANGE_3);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_ERROR), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Range::AUTO), static_cast<uint8_t>(dev.getRange()));
+
+  bus.writeStatus = Status::Ok();
+  bus.failWriteCall = bus.writeCalls + 2U;
+  Threshold low{1, 0x0010};
+  Threshold high{1, 0x0020};
+  st = dev.setThresholds(low, high);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_ERROR), static_cast<uint8_t>(st.code));
+
+  SettingsSnapshot snap;
+  TEST_ASSERT_TRUE(dev.getSettings(snap).ok());
+  TEST_ASSERT_EQUAL_UINT8(0u, snap.lowThreshold.exponent);
+  TEST_ASSERT_EQUAL_UINT16(0u, snap.lowThreshold.result);
+  TEST_ASSERT_EQUAL_UINT8(0x0Bu, snap.highThreshold.exponent);
+  TEST_ASSERT_EQUAL_UINT16(0x0FFFu, snap.highThreshold.result);
+
+  bus.writeStatus = Status::Error(Err::I2C_ERROR, "forced write error", -13);
+  st = dev.configureMeasurement(Range::RANGE_2, ConversionTime::MS_25, Mode::CONTINUOUS, true);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_ERROR), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Range::AUTO), static_cast<uint8_t>(dev.getRange()));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ConversionTime::MS_100),
+                          static_cast<uint8_t>(dev.getConversionTime()));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Mode::POWER_DOWN),
+                          static_cast<uint8_t>(dev.getMode()));
+  TEST_ASSERT_FALSE(dev.getQuickWake());
+}
+
+void test_raw_register_access_rejects_invalid_bounds_without_bus_io() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  const uint32_t readsBefore = bus.readCalls;
+  const uint32_t writesBefore = bus.writeCalls;
+  uint16_t value = 0;
+  Status st = dev.readRegister16(0x0D, value);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM), static_cast<uint8_t>(st.code));
+
+  st = dev.writeRegister16(0x0D, 0x1234);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM), static_cast<uint8_t>(st.code));
+
+  uint8_t raw[4] = {};
+  st = dev.readRegisters(cmd::REG_FLAGS, raw, sizeof(raw));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM), static_cast<uint8_t>(st.code));
+
+  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
+}
+
+void test_lux_to_threshold_rejects_non_finite_inputs() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  Threshold threshold;
+  Status st = dev.luxToThreshold(std::numeric_limits<float>::quiet_NaN(), threshold);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM), static_cast<uint8_t>(st.code));
+
+  st = dev.luxToThreshold(std::numeric_limits<float>::infinity(), threshold);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM), static_cast<uint8_t>(st.code));
+
+  st = dev.setThresholdsLux(1.0f, std::numeric_limits<float>::infinity());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM), static_cast<uint8_t>(st.code));
+}
+
 void test_soft_reset_moves_driver_to_uninit() {
   FakeBus bus;
   OPT4001::OPT4001 dev;
@@ -903,9 +1038,12 @@ int main() {
   RUN_TEST(test_begin_rejects_invalid_package_address_combo);
   RUN_TEST(test_begin_success_sets_ready_and_counters);
   RUN_TEST(test_probe_failure_does_not_update_health);
+  RUN_TEST(test_probe_id_mismatch_does_not_update_health);
   RUN_TEST(test_recover_failure_updates_health);
+  RUN_TEST(test_recover_id_mismatch_updates_health);
   RUN_TEST(test_recover_success_returns_ready);
   RUN_TEST(test_start_conversion_wraparound_reaches_ready);
+  RUN_TEST(test_read_blocking_times_out_with_stalled_clock);
   RUN_TEST(test_read_sample_decodes_lux_and_crc);
   RUN_TEST(test_crc_mismatch_returns_error_when_enabled);
   RUN_TEST(test_crc_mismatch_allowed_when_verification_disabled);
@@ -925,6 +1063,9 @@ int main() {
   RUN_TEST(test_try_read_helpers_report_not_ready_without_error);
   RUN_TEST(test_scale_and_counter_helpers);
   RUN_TEST(test_configuration_and_interrupt_convenience_helpers);
+  RUN_TEST(test_cached_configuration_rolls_back_after_i2c_failure);
+  RUN_TEST(test_raw_register_access_rejects_invalid_bounds_without_bus_io);
+  RUN_TEST(test_lux_to_threshold_rejects_non_finite_inputs);
   RUN_TEST(test_soft_reset_moves_driver_to_uninit);
   RUN_TEST(test_reset_and_reapply_restores_ready_and_config);
   RUN_TEST(test_raw_transport_rejects_invalid_buffers);

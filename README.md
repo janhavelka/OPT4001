@@ -147,6 +147,8 @@ void loop() {
   libraries: reset the device, then restore the cached configuration.
 - `readSample()`, `readBurst()`, and the blocking helpers may return `CRC_ERROR`
   while still populating the decoded sample data.
+- Blocking read helpers have a finite polling cap in addition to their millisecond
+  deadline, so a stalled injected clock cannot spin forever.
 - `readLux()`, `readMilliLux()`, `readMicroLux()`, and `tryReadLux()` follow the
   same rule: on `CRC_ERROR`, the scaled output value is still written.
 - `readSampleSlot(0..3)` provides direct access to the newest sample plus the
@@ -159,6 +161,8 @@ void loop() {
 - `configureMeasurement()` applies range, conversion time, quick-wake, and the
   stable operating mode in one coherent update while still using the same cached
   config model and injected transport.
+- Cached configuration setters roll back the cached state if the required I2C
+  write sequence fails.
 - `readFlags()` reads register `0x0C`; that register is clear-on-read on the device.
 - `clearConversionReadyFlag()` performs the datasheet's write-nonzero clear of
   only `CONVERSION_READY_FLAG`, while `clearFlags()` uses the clear-on-read path
@@ -175,6 +179,10 @@ void loop() {
 - The threshold-interrupt convenience helpers reject inverted windows
   (`low > high`) up front; the lower-level raw threshold setters remain available
   when an application really needs exact register control.
+- Threshold lux helpers reject negative, NaN, and infinite inputs before packing
+  threshold registers.
+- Raw register access is bounded to documented public registers; blocks that span
+  reserved gaps are rejected before touching the bus.
 
 ## Public Surface
 

@@ -11,6 +11,7 @@
 #include "examples/common/HealthView.h"
 #include "examples/common/I2cScanner.h"
 #include "examples/common/I2cTransport.h"
+#include "examples/common/CliStyle.h"
 #include "examples/common/Log.h"
 
 #include "OPT4001/OPT4001.h"
@@ -1876,92 +1877,85 @@ void runSelfTest() {
 }
 
 void printHelp() {
-  auto section = [](const char* title) {
-    Serial.printf("\n%s[%s]%s\n", LOG_COLOR_GREEN, title, LOG_COLOR_RESET);
-  };
-  auto item = [](const char* cmd, const char* desc) {
-    Serial.printf("  %s%-32s%s - %s\n", LOG_COLOR_CYAN, cmd, LOG_COLOR_RESET, desc);
-  };
-
   Serial.println();
-  Serial.printf("%s=== OPT4001 CLI Help ===%s\n", LOG_COLOR_CYAN, LOG_COLOR_RESET);
+  cli::printHelpHeader("OPT4001 CLI Help");
 
-  section("Common");
-  item("help / ?", "Show this help");
-  item("version / ver", "Print firmware and library version info");
-  item("scan", "Scan I2C bus");
-  item("init", "Initialize/reinitialize device");
-  item("end", "Shut down driver (returns to UNINIT)");
-  item("addr [0x44|0x45|0x46]", "Show or set target I2C address");
-  item("pkg [pico|sot]", "Show or set package variant");
+  cli::printHelpSection("Common");
+  cli::printHelpItem("help / ?", "Show this help");
+  cli::printHelpItem("version / ver", "Print firmware and library version info");
+  cli::printHelpItem("scan", "Scan I2C bus");
+  cli::printHelpItem("init", "Initialize/reinitialize device");
+  cli::printHelpItem("end", "Shut down driver (returns to UNINIT)");
+  cli::printHelpItem("addr [0x44|0x45|0x46]", "Show or set target I2C address");
+  cli::printHelpItem("pkg [pico|sot]", "Show or set package variant");
 
-  section("Data");
-  item("read", "Blocking one-shot read");
-  item("read force", "Blocking forced-auto read");
-  item("read N", "Run N blocking reads");
-  item("readblocking [force]", "Explicit blocking alias");
-  item("tryread / trylux", "Poll-friendly read helpers");
-  item("start [force]", "Start one-shot conversion");
-  item("poll / drdy", "Check conversion ready");
-  item("watch [N] [interval]", "Stream samples using current mode");
-  item("watch force [N] [interval]", "Repeat forced-auto one-shots");
-  item("stop", "Stop active watch session");
-  item("readburst [force]", "Read RESULT plus FIFO history");
-  item("slot <0..3>", "Read one history slot (0=newest)");
-  item("sample / sampleage", "Cached sample and age");
-  item("lux / mlux / ulux", "Read scaled lux helpers");
-  item("adc2lux <codes>", "Convert linearized ADC codes to lux");
-  item("raw2lux <exp> <mant>", "Convert raw exponent(0..8)/mantissa fields to lux");
-  item("scale / timing", "Show package scaling and timing helpers");
+  cli::printHelpSection("Data");
+  cli::printHelpItem("read", "Blocking one-shot read");
+  cli::printHelpItem("read force", "Blocking forced-auto read");
+  cli::printHelpItem("read N", "Run N blocking reads");
+  cli::printHelpItem("readblocking [force]", "Explicit blocking alias");
+  cli::printHelpItem("tryread / trylux", "Poll-friendly read helpers");
+  cli::printHelpItem("start [force]", "Start one-shot conversion");
+  cli::printHelpItem("poll / drdy", "Check conversion ready");
+  cli::printHelpItem("watch [N] [interval]", "Stream samples using current mode");
+  cli::printHelpItem("watch force [N] [interval]", "Repeat forced-auto one-shots");
+  cli::printHelpItem("stop", "Stop active watch session");
+  cli::printHelpItem("readburst [force]", "Read RESULT plus FIFO history");
+  cli::printHelpItem("slot <0..3>", "Read one history slot (0=newest)");
+  cli::printHelpItem("sample / sampleage", "Cached sample and age");
+  cli::printHelpItem("lux / mlux / ulux", "Read scaled lux helpers");
+  cli::printHelpItem("adc2lux <codes>", "Convert linearized ADC codes to lux");
+  cli::printHelpItem("raw2lux <exp> <mant>", "Convert raw exponent(0..8)/mantissa fields to lux");
+  cli::printHelpItem("scale / timing", "Show package scaling and timing helpers");
 
-  section("Configuration");
-  item("cfg / settings", "Show live config and cached settings");
-  item("snapshot", "Show cached settings only");
-  item("id / identify", "Read and decode device ID");
-  item("config", "Read and decode CONFIGURATION");
-  item("config write <hex>", "Write full CONFIGURATION");
-  item("intcfg", "Read and decode INT_CONFIGURATION");
-  item("intcfg write <hex>", "Write full INT_CONFIGURATION");
-  item("mode [power|cont]", "Set or show stable mode");
-  item("range [0..8|auto]", "Set or show range");
-  item("ctime [0..11]", "Set or show conversion time");
-  item("measure <rng> <ct> <mode> [qw]", "Apply range/ctime/mode/qwake together");
-  item("qwake [0|1]", "Set or show quick wake");
-  item("crc [0|1]", "Set or show host-side CRC verification");
-  item("burst [0|1]", "Set or show I2C burst mode");
-  item("threshold [low high]", "Read or set thresholds in lux");
-  item("threshold default", "Restore default threshold window");
-  item("threshold raw <low> <high>", "Set thresholds from raw 16-bit register values");
-  item("thcalc <lux>", "Calculate threshold register fields for lux");
-  item("thdecode <raw16>", "Decode packed threshold register value");
-  item("int ready|fifo", "Apply INT preset helpers");
-  item("int th <low> <high>", "Threshold INT preset with lux window");
-  item("int latch|pol|faults|dir|cfg ...", "Low-level interrupt configuration");
+  cli::printHelpSection("Configuration");
+  cli::printHelpItem("cfg / settings", "Show live config and cached settings");
+  cli::printHelpItem("snapshot", "Show cached settings only");
+  cli::printHelpItem("id / identify", "Read and decode device ID");
+  cli::printHelpItem("config", "Read and decode CONFIGURATION");
+  cli::printHelpItem("config write <hex>", "Write full CONFIGURATION");
+  cli::printHelpItem("intcfg", "Read and decode INT_CONFIGURATION");
+  cli::printHelpItem("intcfg write <hex>", "Write full INT_CONFIGURATION");
+  cli::printHelpItem("mode [power|cont]", "Set or show stable mode");
+  cli::printHelpItem("range [0..8|auto]", "Set or show range");
+  cli::printHelpItem("ctime [0..11]", "Set or show conversion time");
+  cli::printHelpItem("measure <rng> <ct> <mode> [qw]", "Apply range/ctime/mode/qwake together");
+  cli::printHelpItem("qwake [0|1]", "Set or show quick wake");
+  cli::printHelpItem("crc [0|1]", "Set or show host-side CRC verification");
+  cli::printHelpItem("burst [0|1]", "Set or show I2C burst mode");
+  cli::printHelpItem("threshold [low high]", "Read or set thresholds in lux");
+  cli::printHelpItem("threshold default", "Restore default threshold window");
+  cli::printHelpItem("threshold raw <low> <high>", "Set thresholds from raw 16-bit register values");
+  cli::printHelpItem("thcalc <lux>", "Calculate threshold register fields for lux");
+  cli::printHelpItem("thdecode <raw16>", "Decode packed threshold register value");
+  cli::printHelpItem("int ready|fifo", "Apply INT preset helpers");
+  cli::printHelpItem("int th <low> <high>", "Threshold INT preset with lux window");
+  cli::printHelpItem("int latch|pol|faults|dir|cfg ...", "Low-level interrupt configuration");
 
-  section("Registers");
-  item("status / flags", "Read and decode FLAGS (clear-on-read)");
-  item("status_raw / flags raw", "Read raw FLAGS register");
-  item("flags readyclear", "Clear ready flag only by write");
-  item("flags clear", "Clear sticky flags via read path");
-  item("dump", "Dump key registers");
-  item("reg <addr>", "Read 16-bit register");
-  item("regs <start> <len>", "Read raw register bytes");
-  item("wreg <addr> <val>", "Write 16-bit register");
+  cli::printHelpSection("Registers");
+  cli::printHelpItem("status / flags", "Read and decode FLAGS (clear-on-read)");
+  cli::printHelpItem("status_raw / flags raw", "Read raw FLAGS register");
+  cli::printHelpItem("flags readyclear", "Clear ready flag only by write");
+  cli::printHelpItem("flags clear", "Clear sticky flags via read path");
+  cli::printHelpItem("dump", "Dump key registers");
+  cli::printHelpItem("reg <addr>", "Read 16-bit register");
+  cli::printHelpItem("regs <start> <len>", "Read raw register bytes");
+  cli::printHelpItem("wreg <addr> <val>", "Write 16-bit register");
 
-  section("Diagnostics");
-  item("drv / health", "Show driver state and health");
-  item("state", "Show compact one-line health summary");
-  item("diag", "Print consolidated diagnostic report");
-  item("online", "Show online/offline state");
-  item("probe", "Probe device (no health tracking)");
-  item("recover", "Manual recovery attempt");
-  item("reset", "General-call reset (bus-wide)");
-  item("resetreapply", "General-call reset + re-apply");
-  item("healthmon [0|1] [interval]", "Toggle health monitor (0=change-only)");
-  item("verbose [0|1]", "Enable/disable verbose output");
-  item("stress [N]", "Run blocking read stress");
-  item("stress_mix [N]", "Run mixed-operation stress");
-  item("selftest", "Run safe command self-test report");
+  cli::printHelpSection("Diagnostics");
+  cli::printHelpItem("drv / health", "Show driver state and health");
+  cli::printHelpItem("state", "Show compact one-line health summary");
+  cli::printHelpItem("diag", "Print consolidated diagnostic report");
+  cli::printHelpItem("online", "Show online/offline state");
+  cli::printHelpItem("probe", "Probe device (no health tracking)");
+  cli::printHelpItem("recover", "Manual recovery attempt");
+  cli::printHelpItem("reset", "General-call reset (bus-wide)");
+  cli::printHelpItem("resetreapply", "General-call reset + re-apply");
+  cli::printHelpItem("healthmon [0|1] [interval]", "Toggle health monitor (0=change-only)");
+  cli::printHelpItem("verbose [0|1]", "Enable/disable verbose output");
+  cli::printHelpItem("stress [N]", "Run blocking read stress");
+  cli::printHelpItem("stress_mix [N]", "Run mixed-operation stress");
+  cli::printHelpItem("selftest", "Run safe command self-test report");
 }
 
 void processCommand(const String& cmdLine) {
@@ -2894,7 +2888,7 @@ void setup() {
   }
 
   Serial.println("\nType 'help' for commands");
-  Serial.print("> ");
+  cli::printPrompt();
 }
 
 void loop() {
@@ -2911,7 +2905,7 @@ void loop() {
       if (inputBuffer.length() > 0) {
         processCommand(inputBuffer);
         inputBuffer = "";
-        Serial.print("> ");
+        cli::printPrompt();
       }
     } else if (inputBuffer.length() < kMaxInputLen) {
       inputBuffer += c;

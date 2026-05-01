@@ -24,9 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `threshold default`, and interrupt preset commands.
 - Non-blocking CLI watch mode with `watch`, `watch force`, and `stop` for live
   bench validation of continuous and repeated one-shot measurement flows.
+- Root `AGENTS.md` production guidelines for future driver work.
 
 ### Changed
 
+- Doxyfile project metadata now matches `library.json` and references the
+  maintained docs tree instead of removed template files.
 - Expanded the bring-up CLI to cover version info, reset flows, config/intcfg readback, cached samples, FIFO burst reads, interrupt setup, and self-test.
 - Expanded the bring-up CLI again to cover decoded ID/config output, address switching,
   raw register-block reads, per-slot history reads, scaled lux helpers, threshold lux
@@ -49,6 +52,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decoded lux / milli-lux / micro-lux outputs to the caller.
 - Tightened the CLI contract check so the richer diagnostic commands remain present.
 - Updated README and assumptions to document the bus-wide reset path and the intentionally omitted controller/application-layer behaviors.
+- Hardened cached configuration setters so failed I2C write sequences roll back the cached driver state.
+- Documented bounded blocking-read polling, public raw-register bounds, and stricter threshold lux input validation.
+
+### Fixed
+
+- Made `recover()` record Device ID mismatches in health tracking instead of returning a semantic error with stale health state.
+- Added a finite poll cap to blocking read helpers so a stalled injected millisecond source returns `TIMEOUT`.
+- Rejected reserved raw-register addresses and register blocks before touching the bus.
+- Rejected NaN and infinite lux threshold inputs before converting to packed threshold registers.
 
 ## [1.0.0] - 2026-04-14
 
