@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tryReadLux()`, `restoreDefaultThresholds()`, and interrupt preset helpers for
   threshold, conversion-ready, and FIFO-full modes.
 - Broader native coverage for reset, CRC-policy, sample-cache, and device-ID paths.
+- Native coverage for latched `OFFLINE` no-bus-touch behavior and readiness error propagation through `tryRead*()` / `readBlocking()` paths.
 - CLI coverage for the convenience-helper layer: `tryread`, `trylux`, `measure`,
   `threshold default`, and interrupt preset commands.
 - Non-blocking CLI watch mode with `watch`, `watch force`, and `stop` for live
@@ -54,6 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated README and assumptions to document the bus-wide reset path and the intentionally omitted controller/application-layer behaviors.
 - Hardened cached configuration setters so failed I2C write sequences roll back the cached driver state.
 - Documented bounded blocking-read polling, public raw-register bounds, and stricter threshold lux input validation.
+- Added `conversionReady(bool&)` so readiness checks can report transport errors while preserving the existing `bool conversionReady()` convenience helper.
+- Health behavior is now standardized on latched `OFFLINE`: normal public I2C operations return `BUSY` with `Driver is offline; call recover()` and do not touch I2C until `recover()` succeeds.
+- Explicit recovery/reset bypass internals now use the shared `ScopedOfflineI2cAllowance` / `_reassertOfflineLatch()` procedure so failed recovery attempts that begin from `OFFLINE` keep the latch asserted.
 
 ### Fixed
 
@@ -61,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a finite poll cap to blocking read helpers so a stalled injected millisecond source returns `TIMEOUT`.
 - Rejected reserved raw-register addresses and register blocks before touching the bus.
 - Rejected NaN and infinite lux threshold inputs before converting to packed threshold registers.
+- Readiness-poll I2C errors are no longer flattened into `false`, not-ready, or timeout results by `tryRead*()` and blocking read helpers.
 
 ## [1.0.0] - 2026-04-14
 

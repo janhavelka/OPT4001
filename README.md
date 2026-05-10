@@ -138,6 +138,9 @@ void loop() {
 
 - `begin()` validates the transport, address, package variant, and device ID, then
   applies the cached configuration.
+- The driver is not internally synchronized or ISR-safe. Call public APIs from one
+  task or protect the shared driver instance and transport with an application
+  lock. ISRs should only signal work to a task; they should not call driver methods.
 - `Config.mode` accepts only `POWER_DOWN` or `CONTINUOUS`.
   One-shot measurements are started explicitly with `startConversion()` or
   `readBlocking()`.
@@ -158,6 +161,12 @@ void loop() {
 - `tryReadSample()` / `tryReadLux()` are intended for cooperative polling loops:
   they return `OK` with `didRead=false` when no sample is ready yet, so the
   application does not have to treat `MEASUREMENT_NOT_READY` as control flow.
+  I2C or register-poll failures are still returned as errors.
+- `OFFLINE` is latched. After the health threshold is reached, normal public I2C
+  operations return `BUSY` with `"Driver is offline; call recover()"` without
+  touching the bus. Use `recover()` to probe and re-apply cached configuration,
+  or use the explicit reset / reset-and-reapply diagnostics when a bus-wide
+  reset is acceptable.
 - `configureMeasurement()` applies range, conversion time, quick-wake, and the
   stable operating mode in one coherent update while still using the same cached
   config model and injected transport.
