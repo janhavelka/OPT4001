@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `softReset()` and `resetAndReapply()` to align OPT4001 reset handling with the stronger sibling libraries while preserving the datasheet's general-call reset behavior.
 - Sample-cache helpers: `getLastSample()`, `sampleTimestampMs()`, and `sampleAgeMs()`.
+- `hasSample()` / `SettingsSnapshot::hasSample` and `readIntPinAsserted(bool&)` for cache and INT GPIO diagnostics.
 - `readDeviceId()` and `setVerifyCrc()` typed helpers.
 - Decoded helper structs and register helpers: `DeviceIdInfo`, `ConfigurationInfo`,
   `IntConfigurationInfo`, `readRegisters()`, `readSampleSlot()`,
@@ -22,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Broader native coverage for reset, CRC-policy, sample-cache, and device-ID paths.
 - Native coverage for latched `OFFLINE` no-bus-touch behavior and readiness error propagation through `tryRead*()` / `readBlocking()` paths.
 - CLI coverage for the convenience-helper layer: `tryread`, `trylux`, `measure`,
-  `threshold default`, and interrupt preset commands.
+  `threshold default`, `begin`, `intpin`, and interrupt preset commands.
 - Non-blocking CLI watch mode with `watch`, `watch force`, and `stop` for live
   bench validation of continuous and repeated one-shot measurement flows.
 - Root `AGENTS.md` production guidelines for future driver work.
@@ -31,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Doxyfile project metadata now matches `library.json` and references the
   maintained docs tree instead of removed template files.
+- Reference documentation now separates compact ambient-light notes from full PDF/application-note extractions under `docs/extracted-md/` and `docs/pdf-extracted-md/`.
 - Expanded the bring-up CLI to cover version info, reset flows, config/intcfg readback, cached samples, FIFO burst reads, interrupt setup, and self-test.
 - Expanded the bring-up CLI again to cover decoded ID/config output, address switching,
   raw register-block reads, per-slot history reads, scaled lux helpers, threshold lux
@@ -56,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hardened cached configuration setters so failed I2C write sequences roll back the cached driver state.
 - Documented bounded blocking-read polling, public raw-register bounds, and stricter threshold lux input validation.
 - Added `conversionReady(bool&)` so readiness checks can report transport errors while preserving the existing `bool conversionReady()` convenience helper.
+- Failed `begin()` and startup probe paths now clear stale sample/config state and avoid seeding runtime health counters with setup traffic.
 - Health behavior is now standardized on latched `OFFLINE`: normal public I2C operations return `BUSY` with `Driver is offline; call recover()` and do not touch I2C until `recover()` succeeds.
 - Explicit recovery/reset bypass internals now use the shared `ScopedOfflineI2cAllowance` / `_reassertOfflineLatch()` procedure so failed recovery attempts that begin from `OFFLINE` keep the latch asserted.
 

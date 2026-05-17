@@ -14,10 +14,10 @@ namespace OPT4001 {
 
 /// Driver state for health monitoring.
 enum class DriverState : uint8_t {
-  UNINIT,
-  READY,
-  DEGRADED,
-  OFFLINE
+  UNINIT,   ///< begin() has not succeeded or end() was called.
+  READY,    ///< Driver is initialized and has no consecutive I2C failures.
+  DEGRADED, ///< Driver is initialized with failures below the offline threshold.
+  OFFLINE   ///< Consecutive I2C failures reached the configured threshold.
 };
 
 /// Decoded measurement sample from RESULT/FIFO registers.
@@ -110,6 +110,7 @@ struct SettingsSnapshot {
   Threshold lowThreshold{};
   Threshold highThreshold{0x0B, 0x0FFF};
   bool sampleAvailable = false;
+  bool hasSample = false;
   bool lastSampleValid = false;
   bool conversionStarted = false;
   bool conversionReady = false;
@@ -147,6 +148,8 @@ public:
 
   // === Driver State ===
   DriverState state() const { return _driverState; }
+  /// Alias for state() used by shared diagnostics.
+  DriverState driverState() const { return state(); }
   bool isOnline() const {
     return _driverState == DriverState::READY ||
            _driverState == DriverState::DEGRADED;
@@ -163,13 +166,23 @@ public:
   // === Measurement API ===
   Status startConversion();
   Status startConversion(Mode mode);
+  /// Status-returning readiness check.
+  /// @param[out] ready Set true when a sample can be read
+  /// @return Status::Ok() with ready=false when no sample is ready; transport errors are returned
+  Status conversionReady(bool& ready);
+  /// Convenience readiness check. Transport/poll errors are collapsed to false.
   bool conversionReady();
   Status readSample(Sample& out);
   Status readBurst(BurstFrame& out);
   /// Read one slot from the 4-deep history window: 0 = newest RESULT, 1-3 = FIFO shadows.
   Status readSampleSlot(uint8_t slot, Sample& out);
   Status getLastSample(Sample& out) const;
+  /// True after at least one sample has been cached.
+  bool hasSample() const { return _lastSampleValid; }
   uint32_t sampleTimestampMs() const;
+  /// Age of the cached sample in milliseconds.
+  /// @param nowMs Current monotonic timestamp in milliseconds
+  /// @return `nowMs - sampleTimestampMs()` when a sample exists, otherwise 0
   uint32_t sampleAgeMs(uint32_t nowMs) const;
   Status readLux(float& lux);
   Status readMilliLux(uint32_t& milliLux);
@@ -193,6 +206,10 @@ public:
   Status clearConversionReadyFlag();
   /// Clear all sticky status indications using the documented clear-on-read behavior.
   Status clearFlags();
+  /// Read the configured INT GPIO hook and report assertion using INT_POL.
+  /// @param[out] asserted True when the configured pin is active
+  /// @return Status::Ok() on success, INVALID_CONFIG when no INT hook is available
+  Status readIntPinAsserted(bool& asserted) const;
 
   // === Configuration ===
   Status setPackageVariant(PackageVariant variant);
@@ -314,6 +331,7 @@ private:
   // === Health Tracking ===
   Status _updateHealth(const Status& st);
   Status _recordFailure(const Status& st);
+  void _reassertOfflineLatch();
 
   // === Internal Helpers ===
   Status _applyConfig();
@@ -332,6 +350,7 @@ private:
   Config _config;
   bool _initialized = false;
   DriverState _driverState = DriverState::UNINIT;
+  bool _allowOfflineI2c = false;
 
   // === Health Counters ===
   uint32_t _lastOkMs = 0;

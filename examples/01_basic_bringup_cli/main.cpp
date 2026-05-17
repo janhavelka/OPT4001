@@ -694,7 +694,16 @@ void handleWatch() {
     if (watchState.intervalMs > 0U && (now - watchState.lastStepMs) < watchState.intervalMs) {
       return;
     }
-    if (!device.conversionReady()) {
+    bool ready = false;
+    OPT4001::Status readySt = device.conversionReady(ready);
+    if (!readySt.ok()) {
+      recordWatchStatus(readySt);
+      printStatus(readySt);
+      watchState.lastStepMs = now;
+      watchState.remaining--;
+      return;
+    }
+    if (!ready) {
       return;
     }
 
@@ -1884,7 +1893,7 @@ void printHelp() {
   cli::printHelpItem("help / ?", "Show this help");
   cli::printHelpItem("version / ver", "Print firmware and library version info");
   cli::printHelpItem("scan", "Scan I2C bus");
-  cli::printHelpItem("init", "Initialize/reinitialize device");
+  cli::printHelpItem("init / begin", "Initialize/reinitialize device");
   cli::printHelpItem("end", "Shut down driver (returns to UNINIT)");
   cli::printHelpItem("addr [0x44|0x45|0x46]", "Show or set target I2C address");
   cli::printHelpItem("pkg [pico|sot]", "Show or set package variant");
@@ -1931,6 +1940,7 @@ void printHelp() {
   cli::printHelpItem("int ready|fifo", "Apply INT preset helpers");
   cli::printHelpItem("int th <low> <high>", "Threshold INT preset with lux window");
   cli::printHelpItem("int latch|pol|faults|dir|cfg ...", "Low-level interrupt configuration");
+  cli::printHelpItem("intpin", "Read configured INT GPIO assertion state");
 
   cli::printHelpSection("Registers");
   cli::printHelpItem("status / flags", "Read and decode FLAGS (clear-on-read)");
@@ -1968,7 +1978,7 @@ void processCommand(const String& cmdLine) {
   if (cmd == "help" || cmd == "?") { printHelp(); return; }
   if (cmd == "version" || cmd == "ver") { printVersionInfo(); return; }
   if (cmd == "scan") { bus_diag::scan(); return; }
-  if (cmd == "init") {
+  if (cmd == "init" || cmd == "begin") {
     LOGI("Initializing OPT4001...");
     if (watchState.active) {
       finishWatch(true);
@@ -2192,7 +2202,12 @@ void processCommand(const String& cmdLine) {
   if (cmd == "start") { printStatus(device.startConversion()); return; }
   if (cmd == "start force") { printStatus(device.startConversion(OPT4001::Mode::ONE_SHOT_FORCED_AUTO)); return; }
   if (cmd == "poll" || cmd == "drdy") {
-    const bool ready = device.conversionReady();
+    bool ready = false;
+    OPT4001::Status st = device.conversionReady(ready);
+    if (!st.ok()) {
+      printStatus(st);
+      return;
+    }
     LOGI("Conversion ready: %s%s%s", yesNoColor(ready), ready ? "YES" : "NO", LOG_COLOR_RESET);
     return;
   }
@@ -2732,6 +2747,20 @@ void processCommand(const String& cmdLine) {
     return;
   }
   if (cmd == "int") { printIntConfigurationInfo(); printThresholdLux(); return; }
+  if (cmd == "intpin") {
+    bool asserted = false;
+    OPT4001::Status st = device.readIntPinAsserted(asserted);
+    if (!st.ok()) {
+      printStatus(st);
+      return;
+    }
+    Serial.printf("  INT asserted: %s%s%s (polarity=%s)\n",
+                  yesNoColor(asserted),
+                  asserted ? "YES" : "NO",
+                  LOG_COLOR_RESET,
+                  polarityToStr(device.getInterruptPolarity()));
+    return;
+  }
   if (cmd.startsWith("reg ")) {
     uint32_t addr = 0;
     if (!parseU32(cmd.substring(4), addr) || addr > 0xFFu) {
@@ -2881,7 +2910,7 @@ void setup() {
   if (!st.ok()) {
     LOGE("Failed to initialize device");
     printStatus(st);
-    LOGI("Type 'init' to retry initialization");
+    LOGI("Type 'begin' or 'init' to retry initialization");
   } else {
     LOGI("Device initialized successfully");
     printDriverHealth();

@@ -106,6 +106,28 @@ uint32_t blockingPollLimit(uint32_t timeoutMs, uint32_t extraMs = 0) {
   return static_cast<uint32_t>(polls);
 }
 
+Status offlineBusyStatus() {
+  return Status::Error(Err::BUSY, "Driver is offline; call recover()");
+}
+
+class ScopedOfflineI2cAllowance {
+public:
+  explicit ScopedOfflineI2cAllowance(bool& flag, bool allow) : _flag(flag), _old(flag) {
+    _flag = allow;
+  }
+
+  ~ScopedOfflineI2cAllowance() {
+    _flag = _old;
+  }
+
+  ScopedOfflineI2cAllowance(const ScopedOfflineI2cAllowance&) = delete;
+  ScopedOfflineI2cAllowance& operator=(const ScopedOfflineI2cAllowance&) = delete;
+
+private:
+  bool& _flag;
+  bool _old;
+};
+
 }  // namespace
 
 // ============================================================================
@@ -113,9 +135,10 @@ uint32_t blockingPollLimit(uint32_t timeoutMs, uint32_t extraMs = 0) {
 // ============================================================================
 
 Status OPT4001::begin(const Config& config) {
-  _config = config;
+  _config = Config{};
   _initialized = false;
   _driverState = DriverState::UNINIT;
+  _allowOfflineI2c = false;
   _clearRuntimeState();
 
   _lastOkMs = 0;
@@ -125,39 +148,40 @@ Status OPT4001::begin(const Config& config) {
   _totalFailures = 0;
   _totalSuccess = 0;
 
-  if (_config.i2cWrite == nullptr || _config.i2cWriteRead == nullptr) {
+  if (config.i2cWrite == nullptr || config.i2cWriteRead == nullptr) {
     return Status::Error(Err::INVALID_CONFIG, "I2C callbacks required");
   }
-  if (!isValidPackageVariant(_config.packageVariant)) {
+  if (!isValidPackageVariant(config.packageVariant)) {
     return Status::Error(Err::INVALID_CONFIG, "Invalid package variant");
   }
-  if (_config.i2cTimeoutMs == 0) {
+  if (config.i2cTimeoutMs == 0) {
     return Status::Error(Err::INVALID_CONFIG, "I2C timeout must be > 0");
   }
-  if (!isValidAddress(_config.i2cAddress, _config.packageVariant)) {
+  if (!isValidAddress(config.i2cAddress, config.packageVariant)) {
     return Status::Error(Err::INVALID_CONFIG, "Invalid I2C address for package");
   }
-  if (!isValidRange(_config.range) || !isValidConversionTime(_config.conversionTime)) {
+  if (!isValidRange(config.range) || !isValidConversionTime(config.conversionTime)) {
     return Status::Error(Err::INVALID_CONFIG, "Invalid range or conversion time");
   }
-  if (!isStableMode(_config.mode)) {
+  if (!isStableMode(config.mode)) {
     return Status::Error(Err::INVALID_CONFIG,
                          "Config mode must be POWER_DOWN or CONTINUOUS");
   }
-  if (!isValidInterruptLatch(_config.interruptLatch) ||
-      !isValidInterruptPolarity(_config.interruptPolarity) ||
-      !isValidFaultCount(_config.faultCount) ||
-      !isValidIntDirection(_config.intDirection) ||
-      !isValidIntConfig(_config.intConfig)) {
+  if (!isValidInterruptLatch(config.interruptLatch) ||
+      !isValidInterruptPolarity(config.interruptPolarity) ||
+      !isValidFaultCount(config.faultCount) ||
+      !isValidIntDirection(config.intDirection) ||
+      !isValidIntConfig(config.intConfig)) {
     return Status::Error(Err::INVALID_CONFIG, "Invalid interrupt configuration");
   }
-  if (_config.intPin < -1) {
+  if (config.intPin < -1) {
     return Status::Error(Err::INVALID_CONFIG, "Invalid INT pin");
   }
-  if (!_thresholdValid(_config.lowThreshold) || !_thresholdValid(_config.highThreshold)) {
+  if (!_thresholdValid(config.lowThreshold) || !_thresholdValid(config.highThreshold)) {
     return Status::Error(Err::INVALID_CONFIG, "Invalid threshold register value");
   }
 
+  _config = config;
   if (_config.offlineThreshold == 0) {
     _config.offlineThreshold = 1;
   }
@@ -179,6 +203,9 @@ Status OPT4001::begin(const Config& config) {
 
 void OPT4001::tick(uint32_t nowMs) {
   if (!_initialized) {
+    return;
+  }
+  if (_driverState == DriverState::OFFLINE) {
     return;
   }
 
@@ -204,7 +231,7 @@ void OPT4001::tick(uint32_t nowMs) {
 }
 
 void OPT4001::end() {
-  if (_initialized) {
+  if (_initialized && _driverState != DriverState::OFFLINE) {
     const uint16_t powerDownCfg = _buildConfigurationRegister(Mode::POWER_DOWN);
     const uint8_t payload[3] = {
       cmd::REG_CONFIGURATION,
@@ -216,6 +243,7 @@ void OPT4001::end() {
 
   _initialized = false;
   _driverState = DriverState::UNINIT;
+  _allowOfflineI2c = false;
   _clearRuntimeState();
 }
 
@@ -243,18 +271,32 @@ Status OPT4001::recover() {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
 
+  const bool startedOffline = (_driverState == DriverState::OFFLINE);
+  ScopedOfflineI2cAllowance allowOfflineI2c(_allowOfflineI2c, true);
+
   uint16_t deviceId = 0;
   Status st = readDeviceId(deviceId);
   if (!st.ok()) {
+    if (startedOffline) {
+      _reassertOfflineLatch();
+    }
     return st;
   }
   if ((deviceId & cmd::MASK_DIDH) != cmd::DIDH_EXPECTED) {
-    return _recordFailure(Status::Error(Err::DEVICE_ID_MISMATCH,
-                                        "Unexpected device ID", deviceId));
+    st = _recordFailure(Status::Error(Err::DEVICE_ID_MISMATCH,
+                                      "Unexpected device ID", deviceId));
+    if (startedOffline) {
+      _reassertOfflineLatch();
+    }
+    return st;
   }
 
   _clearRuntimeState();
-  return _applyConfig();
+  st = _applyConfig();
+  if (!st.ok() && startedOffline) {
+    _reassertOfflineLatch();
+  }
+  return st;
 }
 
 Status OPT4001::softReset() {
@@ -263,6 +305,7 @@ Status OPT4001::softReset() {
   }
 
   const uint8_t payload[1] = {cmd::GENERAL_CALL_RESET};
+  ScopedOfflineI2cAllowance allowOfflineI2c(_allowOfflineI2c, true);
   Status st = _i2cWriteTrackedTo(cmd::GENERAL_CALL_ADDRESS, payload, sizeof(payload));
   if (!st.ok()) {
     return st;
@@ -281,6 +324,7 @@ Status OPT4001::resetAndReapply() {
 
   const Config savedConfig = _config;
   const uint8_t payload[1] = {cmd::GENERAL_CALL_RESET};
+  ScopedOfflineI2cAllowance allowOfflineI2c(_allowOfflineI2c, true);
   Status st = _i2cWriteTrackedTo(cmd::GENERAL_CALL_ADDRESS, payload, sizeof(payload));
   if (!st.ok()) {
     return st;
@@ -345,6 +389,7 @@ Status OPT4001::getSettings(SettingsSnapshot& out) const {
   out.lowThreshold = _config.lowThreshold;
   out.highThreshold = _config.highThreshold;
   out.sampleAvailable = _sampleAvailable;
+  out.hasSample = _lastSampleValid;
   out.lastSampleValid = _lastSampleValid;
   out.conversionStarted = _conversionStarted;
   out.conversionReady = _conversionReady;
@@ -391,34 +436,55 @@ Status OPT4001::startConversion(Mode mode) {
   return Status{Err::IN_PROGRESS, 0, "Conversion started"};
 }
 
-bool OPT4001::conversionReady() {
+Status OPT4001::conversionReady(bool& ready) {
+  ready = false;
   if (!_initialized) {
-    return false;
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+  if (_driverState == DriverState::OFFLINE) {
+    return offlineBusyStatus();
   }
 
   if (_config.mode == Mode::CONTINUOUS) {
     if (_conversionReady) {
-      return true;
+      ready = true;
+      return Status::Ok();
     }
     if ((_nowMs() - _conversionStartMs) >= getConversionTimeMs()) {
       _conversionStarted = false;
       _conversionReady = true;
       _sampleAvailable = true;
     }
-    return _conversionReady;
+    ready = _conversionReady;
+    return Status::Ok();
   }
 
   if (_conversionReady) {
-    return true;
+    ready = true;
+    return Status::Ok();
   }
   if (!_conversionStarted) {
-    return false;
+    return Status::Ok();
   }
   if ((_nowMs() - _conversionStartMs) < getOneShotBudgetMs(_pendingMode)) {
-    return false;
+    return Status::Ok();
   }
 
-  return _markConversionReadyByRegisterPoll().ok() && _conversionReady;
+  Status st = _markConversionReadyByRegisterPoll();
+  if (st.ok()) {
+    ready = _conversionReady;
+    return Status::Ok();
+  }
+  if (st.code == Err::MEASUREMENT_NOT_READY) {
+    return Status::Ok();
+  }
+  return st;
+}
+
+bool OPT4001::conversionReady() {
+  bool ready = false;
+  Status st = conversionReady(ready);
+  return st.ok() && ready;
 }
 
 Status OPT4001::readSample(Sample& out) {
@@ -427,12 +493,26 @@ Status OPT4001::readSample(Sample& out) {
   }
 
   if (_config.mode == Mode::CONTINUOUS) {
-    if (!_conversionReady && !conversionReady()) {
+    bool ready = _conversionReady;
+    if (!ready) {
+      Status readySt = conversionReady(ready);
+      if (!readySt.ok()) {
+        return readySt;
+      }
+    }
+    if (!ready) {
       return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
     }
   } else {
-    if (_conversionStarted && !conversionReady()) {
-      return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
+    if (_conversionStarted) {
+      bool ready = false;
+      Status readySt = conversionReady(ready);
+      if (!readySt.ok()) {
+        return readySt;
+      }
+      if (!ready) {
+        return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
+      }
     }
     if (!_sampleAvailable) {
       return Status::Error(Err::MEASUREMENT_NOT_READY, "No sample available");
@@ -459,12 +539,26 @@ Status OPT4001::readBurst(BurstFrame& out) {
   }
 
   if (_config.mode == Mode::CONTINUOUS) {
-    if (!_conversionReady && !conversionReady()) {
+    bool ready = _conversionReady;
+    if (!ready) {
+      Status readySt = conversionReady(ready);
+      if (!readySt.ok()) {
+        return readySt;
+      }
+    }
+    if (!ready) {
       return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
     }
   } else {
-    if (_conversionStarted && !conversionReady()) {
-      return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
+    if (_conversionStarted) {
+      bool ready = false;
+      Status readySt = conversionReady(ready);
+      if (!readySt.ok()) {
+        return readySt;
+      }
+      if (!ready) {
+        return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
+      }
     }
     if (!_sampleAvailable) {
       return Status::Error(Err::MEASUREMENT_NOT_READY, "No sample available");
@@ -520,12 +614,26 @@ Status OPT4001::readSampleSlot(uint8_t slot, Sample& out) {
   }
 
   if (_config.mode == Mode::CONTINUOUS) {
-    if (!_conversionReady && !conversionReady()) {
+    bool ready = _conversionReady;
+    if (!ready) {
+      Status readySt = conversionReady(ready);
+      if (!readySt.ok()) {
+        return readySt;
+      }
+    }
+    if (!ready) {
       return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
     }
   } else {
-    if (_conversionStarted && !conversionReady()) {
-      return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
+    if (_conversionStarted) {
+      bool ready = false;
+      Status readySt = conversionReady(ready);
+      if (!readySt.ok()) {
+        return readySt;
+      }
+      if (!ready) {
+        return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
+      }
     }
     if (!_sampleAvailable) {
       return Status::Error(Err::MEASUREMENT_NOT_READY, "No sample available");
@@ -561,7 +669,7 @@ uint32_t OPT4001::sampleTimestampMs() const {
 }
 
 uint32_t OPT4001::sampleAgeMs(uint32_t nowMs) const {
-  if (_lastSampleTimestampMs == 0) {
+  if (!_lastSampleValid) {
     return 0;
   }
   return nowMs - _lastSampleTimestampMs;
@@ -615,7 +723,12 @@ Status OPT4001::readBlocking(Sample& out, Mode mode, uint32_t timeoutMs) {
     uint32_t polls = 0;
     const uint32_t maxPolls = blockingPollLimit(timeoutMs);
     while (static_cast<int32_t>(_nowMs() - deadlineMs) < 0 && polls < maxPolls) {
-      if (conversionReady()) {
+      bool ready = false;
+      Status readySt = conversionReady(ready);
+      if (!readySt.ok()) {
+        return readySt;
+      }
+      if (ready) {
         return readSample(out);
       }
       ++polls;
@@ -689,12 +802,16 @@ Status OPT4001::tryReadSample(Sample& out, bool& didRead) {
   }
 
   bool ready = false;
+  Status readySt = Status::Ok();
   if (_config.mode == Mode::CONTINUOUS) {
-    ready = conversionReady();
+    readySt = conversionReady(ready);
   } else if (_conversionStarted) {
-    ready = conversionReady();
+    readySt = conversionReady(ready);
   } else {
     ready = _sampleAvailable;
+  }
+  if (!readySt.ok()) {
+    return readySt;
   }
 
   if (!ready) {
@@ -777,6 +894,25 @@ Status OPT4001::clearFlags() {
 
   Flags flags;
   return readFlags(flags);
+}
+
+Status OPT4001::readIntPinAsserted(bool& asserted) const {
+  asserted = false;
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+  if (_config.packageVariant != PackageVariant::SOT_5X3) {
+    return Status::Error(Err::INVALID_CONFIG, "INT pin unavailable on PicoStar package");
+  }
+  if (_config.intPin < 0 || _config.gpioRead == nullptr) {
+    return Status::Error(Err::INVALID_CONFIG, "INT GPIO hook not configured");
+  }
+
+  const bool levelHigh = _config.gpioRead(_config.intPin, _config.gpioUser);
+  asserted = (_config.interruptPolarity == InterruptPolarity::ACTIVE_HIGH)
+                 ? levelHigh
+                 : !levelHigh;
+  return Status::Ok();
 }
 
 // ============================================================================
@@ -1561,6 +1697,9 @@ Status OPT4001::_i2cWriteRaw(const uint8_t* buf, size_t len) {
 
 Status OPT4001::_i2cWriteReadTracked(const uint8_t* txBuf, size_t txLen,
                                      uint8_t* rxBuf, size_t rxLen) {
+  if (_initialized && _driverState == DriverState::OFFLINE && !_allowOfflineI2c) {
+    return offlineBusyStatus();
+  }
   Status st = _i2cWriteReadRaw(txBuf, txLen, rxBuf, rxLen);
   if (st.code == Err::INVALID_CONFIG || st.code == Err::INVALID_PARAM) {
     return st;
@@ -1569,6 +1708,9 @@ Status OPT4001::_i2cWriteReadTracked(const uint8_t* txBuf, size_t txLen,
 }
 
 Status OPT4001::_i2cWriteTracked(const uint8_t* buf, size_t len) {
+  if (_initialized && _driverState == DriverState::OFFLINE && !_allowOfflineI2c) {
+    return offlineBusyStatus();
+  }
   Status st = _i2cWriteRaw(buf, len);
   if (st.code == Err::INVALID_CONFIG || st.code == Err::INVALID_PARAM) {
     return st;
@@ -1577,6 +1719,9 @@ Status OPT4001::_i2cWriteTracked(const uint8_t* buf, size_t len) {
 }
 
 Status OPT4001::_i2cWriteTrackedTo(uint8_t addr, const uint8_t* buf, size_t len) {
+  if (_initialized && _driverState == DriverState::OFFLINE && !_allowOfflineI2c) {
+    return offlineBusyStatus();
+  }
   Status st = _i2cWriteRawTo(addr, buf, len);
   if (st.code == Err::INVALID_CONFIG || st.code == Err::INVALID_PARAM) {
     return st;
@@ -1636,11 +1781,14 @@ Status OPT4001::_decodeSampleRegisters(uint16_t resultReg, uint16_t lsbCrcReg,
 // ============================================================================
 
 Status OPT4001::_updateHealth(const Status& st) {
-  const uint32_t nowMs = _nowMs();
-
+  if (!_initialized) {
+    return st;
+  }
   if (st.inProgress()) {
     return st;
   }
+
+  const uint32_t nowMs = _nowMs();
 
   if (st.ok()) {
     _lastOkMs = nowMs;
@@ -1648,12 +1796,33 @@ Status OPT4001::_updateHealth(const Status& st) {
     if (_totalSuccess < UINT32_MAX) {
       _totalSuccess++;
     }
-    if (_initialized) {
-      _driverState = DriverState::READY;
-    }
+    _driverState = DriverState::READY;
     return st;
   }
 
+  _lastErrorMs = nowMs;
+  _lastError = st;
+  if (_consecutiveFailures < UINT8_MAX) {
+    _consecutiveFailures++;
+  }
+  if (_totalFailures < UINT32_MAX) {
+    _totalFailures++;
+  }
+  _driverState = (_consecutiveFailures >= _config.offlineThreshold)
+                     ? DriverState::OFFLINE
+                     : DriverState::DEGRADED;
+  return st;
+}
+
+Status OPT4001::_recordFailure(const Status& st) {
+  if (st.ok() || st.inProgress() ||
+      st.code == Err::INVALID_CONFIG ||
+      st.code == Err::INVALID_PARAM ||
+      st.code == Err::NOT_INITIALIZED) {
+    return st;
+  }
+
+  const uint32_t nowMs = _nowMs();
   _lastErrorMs = nowMs;
   _lastError = st;
   if (_consecutiveFailures < UINT8_MAX) {
@@ -1670,26 +1839,12 @@ Status OPT4001::_updateHealth(const Status& st) {
   return st;
 }
 
-Status OPT4001::_recordFailure(const Status& st) {
-  if (st.ok() || st.inProgress()) {
-    return st;
+void OPT4001::_reassertOfflineLatch() {
+  _driverState = DriverState::OFFLINE;
+  const uint8_t threshold = _config.offlineThreshold == 0 ? 1 : _config.offlineThreshold;
+  if (_consecutiveFailures < threshold) {
+    _consecutiveFailures = threshold;
   }
-
-  const uint32_t nowMs = _nowMs();
-  _lastErrorMs = nowMs;
-  _lastError = st;
-  if (_consecutiveFailures < UINT8_MAX) {
-    _consecutiveFailures++;
-  }
-  if (_totalFailures < UINT32_MAX) {
-    _totalFailures++;
-  }
-  if (_initialized) {
-    _driverState = (_consecutiveFailures >= _config.offlineThreshold)
-                       ? DriverState::OFFLINE
-                       : DriverState::DEGRADED;
-  }
-  return st;
 }
 
 // ============================================================================

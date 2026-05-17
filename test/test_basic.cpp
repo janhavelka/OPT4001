@@ -30,6 +30,7 @@ struct FakeBus {
   uint32_t failWriteCall = 0;
   uint32_t oneShotReadyAtMs = UINT32_MAX;
   uint32_t continuousReadyAtMs = UINT32_MAX;
+  bool gpioLevel = true;
 
   FakeBus() {
     resetToDefaults();
@@ -166,8 +167,13 @@ uint32_t fakeNowMs(void* user) {
 
 void fakeYield(void*) {}
 
-bool fakeGpioRead(int, void*) {
-  return true;
+void fakeAdvancingYield(void* user) {
+  FakeBus* bus = static_cast<FakeBus*>(user);
+  bus->nowMs++;
+}
+
+bool fakeGpioRead(int, void* user) {
+  return static_cast<FakeBus*>(user)->gpioLevel;
 }
 
 Config makeConfig(FakeBus& bus) {
@@ -258,6 +264,7 @@ void test_get_last_sample_before_any_read() {
                           static_cast<uint8_t>(st.code));
   TEST_ASSERT_EQUAL_UINT32(0u, dev.sampleTimestampMs());
   TEST_ASSERT_EQUAL_UINT32(0u, dev.sampleAgeMs(5000));
+  TEST_ASSERT_FALSE(dev.hasSample());
 }
 
 void test_begin_rejects_missing_callbacks() {
@@ -296,17 +303,100 @@ void test_begin_rejects_invalid_package_address_combo() {
                           static_cast<uint8_t>(st.code));
 }
 
-void test_begin_success_sets_ready_and_counters() {
+void test_invalid_begin_after_success_resets_default_runtime() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.offlineThreshold = 1;
+  cfg.mode = Mode::CONTINUOUS;
+  cfg.quickWake = true;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  const uint32_t readsBefore = bus.readCalls;
+  const uint32_t writesBefore = bus.writeCalls;
+  Config bad = makeConfig(bus);
+  bad.i2cTimeoutMs = 0;
+  Status st = dev.begin(bad);
+
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_CONFIG),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_FALSE(dev.isInitialized());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::UNINIT),
+                          static_cast<uint8_t>(dev.state()));
+  TEST_ASSERT_EQUAL_UINT32(0u, dev.totalSuccess());
+  TEST_ASSERT_EQUAL_UINT32(0u, dev.totalFailures());
+  TEST_ASSERT_EQUAL_UINT32(0u, dev.lastOkMs());
+  TEST_ASSERT_EQUAL_UINT32(0u, dev.lastErrorMs());
+  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
+
+  const Config& stored = dev.getConfig();
+  TEST_ASSERT_NULL(stored.i2cWrite);
+  TEST_ASSERT_NULL(stored.i2cWriteRead);
+  TEST_ASSERT_EQUAL_HEX8(cmd::I2C_ADDR_DEFAULT, stored.i2cAddress);
+  TEST_ASSERT_EQUAL_UINT32(50u, stored.i2cTimeoutMs);
+  TEST_ASSERT_EQUAL_UINT8(5u, stored.offlineThreshold);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Mode::POWER_DOWN),
+                          static_cast<uint8_t>(stored.mode));
+  TEST_ASSERT_FALSE(stored.quickWake);
+
+  SettingsSnapshot snap;
+  TEST_ASSERT_TRUE(dev.getSettings(snap).ok());
+  TEST_ASSERT_FALSE(snap.initialized);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::UNINIT),
+                          static_cast<uint8_t>(snap.state));
+  TEST_ASSERT_EQUAL_UINT8(5u, snap.offlineThreshold);
+  TEST_ASSERT_FALSE(snap.hasNowMsHook);
+  TEST_ASSERT_FALSE(snap.sampleAvailable);
+  TEST_ASSERT_FALSE(snap.conversionStarted);
+  TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, snap.lastLux);
+}
+
+void test_begin_normalizes_offline_threshold_on_stored_copy() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.offlineThreshold = 0;
+
+  Status st = dev.begin(cfg);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT8(0u, cfg.offlineThreshold);
+  TEST_ASSERT_EQUAL_UINT8(1u, dev.getConfig().offlineThreshold);
+
+  SettingsSnapshot snap;
+  TEST_ASSERT_TRUE(dev.getSettings(snap).ok());
+  TEST_ASSERT_EQUAL_UINT8(1u, snap.offlineThreshold);
+}
+
+void test_begin_success_sets_ready_without_health_counts() {
   FakeBus bus;
   OPT4001::OPT4001 dev;
   Status st = dev.begin(makeConfig(bus));
   TEST_ASSERT_TRUE(st.ok());
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::READY),
                           static_cast<uint8_t>(dev.state()));
-  TEST_ASSERT_EQUAL_UINT32(4u, dev.totalSuccess());
+  TEST_ASSERT_GREATER_THAN_UINT32(0u, bus.readCalls + bus.writeCalls);
+  TEST_ASSERT_EQUAL_UINT32(0u, dev.totalSuccess());
   TEST_ASSERT_EQUAL_UINT32(0u, dev.totalFailures());
   TEST_ASSERT_EQUAL_UINT8(0u, dev.consecutiveFailures());
-  TEST_ASSERT_EQUAL_UINT32(bus.nowMs, dev.lastOkMs());
+  TEST_ASSERT_EQUAL_UINT32(0u, dev.lastOkMs());
+}
+
+void test_update_health_ignores_in_progress() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  bus.nowMs = 2222u;
+  const Status st = dev._updateHealth(Status{Err::IN_PROGRESS, 0, "pending"});
+  TEST_ASSERT_TRUE(st.inProgress());
+  TEST_ASSERT_EQUAL_UINT32(0u, dev.totalSuccess());
+  TEST_ASSERT_EQUAL_UINT32(0u, dev.totalFailures());
+  TEST_ASSERT_EQUAL_UINT8(0u, dev.consecutiveFailures());
+  TEST_ASSERT_EQUAL_UINT32(0u, dev.lastOkMs());
+  TEST_ASSERT_EQUAL_UINT32(0u, dev.lastErrorMs());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::READY),
+                          static_cast<uint8_t>(dev.state()));
 }
 
 void test_probe_failure_does_not_update_health() {
@@ -454,6 +544,7 @@ void test_read_sample_decodes_lux_and_crc() {
   TEST_ASSERT_EQUAL_UINT32(0x34567u, sample.mantissa);
   TEST_ASSERT_EQUAL_UINT32(0xD159Cu, sample.adcCodes);
   TEST_ASSERT_FLOAT_WITHIN(0.01f, sample.adcCodes * dev.getLuxLsb(), sample.lux);
+  TEST_ASSERT_TRUE(dev.hasSample());
   TEST_ASSERT_EQUAL_UINT32(bus.nowMs, dev.sampleTimestampMs());
 
   Sample cached;
@@ -462,6 +553,15 @@ void test_read_sample_decodes_lux_and_crc() {
 
   bus.nowMs += 250;
   TEST_ASSERT_EQUAL_UINT32(250u, dev.sampleAgeMs(bus.nowMs));
+}
+
+void test_zero_timestamp_sample_age_uses_valid_flag() {
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_EQUAL_UINT32(0u, dev.sampleAgeMs(123u));
+
+  dev._lastSampleValid = true;
+  dev._lastSampleTimestampMs = 0;
+  TEST_ASSERT_EQUAL_UINT32(123u, dev.sampleAgeMs(123u));
 }
 
 void test_crc_mismatch_returns_error_when_enabled() {
@@ -656,6 +756,31 @@ void test_clear_flags_uses_clear_on_read_semantics() {
                                                         cmd::MASK_FLAG_L));
 }
 
+void test_read_int_pin_asserted_uses_configured_polarity() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.intPin = 7;
+  cfg.gpioRead = fakeGpioRead;
+  cfg.gpioUser = &bus;
+  cfg.interruptPolarity = InterruptPolarity::ACTIVE_LOW;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  bool asserted = true;
+  bus.gpioLevel = true;
+  TEST_ASSERT_TRUE(dev.readIntPinAsserted(asserted).ok());
+  TEST_ASSERT_FALSE(asserted);
+
+  bus.gpioLevel = false;
+  TEST_ASSERT_TRUE(dev.readIntPinAsserted(asserted).ok());
+  TEST_ASSERT_TRUE(asserted);
+
+  TEST_ASSERT_TRUE(dev.setInterruptPolarity(InterruptPolarity::ACTIVE_HIGH).ok());
+  bus.gpioLevel = true;
+  TEST_ASSERT_TRUE(dev.readIntPinAsserted(asserted).ok());
+  TEST_ASSERT_TRUE(asserted);
+}
+
 void test_write_int_configuration_rejects_bad_fixed_pattern() {
   FakeBus bus;
   OPT4001::OPT4001 dev;
@@ -787,6 +912,108 @@ void test_try_read_helpers_report_not_ready_without_error() {
   TEST_ASSERT_TRUE(lux > 0.0f);
 }
 
+void test_try_read_propagates_readiness_i2c_error() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  Status st = dev.startConversion();
+  TEST_ASSERT_TRUE(st.inProgress());
+  bus.nowMs += dev.getOneShotBudgetMs(Mode::ONE_SHOT);
+  bus.readStatus = Status::Error(Err::I2C_TIMEOUT, "forced readiness timeout", -31);
+
+  Sample sample;
+  bool didRead = true;
+  st = dev.tryReadSample(sample, didRead);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_TIMEOUT),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_FALSE(didRead);
+}
+
+void test_read_blocking_propagates_readiness_i2c_error() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.conversionTime = ConversionTime::US_600;
+  cfg.quickWake = true;
+  cfg.cooperativeYield = fakeAdvancingYield;
+  cfg.timeUser = &bus;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  bus.readStatus = Status::Error(Err::I2C_TIMEOUT, "forced readiness timeout", -32);
+
+  Sample sample;
+  Status st = dev.readBlocking(sample, Mode::ONE_SHOT, 50);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_TIMEOUT),
+                          static_cast<uint8_t>(st.code));
+}
+
+void test_offline_blocks_normal_operation_without_bus_io() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.offlineThreshold = 1;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  bus.readStatus = Status::Error(Err::I2C_TIMEOUT, "forced offline timeout", -33);
+  Flags flags;
+  Status st = dev.readFlags(flags);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_TIMEOUT),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::OFFLINE),
+                          static_cast<uint8_t>(dev.state()));
+
+  bus.readStatus = Status::Ok();
+  const uint32_t readsBefore = bus.readCalls;
+  const uint32_t writesBefore = bus.writeCalls;
+
+  st = dev.readFlags(flags);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::BUSY),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_STRING("Driver is offline; call recover()", st.msg);
+  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::OFFLINE),
+                          static_cast<uint8_t>(dev.state()));
+}
+
+void test_failed_recover_from_offline_reasserts_latch_after_apply_failure() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.offlineThreshold = 3;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  bus.readStatus = Status::Error(Err::I2C_TIMEOUT, "forced offline timeout", -34);
+  Flags flags;
+  for (uint8_t i = 0; i < cfg.offlineThreshold; ++i) {
+    Status st = dev.readFlags(flags);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_TIMEOUT),
+                            static_cast<uint8_t>(st.code));
+  }
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::OFFLINE),
+                          static_cast<uint8_t>(dev.state()));
+  TEST_ASSERT_TRUE(dev.consecutiveFailures() >= cfg.offlineThreshold);
+
+  bus.readStatus = Status::Ok();
+  bus.failWriteCall = bus.writeCalls + 1U;
+  Status st = dev.recover();
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_ERROR),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::OFFLINE),
+                          static_cast<uint8_t>(dev.state()));
+  TEST_ASSERT_TRUE(dev.consecutiveFailures() >= cfg.offlineThreshold);
+  TEST_ASSERT_FALSE(dev._allowOfflineI2c);
+
+  const uint32_t readsAfterRecover = bus.readCalls;
+  const uint32_t writesAfterRecover = bus.writeCalls;
+  st = dev.readFlags(flags);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::BUSY),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT32(readsAfterRecover, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(writesAfterRecover, bus.writeCalls);
+}
+
 void test_scale_and_counter_helpers() {
   FakeBus bus;
   OPT4001::OPT4001 dev;
@@ -905,6 +1132,9 @@ void test_cached_configuration_rolls_back_after_i2c_failure() {
 
   SettingsSnapshot snap;
   TEST_ASSERT_TRUE(dev.getSettings(snap).ok());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(dev.driverState()),
+                          static_cast<uint8_t>(snap.state));
+  TEST_ASSERT_FALSE(snap.hasSample);
   TEST_ASSERT_EQUAL_UINT8(0u, snap.lowThreshold.exponent);
   TEST_ASSERT_EQUAL_UINT16(0u, snap.lowThreshold.result);
   TEST_ASSERT_EQUAL_UINT8(0x0Bu, snap.highThreshold.exponent);
@@ -1036,7 +1266,10 @@ int main() {
   RUN_TEST(test_begin_rejects_missing_callbacks);
   RUN_TEST(test_begin_rejects_one_shot_startup_mode);
   RUN_TEST(test_begin_rejects_invalid_package_address_combo);
-  RUN_TEST(test_begin_success_sets_ready_and_counters);
+  RUN_TEST(test_invalid_begin_after_success_resets_default_runtime);
+  RUN_TEST(test_begin_normalizes_offline_threshold_on_stored_copy);
+  RUN_TEST(test_begin_success_sets_ready_without_health_counts);
+  RUN_TEST(test_update_health_ignores_in_progress);
   RUN_TEST(test_probe_failure_does_not_update_health);
   RUN_TEST(test_probe_id_mismatch_does_not_update_health);
   RUN_TEST(test_recover_failure_updates_health);
@@ -1045,6 +1278,7 @@ int main() {
   RUN_TEST(test_start_conversion_wraparound_reaches_ready);
   RUN_TEST(test_read_blocking_times_out_with_stalled_clock);
   RUN_TEST(test_read_sample_decodes_lux_and_crc);
+  RUN_TEST(test_zero_timestamp_sample_age_uses_valid_flag);
   RUN_TEST(test_crc_mismatch_returns_error_when_enabled);
   RUN_TEST(test_crc_mismatch_allowed_when_verification_disabled);
   RUN_TEST(test_lux_helpers_preserve_outputs_on_crc_warning);
@@ -1055,12 +1289,17 @@ int main() {
   RUN_TEST(test_read_flags_parses_and_clears_ready_flag);
   RUN_TEST(test_clear_conversion_ready_flag_preserves_window_flags);
   RUN_TEST(test_clear_flags_uses_clear_on_read_semantics);
+  RUN_TEST(test_read_int_pin_asserted_uses_configured_polarity);
   RUN_TEST(test_write_int_configuration_rejects_bad_fixed_pattern);
   RUN_TEST(test_read_device_id_returns_raw_register_value);
   RUN_TEST(test_set_verify_crc_updates_cached_setting);
   RUN_TEST(test_decoded_register_helpers);
   RUN_TEST(test_read_register_block_and_sample_slot_helpers);
   RUN_TEST(test_try_read_helpers_report_not_ready_without_error);
+  RUN_TEST(test_try_read_propagates_readiness_i2c_error);
+  RUN_TEST(test_read_blocking_propagates_readiness_i2c_error);
+  RUN_TEST(test_offline_blocks_normal_operation_without_bus_io);
+  RUN_TEST(test_failed_recover_from_offline_reasserts_latch_after_apply_failure);
   RUN_TEST(test_scale_and_counter_helpers);
   RUN_TEST(test_configuration_and_interrupt_convenience_helpers);
   RUN_TEST(test_cached_configuration_rolls_back_after_i2c_failure);

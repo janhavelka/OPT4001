@@ -213,6 +213,8 @@ void loop() {
 - `startConversion()`
 - `startConversion(Mode mode)`
 - `conversionReady()`
+- `conversionReady(bool&)`
+- `hasSample()`
 - `readSample(Sample&)`
 - `readBurst(BurstFrame&)`
 - `readSampleSlot(slot, Sample&)`
@@ -240,6 +242,7 @@ void loop() {
 - `readConfiguration(...)`, `writeConfiguration()`
 - `readIntConfiguration(...)`, `writeIntConfiguration()`
 - `readFlags()`, `readFlagsRaw()`, `clearConversionReadyFlag()`, `clearFlags()`
+- `readIntPinAsserted(bool&)`
 - `readRegisters()`, `readRegister16()`, `writeRegister16()`
 
 ### Decode And Scaling Helpers
@@ -270,6 +273,8 @@ void loop() {
 ### CLI Notes
 
 - `reset` performs the datasheet's general-call reset and is therefore bus-wide.
+- `begin` is an alias for `init` / reinitialization. `intpin` reads the
+  configured INT GPIO hook and applies the configured interrupt polarity.
 - `config`, `intcfg`, `flags`, `reg`, and `wreg` are intended for bring-up and
   diagnostics; raw writes can desynchronize the cached config until `recover()`
   or `resetAndReapply()` is used.
@@ -314,8 +319,9 @@ void loop() {
 - High-speed I2C entry sequencing is transport-owned and not modeled in the driver.
 - SMBus alert response arbitration is controller-level bus behavior and is not
   wrapped as a dedicated driver API.
-- INT-input hardware triggering is left to the board/application layer; the
-  driver exposes the configuration bits but does not generate GPIO trigger pulses.
+- INT-input hardware triggering is left to the board/application layer, but the
+  driver can read a configured INT GPIO hook through `readIntPinAsserted()` and
+  apply the configured polarity. It does not generate GPIO trigger pulses.
 - Window transmission compensation and similar application-note calibration
   factors are intentionally left at the application layer rather than baked into
   the core lux conversion path.
