@@ -13,17 +13,31 @@ VALID_SUFFIXES = {".c", ".cc", ".cpp", ".h", ".hpp"}
 FORBIDDEN_CALLS = {
     "millis": re.compile(r"\bmillis\s*\("),
     "micros": re.compile(r"\bmicros\s*\("),
+    "delay": re.compile(r"\bdelay\s*\("),
     "delayMicroseconds": re.compile(r"\bdelayMicroseconds\s*\("),
     "yield": re.compile(r"\byield\s*\("),
 }
 
-INCLUDE_ARDUINO_RE = re.compile(r'^\s*#\s*include\s*[<\"]Arduino\.h[>\"]', re.MULTILINE)
+FORBIDDEN_IDENTIFIERS = {
+    "String": re.compile(r"\bString\b"),
+    "Serial": re.compile(r"\bSerial\b"),
+    "Wire": re.compile(r"\bWire\b"),
+}
+
+FORBIDDEN_INCLUDE_RES = {
+    "Arduino.h": re.compile(r'^\s*#\s*include\s*[<\"]Arduino\.h[>\"]', re.MULTILINE),
+    "Wire.h": re.compile(r'^\s*#\s*include\s*[<\"]Wire\.h[>\"]', re.MULTILINE),
+    "driver/i2c.h": re.compile(r'^\s*#\s*include\s*[<\"]driver/i2c\.h[>\"]', re.MULTILINE),
+    "driver/i2c_master.h": re.compile(r'^\s*#\s*include\s*[<\"]driver/i2c_master\.h[>\"]', re.MULTILINE),
+    "driver/gpio.h": re.compile(r'^\s*#\s*include\s*[<\"]driver/gpio\.h[>\"]', re.MULTILINE),
+    "esp_err.h": re.compile(r'^\s*#\s*include\s*[<\"]esp_err\.h[>\"]', re.MULTILINE),
+    "esp_timer.h": re.compile(r'^\s*#\s*include\s*[<\"]esp_timer\.h[>\"]', re.MULTILINE),
+    "freertos": re.compile(r'^\s*#\s*include\s*[<\"]freertos/', re.MULTILINE),
+}
+
 BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 STRING_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
-
-ALLOWED_CALL_COUNTS: Dict[str, Dict[str, int]] = {"src/OPT4001.cpp": {"millis": 1, "yield": 1}}
-ALLOWED_INCLUDE_COUNTS: Dict[str, int] = {"src/OPT4001.cpp": 1}
 
 
 def strip_non_code(text: str) -> str:
@@ -46,7 +60,8 @@ def collect_sources() -> list[pathlib.Path]:
 
 def main() -> int:
     observed_calls: Dict[str, Dict[str, int]] = {}
-    observed_includes: Dict[str, int] = {}
+    observed_identifiers: Dict[str, Dict[str, int]] = {}
+    observed_includes: Dict[str, Dict[str, int]] = {}
 
     for path in collect_sources():
         rel = path.relative_to(ROOT).as_posix()
@@ -61,57 +76,40 @@ def main() -> int:
         if call_counts:
             observed_calls[rel] = call_counts
 
-        include_count = len(INCLUDE_ARDUINO_RE.findall(raw))
-        if include_count > 0:
-            observed_includes[rel] = include_count
+        identifier_counts: Dict[str, int] = {}
+        for identifier, pattern in FORBIDDEN_IDENTIFIERS.items():
+            count = len(pattern.findall(code))
+            if count > 0:
+                identifier_counts[identifier] = count
+        if identifier_counts:
+            observed_identifiers[rel] = identifier_counts
+
+        include_counts: Dict[str, int] = {}
+        for include_name, pattern in FORBIDDEN_INCLUDE_RES.items():
+            count = len(pattern.findall(raw))
+            if count > 0:
+                include_counts[include_name] = count
+        if include_counts:
+            observed_includes[rel] = include_counts
 
     errors: list[str] = []
 
     for rel, counts in observed_calls.items():
-        if rel not in ALLOWED_CALL_COUNTS:
-            errors.append(f"forbidden timing calls in unexpected file: {rel} -> {counts}")
-            continue
-        expected = ALLOWED_CALL_COUNTS[rel]
-        for call_name, count in counts.items():
-            exp = expected.get(call_name, 0)
-            if count != exp:
-                errors.append(
-                    f"timing call count mismatch in {rel}: {call_name} observed={count}, expected={exp}"
-                )
+        errors.append(f"forbidden platform/timing calls in core: {rel} -> {counts}")
 
-    for rel, expected in ALLOWED_CALL_COUNTS.items():
-        observed = observed_calls.get(rel, {})
-        for call_name, exp in expected.items():
-            obs = observed.get(call_name, 0)
-            if obs != exp:
-                errors.append(
-                    f"timing call count mismatch in {rel}: {call_name} observed={obs}, expected={exp}"
-                )
-        unexpected_calls = set(observed.keys()) - set(expected.keys())
-        if unexpected_calls:
-            errors.append(f"unexpected timing call types in {rel}: {sorted(unexpected_calls)}")
+    for rel, counts in observed_identifiers.items():
+        errors.append(f"forbidden Arduino identifiers in core: {rel} -> {counts}")
 
-    for rel, count in observed_includes.items():
-        exp = ALLOWED_INCLUDE_COUNTS.get(rel, 0)
-        if count != exp:
-            errors.append(
-                f"Arduino include count mismatch in {rel}: observed={count}, expected={exp}"
-            )
-
-    for rel, exp in ALLOWED_INCLUDE_COUNTS.items():
-        obs = observed_includes.get(rel, 0)
-        if obs != exp:
-            errors.append(
-                f"Arduino include count mismatch in {rel}: observed={obs}, expected={exp}"
-            )
+    for rel, counts in observed_includes.items():
+        errors.append(f"forbidden framework headers in core: {rel} -> {counts}")
 
     if errors:
-        print("Core timing guard FAILED:")
+        print("Core framework guard FAILED:")
         for err in errors:
             print(f"- {err}")
         return 1
 
-    print("Core timing guard PASSED")
+    print("Core framework guard PASSED")
     return 0
 
 

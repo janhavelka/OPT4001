@@ -9,11 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- ESP-IDF component metadata, root `CMakeLists.txt`, and a basic
-  `examples/esp_idf/basic` application using the ESP-IDF new I2C master driver,
-  `esp_timer`, FreeRTOS yield hook, and optional GPIO read hook.
+- ESP-IDF component metadata, root `CMakeLists.txt`, and an
+  `examples/esp_idf/basic` application that runs the same bring-up CLI source
+  as the Arduino example through ESP-IDF-native UART/GPIO/timer/I2C glue.
 - IDF port implementation notes documenting the framework-neutral core boundary,
   general-call reset caveat, and validation status.
+- `tools/check_idf_example_contract.py` to keep the ESP-IDF example tied to the
+  shared CLI source and native `driver/i2c_master.h` glue.
 - `softReset()` and `resetAndReapply()` to align OPT4001 reset handling with the stronger sibling libraries while preserving the datasheet's general-call reset behavior.
 - Sample-cache helpers: `getLastSample()`, `sampleTimestampMs()`, and `sampleAgeMs()`.
 - `hasSample()` / `SettingsSnapshot::hasSample` and `readIntPinAsserted(bool&)` for cache and INT GPIO diagnostics.
@@ -40,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when blocking helpers need wall-clock time or cooperative scheduling.
 - Declared `espidf` framework support in PlatformIO metadata while keeping the
   Arduino example functionality equivalent through example-local hooks.
+- Reworked the ESP-IDF example from a short log-only app into a full interactive
+  CLI parity build with matching commands, help text, colorized output,
+  diagnostics, health reporting, probe/recover/reset flows, stress/self-test
+  workflows, and raw register access.
 - Doxyfile project metadata now matches `library.json` and references the
   maintained docs tree instead of removed template files.
 - Reference documentation now separates compact ambient-light notes from full PDF/application-note extractions under `docs/extracted-md/` and `docs/pdf-extracted-md/`.

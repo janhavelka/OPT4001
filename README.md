@@ -63,8 +63,10 @@ Copy `include/OPT4001/` and `src/` into your project.
 The repository root is an ESP-IDF component. Add it through `EXTRA_COMPONENT_DIRS`
 or component manager metadata, then provide `Config::i2cWrite`,
 `Config::i2cWriteRead`, `Config::nowMs`, optional `Config::cooperativeYield`,
-and optional `Config::gpioRead` from your application-owned adapter. A basic
-new-driver example is in `examples/esp_idf/basic`.
+and optional `Config::gpioRead` from your application-owned adapter. The
+`examples/esp_idf/basic` project runs the same interactive bring-up shell as
+the Arduino example while using ESP-IDF-native UART, GPIO, timer, and new I2C
+master-driver glue.
 
 ## Quick Start
 
@@ -158,8 +160,9 @@ void loop() {
 - `softReset()` uses the documented general-call reset (`0x00` / `0x06`).
   That reset is bus-wide; use it only when the bus topology allows it.
 - ESP-IDF reset support requires the application adapter to support the
-  general-call write address `0x00`; the basic IDF example does not exercise
-  bus-wide reset.
+  general-call write address `0x00`; the IDF CLI exposes `reset` and
+  `resetreapply`, but the address-`0x00` path still needs target-IDF and
+  target-hardware validation before production use.
 - `resetAndReapply()` exists for the same workflow used in the stronger sibling
   libraries: reset the device, then restore the cached configuration.
 - `readSample()`, `readBurst()`, and the blocking helpers may return `CRC_ERROR`
@@ -279,6 +282,15 @@ void loop() {
   - threshold lux helpers, `thcalc`, `thdecode`, `threshold default`, raw threshold programming, interrupt configuration, and raw register / block access
   - measurement and interrupt convenience flows exposed directly in the shell via `measure`, `int ready`, `int fifo`, and `int th`
   - consolidated `diag` report and optional periodic `healthmon` output using the shared health diagnostic helper
+- `examples/esp_idf/basic/`
+  - ESP-IDF project that compiles the same bring-up CLI source as the Arduino
+    example, so command names, aliases, help text, arguments, colors, prompts,
+    diagnostics, health reporting, stress/self-test workflows, and raw register
+    access stay user-visible compatible
+  - local `Arduino.h` / `Wire.h` compatibility layer backed by ESP-IDF UART,
+    GPIO, `esp_timer`, FreeRTOS yield/delay, and `driver/i2c_master.h`
+  - standalone `Opt4001IdfI2cTransport` callback adapter remains available as
+    a native-IDF reference for applications that do not want the CLI shim
 - `examples/common/`
   - board config and serial logging helpers
   - I2C transport adapter and bus scanner
@@ -347,9 +359,13 @@ void loop() {
 ```bash
 pio test -e native
 python tools/check_cli_contract.py
+python tools/check_idf_example_contract.py
 python tools/check_core_timing_guard.py
 pio run -e esp32s3dev
 pio run -e esp32s2dev
+# from examples/esp_idf/basic when ESP-IDF is installed:
+idf.py set-target esp32s3 build
+idf.py set-target esp32s2 build
 ```
 
 ## License

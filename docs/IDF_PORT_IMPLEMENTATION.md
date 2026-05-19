@@ -16,19 +16,30 @@ Implemented on branch `idf-port`.
 
 - Root `CMakeLists.txt` registers the library as an ESP-IDF component.
 - `idf_component.yml` declares component-manager metadata for ESP-IDF 6.x.
-- `examples/esp_idf/basic` demonstrates application-owned bus/device setup with
-  the new `driver/i2c_master.h` API, `esp_timer_get_time()` timing, a FreeRTOS
-  yield hook, and optional GPIO input handling for INT.
+- `examples/esp_idf/basic` compiles the same interactive bring-up CLI source as
+  `examples/01_basic_bringup_cli`, so Arduino and ESP-IDF expose the same
+  command names, aliases, help text, arguments, colorized output, diagnostics,
+  health reporting, probe/recover/reset flows, stress/self-test workflows, and
+  raw register access.
+- The IDF CLI uses a local compatibility layer for the small `Serial`, `String`,
+  `Wire`, timing, delay/yield, and GPIO subset required by the shared CLI. That
+  layer is backed by ESP-IDF UART, GPIO, `esp_timer`, FreeRTOS, and the new
+  `driver/i2c_master.h` API.
+- `Opt4001IdfI2cTransport.*` remains as a direct native-IDF callback adapter for
+  applications that do not want to use the CLI compatibility layer.
 
 ## General-Call Reset Note
 
 `softReset()` and `resetAndReapply()` write to the OPT4001 general-call address
-`0x00`. The example adapter routes `0x00` writes through `generalCallDev` when
-the application configures that handle, but the basic example does not create or
-exercise that handle because this environment could not verify ESP-IDF v6.0.1
-address-`0x00` device-handle behavior. Validate this on target IDF; if a normal
-handle cannot represent `0x00`, implement the reset path with defined I2C
-operations in the application adapter.
+`0x00`. The shared IDF CLI exposes `reset` and `resetreapply`; its `Wire` shim
+attempts to create an address-`0x00` device handle on demand. The direct
+callback adapter also supports routing `0x00` writes through `generalCallDev`
+when the application configures that handle.
+
+This environment could not verify ESP-IDF address-`0x00` device-handle
+behavior. Validate this on target IDF; if a normal handle cannot represent
+`0x00`, implement the reset path with defined I2C operations in the application
+adapter.
 
 ## Validation
 
@@ -36,6 +47,11 @@ operations in the application adapter.
   should return no matches.
 - Arduino examples remain under `examples/01_basic_bringup_cli` and continue to
   provide `Wire`, `millis()`, and `yield()` through example-local callbacks.
+- The ESP-IDF example compiles the same CLI source through local compatibility
+  headers and native IDF implementations.
+- `python tools/check_cli_contract.py`
+- `python tools/check_idf_example_contract.py`
+- `python tools/check_core_timing_guard.py`
 - IDF builds were not run in this environment because `idf.py` was not on PATH.
 
 ## Remaining Hardware Work
