@@ -283,14 +283,13 @@ void loop() {
   - measurement and interrupt convenience flows exposed directly in the shell via `measure`, `int ready`, `int fifo`, and `int th`
   - consolidated `diag` report and optional periodic `healthmon` output using the shared health diagnostic helper
 - `examples/esp_idf/basic/`
-  - ESP-IDF project that compiles the same bring-up CLI source as the Arduino
-    example, so command names, aliases, help text, arguments, colors, prompts,
-    diagnostics, health reporting, stress/self-test workflows, and raw register
-    access stay user-visible compatible
-  - local `Arduino.h` / `Wire.h` compatibility layer backed by ESP-IDF UART,
-    GPIO, `esp_timer`, FreeRTOS yield/delay, and `driver/i2c_master.h`
-  - standalone `Opt4001IdfI2cTransport` callback adapter remains available as
-    a native-IDF reference for applications that do not want the CLI shim
+  - native ESP-IDF project with `app_main()`, fixed-buffer CLI input, and
+    `driver/i2c_master.h` transport callbacks
+  - command coverage for scan, probe, recover, reset, status/config decode,
+    thresholds, raw register access, stress, stress-mix, selftest, and live
+    watch workflows
+  - no Arduino compatibility facade; parity is enforced by
+    `tools/check_idf_example_contract.py`
 - `examples/common/`
   - board config and serial logging helpers
   - I2C transport adapter and bus scanner
