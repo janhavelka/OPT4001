@@ -1,12 +1,13 @@
 # OPT4001 Driver Library
 
 Production-grade OPT4001 ambient light sensor driver for ESP32-S2 / ESP32-S3
-using the Arduino framework and PlatformIO.
+using the Arduino framework, PlatformIO, and ESP-IDF component builds.
 
 The library follows the same non-owning I2C transport and `Status`-returning API
 pattern used by the other device libraries in this workspace:
 
 - no direct `Wire` dependency in library code
+- framework-neutral core with no Arduino or ESP-IDF driver headers in `include/` or `src/`
 - deterministic control flow with bounded polling in `tick()`
 - health tracking with `READY`, `DEGRADED`, and `OFFLINE` states
 - no heap allocation in steady-state driver operation
@@ -56,6 +57,16 @@ lib_deps =
 ### Manual
 
 Copy `include/OPT4001/` and `src/` into your project.
+
+### ESP-IDF
+
+The repository root is an ESP-IDF component. Add it through `EXTRA_COMPONENT_DIRS`
+or component manager metadata, then provide `Config::i2cWrite`,
+`Config::i2cWriteRead`, `Config::nowMs`, optional `Config::cooperativeYield`,
+and optional `Config::gpioRead` from your application-owned adapter. The
+`examples/esp_idf/basic` project runs the same interactive bring-up shell as
+the Arduino example while using ESP-IDF-native UART, GPIO, timer, and new I2C
+master-driver glue.
 
 ## Quick Start
 
@@ -109,6 +120,8 @@ void setup() {
   cfg.i2cWrite = i2cWrite;
   cfg.i2cWriteRead = i2cWriteRead;
   cfg.i2cUser = &Wire;
+  cfg.nowMs = [](void*) { return millis(); };
+  cfg.cooperativeYield = [](void*) { yield(); };
   cfg.packageVariant = OPT4001::PackageVariant::SOT_5X3;
   cfg.i2cAddress = 0x45;
   cfg.mode = OPT4001::Mode::POWER_DOWN;
@@ -146,6 +159,10 @@ void loop() {
   `readBlocking()`.
 - `softReset()` uses the documented general-call reset (`0x00` / `0x06`).
   That reset is bus-wide; use it only when the bus topology allows it.
+- ESP-IDF reset support requires the application adapter to support the
+  general-call write address `0x00`; the IDF CLI exposes `reset` and
+  `resetreapply`, but the address-`0x00` path still needs target-IDF and
+  target-hardware validation before production use.
 - `resetAndReapply()` exists for the same workflow used in the stronger sibling
   libraries: reset the device, then restore the cached configuration.
 - `readSample()`, `readBurst()`, and the blocking helpers may return `CRC_ERROR`
@@ -265,6 +282,14 @@ void loop() {
   - threshold lux helpers, `thcalc`, `thdecode`, `threshold default`, raw threshold programming, interrupt configuration, and raw register / block access
   - measurement and interrupt convenience flows exposed directly in the shell via `measure`, `int ready`, `int fifo`, and `int th`
   - consolidated `diag` report and optional periodic `healthmon` output using the shared health diagnostic helper
+- `examples/esp_idf/basic/`
+  - native ESP-IDF project with `app_main()`, fixed-buffer CLI input, and
+    `driver/i2c_master.h` transport callbacks
+  - command coverage for scan, probe, recover, reset, status/config decode,
+    thresholds, raw register access, stress, stress-mix, selftest, and live
+    watch workflows
+  - no Arduino compatibility facade; parity is enforced by
+    `tools/check_idf_example_contract.py`
 - `examples/common/`
   - board config and serial logging helpers
   - I2C transport adapter and bus scanner
@@ -311,6 +336,8 @@ void loop() {
 - `docs/AN_light_detection.md` - application notes relevant to threshold use
 - `docs/AN_high_speed_resolution.md` - high-speed / resolution trade-offs
 - `docs/AN_picostar_package.md` - PicoStar-specific package differences
+- `docs/IDF_PORT.md` - ESP-IDF portability guidance
+- `docs/IDF_PORT_IMPLEMENTATION.md` - ESP-IDF implementation notes and validation status
 - `include/OPT4001/CommandTable.h` - public register constants and masks
 - `ASSUMPTIONS.md` - implementation choices made where the device notes needed interpretation
 
@@ -331,9 +358,13 @@ void loop() {
 ```bash
 pio test -e native
 python tools/check_cli_contract.py
+python tools/check_idf_example_contract.py
 python tools/check_core_timing_guard.py
 pio run -e esp32s3dev
 pio run -e esp32s2dev
+# from examples/esp_idf/basic when ESP-IDF is installed:
+idf.py set-target esp32s3 build
+idf.py set-target esp32s2 build
 ```
 
 ## License

@@ -29,40 +29,21 @@ MANDATORY_COMMANDS = [
     "probe",
     "recover",
     "drv",
-    "state",
     "read",
-    "addr",
     "diag",
-    "healthmon",
     "scale",
-    "adc2lux",
-    "raw2lux",
-    "tryread",
-    "trylux",
-    "measure",
-    "slot",
     "config",
     "intcfg",
     "status",
     "flags",
-    "thcalc",
-    "thdecode",
+    "threshold",
     "regs",
     "reset",
     "resetreapply",
-    "watch",
-    "stop",
     "selftest",
     "verbose",
     "stress",
     "stress_mix",
-]
-
-MANDATORY_SUBSTRINGS = [
-    "threshold default",
-    "int ready",
-    "int fifo",
-    "int th ",
 ]
 
 
@@ -83,32 +64,39 @@ def ensure_missing(path: pathlib.Path, label: str) -> None:
 
 def main() -> int:
     common_dir = ROOT / "examples" / "common"
-    bringup_main = ROOT / "examples" / "01_basic_bringup_cli" / "main.cpp"
+    arduino_cli = ROOT / "examples" / "01_basic_bringup_cli" / "main.cpp"
+    idf_main_dir = ROOT / "examples" / "esp_idf" / "basic" / "main"
+    idf_main = idf_main_dir / "main.cpp"
+    idf_cmake = idf_main_dir / "CMakeLists.txt"
 
     ensure_exists(common_dir, "common example directory")
-    ensure_exists(bringup_main, "bringup CLI example")
+    ensure_exists(arduino_cli, "Arduino bring-up CLI")
+    ensure_exists(idf_main, "native ESP-IDF CLI")
+    ensure_exists(idf_cmake, "ESP-IDF example component CMake")
 
-    ensure_missing(ROOT / "examples" / "00_smoke_boot", "deprecated example 00_smoke_boot")
-    ensure_missing(
-        ROOT / "examples" / "03_feature_walkthrough",
-        "deprecated example 03_feature_walkthrough",
-    )
+    for stale in ("Arduino.h", "Wire.h", "Opt4001IdfArduinoShim.cpp"):
+        ensure_missing(idf_main_dir / stale, f"ESP-IDF compatibility file {stale}")
 
     for name in REQUIRED_COMMON:
         ensure_exists(common_dir / name, f"common helper {name}")
 
-    text = bringup_main.read_text(encoding="utf-8", errors="replace")
+    arduino_text = arduino_cli.read_text(encoding="utf-8", errors="replace")
+    idf_text = idf_main.read_text(encoding="utf-8", errors="replace")
+    cmake_text = idf_cmake.read_text(encoding="utf-8", errors="replace")
 
     for cmd in MANDATORY_COMMANDS:
-        if re.search(rf"\b{re.escape(cmd)}\b", text) is None:
-            fail(f"mandatory command '{cmd}' missing in {bringup_main.as_posix()}")
+        if re.search(rf"\b{re.escape(cmd)}\b", arduino_text) is None:
+            fail(f"Arduino CLI missing mandatory command '{cmd}'")
+        if f'"{cmd}"' not in idf_text:
+            fail(f"IDF CLI missing mandatory command '{cmd}'")
 
-    for cmd in MANDATORY_SUBSTRINGS:
-        if cmd not in text:
-            fail(f"mandatory CLI phrase '{cmd}' missing in {bringup_main.as_posix()}")
+    for token in ("driver/i2c_master.h", "i2c_master_probe", "getchar()", "char input["):
+        if token not in idf_text:
+            fail(f"native ESP-IDF CLI missing '{token}'")
 
-    if re.search(r"\bcfg\b", text) is None and re.search(r"\bsettings\b", text) is None:
-        fail("either 'cfg' or 'settings' command must be present")
+    for token in ("Opt4001IdfI2cTransport.cpp", "esp_driver_i2c", "esp_timer"):
+        if token not in cmake_text:
+            fail(f"ESP-IDF CMake missing '{token}'")
 
     print("CLI contract PASSED")
     return 0

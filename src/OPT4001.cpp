@@ -3,7 +3,6 @@
 
 #include "OPT4001/OPT4001.h"
 
-#include <Arduino.h>
 #include <climits>
 #include <cmath>
 
@@ -1999,7 +1998,7 @@ uint32_t OPT4001::_nowMs() const {
   if (_config.nowMs != nullptr) {
     return _config.nowMs(_config.timeUser);
   }
-  return millis();
+  return 0;
 }
 
 void OPT4001::_cooperativeYield() const {
@@ -2007,7 +2006,6 @@ void OPT4001::_cooperativeYield() const {
     _config.cooperativeYield(_config.timeUser);
     return;
   }
-  yield();
 }
 
 }  // namespace OPT4001

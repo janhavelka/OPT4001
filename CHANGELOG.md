@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ESP-IDF component metadata, root `CMakeLists.txt`, and a native
+  `examples/esp_idf/basic` application using `app_main`, fixed-buffer CLI
+  input, and ESP-IDF `driver/i2c_master.h` transport glue.
+- IDF port implementation notes documenting the framework-neutral core boundary,
+  general-call reset caveat, and validation status.
+- `tools/check_idf_example_contract.py` to enforce native ESP-IDF example
+  boundaries and command coverage without Arduino compatibility facades.
 - `softReset()` and `resetAndReapply()` to align OPT4001 reset handling with the stronger sibling libraries while preserving the datasheet's general-call reset behavior.
 - Sample-cache helpers: `getLastSample()`, `sampleTimestampMs()`, and `sampleAgeMs()`.
 - `hasSample()` / `SettingsSnapshot::hasSample` and `readIntPinAsserted(bool&)` for cache and INT GPIO diagnostics.
@@ -30,6 +37,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Removed Arduino `millis()` and `yield()` fallbacks from the driver core.
+- Removed the ESP-IDF Arduino compatibility shim from the IDF example; command
+  parity is now maintained by a repo-local native command contract.
+  Applications should provide `Config::nowMs` and `Config::cooperativeYield`
+  when blocking helpers need wall-clock time or cooperative scheduling.
+- Declared `espidf` framework support in PlatformIO metadata while keeping the
+  Arduino example functionality equivalent through example-local hooks.
+- Reworked the ESP-IDF example from a short log-only app into a full interactive
+  CLI parity build with matching commands, help text, colorized output,
+  diagnostics, health reporting, probe/recover/reset flows, stress/self-test
+  workflows, and raw register access.
 - Doxyfile project metadata now matches `library.json` and references the
   maintained docs tree instead of removed template files.
 - Reference documentation now separates compact ambient-light notes from full PDF/application-note extractions under `docs/extracted-md/` and `docs/pdf-extracted-md/`.

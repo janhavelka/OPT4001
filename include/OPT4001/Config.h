@@ -21,10 +21,13 @@ using I2cWriteReadFn = Status (*)(uint8_t addr, const uint8_t* txData, size_t tx
 /// Optional GPIO read callback for the device INT pin.
 using GpioReadFn = bool (*)(int pin, void* user);
 
-/// Millisecond timestamp callback.
+/// Optional monotonic millisecond timestamp callback.
+/// Framework-neutral builds do not call platform time APIs; if unset, health
+/// timestamps use 0 and blocking helpers cannot advance from wall time.
 using NowMsFn = uint32_t (*)(void* user);
 
-/// Cooperative yield callback.
+/// Optional cooperative yield callback. If unset, the driver core does not call
+/// scheduler/yield APIs.
 using YieldFn = void (*)(void* user);
 
 /// Package variant. This controls lux scaling and address validation.
@@ -123,8 +126,8 @@ struct Config {
   void* i2cUser = nullptr;
 
   // === Timing Hooks (optional) ===
-  NowMsFn nowMs = nullptr;
-  YieldFn cooperativeYield = nullptr;
+  NowMsFn nowMs = nullptr;             ///< Optional monotonic millisecond source.
+  YieldFn cooperativeYield = nullptr;  ///< Optional cooperative scheduler hint.
   void* timeUser = nullptr;
 
   // === Device Settings ===
