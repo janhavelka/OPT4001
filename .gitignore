@@ -9,6 +9,7 @@
 *.elf
 *.bin
 *.map
+OPT4001-*.tar.gz
 
 # Python (for scripts/)
 __pycache__/
@@ -36,6 +37,7 @@ wifi_credentials.h
 *.tmp
 *.bak
 *.log
+hil_logs/
 
 # Version.h is generated from library.json and intentionally tracked so clean
 # manual, CMake, and ESP-IDF consumers can include OPT4001/OPT4001.h.

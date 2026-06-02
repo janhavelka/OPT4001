@@ -35,7 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   diagnostic observation of continuous and repeated one-shot measurement flows.
 - Root `AGENTS.md` production guidelines for future driver work.
 - Readiness-claims and public-API documentation guard scripts for CI.
-- Hardware-validation procedure outline for future captured board evidence.
+- Hardware-validation procedure and fillable validation matrix for future
+  captured board evidence.
+- Optional bounded serial HIL runner for smoke, conversion-time, stress, FIFO,
+  and opt-in INT/fault diagnostic CLI groups.
 
 ### Changed
 

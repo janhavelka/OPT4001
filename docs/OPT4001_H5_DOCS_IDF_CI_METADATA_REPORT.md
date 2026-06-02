@@ -22,7 +22,8 @@ whether `getchar()` returned promptly.
   `library.json`, `idf_component.yml`, `CHANGELOG.md`, and
   `docs/OPT4001_datasheet.md`.
 - Current README classification is source-level hardened and diagnostic-build
-  tested, with hardware/optical/INT/FIFO/address/fault validation still pending.
+  tested, with hardware, optical, INT, FIFO timing/order, address-pin, and
+  fault/recovery validation still pending.
 - README now distinguishes native fake-transport tests, Arduino ESP32-S2/S3
   PlatformIO builds, static ESP-IDF contract checks, configured pure ESP-IDF CI,
   and local pure ESP-IDF validation that could not run because `idf.py` is not

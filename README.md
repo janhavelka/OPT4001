@@ -4,8 +4,9 @@ Production-oriented, industry-readiness-hardened OPT4001 ambient light sensor
 driver with a framework-neutral core. Current evidence covers native
 fake-transport tests and Arduino/PlatformIO ESP32-S2/S3 builds. A native ESP-IDF
 component and diagnostic example are present, and CI is configured to build the
-pure ESP-IDF example. Local pure ESP-IDF, hardware, optical, and interrupt
-validation remain pending unless captured separately.
+pure ESP-IDF example. Local pure ESP-IDF, hardware, optical, INT, FIFO
+timing/order, address-pin, and fault/recovery validation remain pending unless
+captured separately.
 
 The library follows the same non-owning I2C transport and `Status`-returning API
 pattern used by the other device libraries in this workspace:
@@ -20,7 +21,8 @@ pattern used by the other device libraries in this workspace:
 
 Classification: source-level hardened and diagnostic-build tested. The core is
 designed for production use, but this repository does not currently claim full
-hardware, optical, interrupt, FIFO-timing, or pure ESP-IDF target validation.
+hardware, optical, INT, FIFO timing/order, address-pin, fault/recovery, or pure
+ESP-IDF target validation.
 
 ### Validation Evidence
 
@@ -45,6 +47,7 @@ hardware, optical, interrupt, FIFO-timing, or pure ESP-IDF target validation.
 | INT threshold, every-conversion, and FIFO-full pulses | Pending logic-analyzer or board-captured evidence. |
 | FIFO physical timing/order under real conversions | Pending hardware matrix. |
 | SMBus alert arbitration | Pending controller-level validation. |
+| Fault/recovery paths | Pending controlled hardware/HIL validation for NACK, timeout, unplug/replug, brownout, stuck bus, OFFLINE latch, and manual `recover()`. |
 | Pure ESP-IDF `idf.py` builds | CI configured; local and captured workflow evidence pending. |
 
 Hardware validation procedure: `docs/OPT4001_HARDWARE_VALIDATION_PROCEDURE.md`.
@@ -625,6 +628,28 @@ idf.py -C examples/esp_idf/basic set-target esp32s2 build
 The static IDF contract check does not replace a real `idf.py` build. Local
 Prompt 8 validation attempted `idf.py --version`, but ESP-IDF was not available
 on `PATH`, so local pure ESP-IDF builds were not run.
+
+### Optional Hardware-In-Loop Runner
+
+`tools/hil_opt4001_runner.py` can drive the Arduino or ESP-IDF diagnostic CLI
+over a serial port and write bounded Markdown/JSON transcripts under
+`hil_logs/`. It does not manipulate power, GPIO fixtures, or stuck-bus hardware.
+INT and reset/recovery groups are disabled unless explicitly requested by the
+operator.
+
+Examples:
+
+```bash
+python tools/hil_opt4001_runner.py --port COM6 --cli arduino --group smoke
+python tools/hil_opt4001_runner.py --port COM6 --cli arduino --group all-safe
+python tools/hil_opt4001_runner.py --port /dev/ttyUSB0 --cli idf --group smoke --group fifo
+python tools/hil_opt4001_runner.py --cli arduino --group all-safe --dry-run
+```
+
+Use `--include-int` only on SOT-5X3 fixtures with INT wired and instrumented.
+Use `--include-fault` only when bus-wide reset and recovery commands are safe
+for the connected hardware; it requires
+`--confirm-faults I_ACCEPT_BUS_RESET_RISK`.
 
 ## License
 

@@ -4,7 +4,8 @@ Date: 2026-06-02
 Branch: `hardening/opt4001-industry-readiness`
 Baseline commit: `4e76a03a19e6644ff6a0941018ef55ceb83de754`
 Source audit report: `docs/OPT4001_INDUSTRY_READINESS_EXPLORATION_REPORT.md`
-Prompt: Prompt 1 - branch, baseline, AGENTS.md, and finding-to-prompt plan
+Prompt/status scope: baseline plan plus status through Prompt 8; Prompt 9 final
+report and validation status are added at completion.
 
 Prompt 1 implemented no functional fixes. The only intended changes are this planning document and an `AGENTS.md` rules update for future hardening prompts.
 
@@ -297,7 +298,41 @@ Remaining limitation:
   pure-IDF build evidence. Hardware/optical/INT/FIFO/address/fault validation
   remains assigned to Prompt 9.
 
-## Prompt 2 Scope
+## Prompt 9 Status Update
+
+Final validation/report status: complete for procedure, optional bounded HIL
+runner, final integration review, and merge verdict.
+
+Evidence:
+
+- `docs/OPT4001_HARDWARE_VALIDATION_PROCEDURE.md` is now a fillable procedure
+  with safe smoke, conversion-time, freshness/counter, package/address,
+  FIFO/burst, SOT-5X3 INT/threshold, optical, fault/recovery, and framework
+  matrix sections using actual Arduino and ESP-IDF CLI command names.
+- `tools/hil_opt4001_runner.py` provides an optional bounded serial transcript
+  runner with dry-run/list modes, smoke/ctime/stress/FIFO groups, opt-in INT
+  commands, explicit fault/reset confirmation, Markdown/JSON logs under ignored
+  `hil_logs/`, and pass/warn/fail summaries.
+- `.gitignore` ignores PlatformIO package tarballs and `hil_logs/` to avoid
+  accidental validation-artifact commits.
+- `docs/OPT4001_HARDENING_FINAL_REPORT.md` records the finding-by-finding
+  closure table, command results, commands not run, hardware/HIL status, known
+  risks, and verdict.
+- Final local guards, native tests, ESP32-S3/S2 PlatformIO builds, and package
+  packing passed. Local pure ESP-IDF commands still could not run because
+  `idf.py` is not on `PATH`.
+- No hardware/HIL smoke, optical data, INT capture, FIFO timing/order capture,
+  address-pin matrix, or fault/recovery logs were captured in this prompt
+  because no hardware fixture or serial port was provided.
+
+Verdict:
+
+- `READY TO MERGE` for the source-level hardening branch after CI passes.
+- Not `READY TO RELEASE` as a full field-proven or industry-grade release until
+  hardware, optical, INT, FIFO timing/order, address-pin, fault/recovery, and
+  pure ESP-IDF build evidence is captured.
+
+## Historical Prompt 2 Scope Appendix
 
 Prompt 2 should fix H1 only: make `Version.h` or an equivalent version source reproducible for clean manual/native/CMake and ESP-IDF consumers. It should not address lifecycle, probe, sample readiness, numeric, FIFO, docs honesty, metadata, or hardware validation unless directly required by the reproducibility fix.
 
