@@ -254,15 +254,9 @@ Status OPT4001::probe() {
   uint16_t deviceId = 0;
   Status st = _readRegister16Raw(cmd::REG_DEVICE_ID, deviceId);
   if (!st.ok()) {
-    if (st.code == Err::INVALID_CONFIG || st.code == Err::INVALID_PARAM) {
-      return st;
-    }
-    return Status::Error(Err::DEVICE_NOT_FOUND, "OPT4001 not responding", st.detail);
+    return st;
   }
-  if ((deviceId & cmd::MASK_DIDH) != cmd::DIDH_EXPECTED) {
-    return Status::Error(Err::DEVICE_ID_MISMATCH, "Unexpected device ID", deviceId);
-  }
-  return Status::Ok();
+  return _validateDeviceId(deviceId);
 }
 
 Status OPT4001::recover() {
@@ -281,9 +275,9 @@ Status OPT4001::recover() {
     }
     return st;
   }
-  if ((deviceId & cmd::MASK_DIDH) != cmd::DIDH_EXPECTED) {
-    st = _recordFailure(Status::Error(Err::DEVICE_ID_MISMATCH,
-                                      "Unexpected device ID", deviceId));
+  st = _validateDeviceId(deviceId);
+  if (!st.ok()) {
+    st = _recordFailure(st);
     if (startedOffline) {
       _reassertOfflineLatch();
     }
@@ -1487,8 +1481,20 @@ Status OPT4001::_writeRegister16Tracked(uint8_t reg, uint16_t value) {
 void OPT4001::decodeDeviceId(uint16_t raw, DeviceIdInfo& out) const {
   out.raw = raw;
   out.didh = static_cast<uint16_t>(raw & cmd::MASK_DIDH);
-  out.didl = static_cast<uint8_t>((raw & cmd::MASK_DIDL) >> 12U);
-  out.matchesExpected = (out.didh == cmd::DIDH_EXPECTED) && (out.didl == 0U);
+  out.didl = static_cast<uint8_t>((raw & cmd::MASK_DIDL) >> cmd::BIT_DIDL);
+  out.reservedBitsClear = (raw & cmd::MASK_DEVICE_ID_RESERVED) == 0U;
+  out.matchesExpected = out.reservedBitsClear &&
+                        (out.didh == cmd::DIDH_EXPECTED) &&
+                        (out.didl == cmd::DIDL_EXPECTED);
+}
+
+Status OPT4001::_validateDeviceId(uint16_t raw) const {
+  DeviceIdInfo info;
+  decodeDeviceId(raw, info);
+  if (!info.matchesExpected) {
+    return Status::Error(Err::DEVICE_ID_MISMATCH, "Unexpected device ID", raw);
+  }
+  return Status::Ok();
 }
 
 void OPT4001::decodeConfiguration(uint16_t raw, ConfigurationInfo& out) const {

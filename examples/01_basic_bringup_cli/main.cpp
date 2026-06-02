@@ -904,7 +904,9 @@ void printDeviceIdInfo() {
   Serial.printf("  Raw: 0x%04X\n", info.raw);
   Serial.printf("  DIDH: 0x%03X\n", info.didh);
   Serial.printf("  DIDL: %u\n", info.didl);
-  Serial.printf("  Expected DIDH / DIDL: 0x%03X / 0\n", OPT4001::cmd::DIDH_EXPECTED);
+  Serial.printf("  Reserved bits clear: %s\n", log_bool_str(info.reservedBitsClear));
+  Serial.printf("  Expected DIDH / DIDL / reserved: 0x%03X / %u / clear\n",
+                OPT4001::cmd::DIDH_EXPECTED, OPT4001::cmd::DIDL_EXPECTED);
   Serial.printf("  Matches expected: %s%s%s\n",
                 info.matchesExpected ? LOG_COLOR_GREEN : LOG_COLOR_RED,
                 log_bool_str(info.matchesExpected),

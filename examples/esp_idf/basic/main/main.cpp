@@ -358,7 +358,10 @@ void processCommand(char* line) {
   } else if (strcmp(cmd, "id") == 0) {
     OPT4001::DeviceIdInfo info;
     const auto st = device.readDeviceId(info);
-    st.ok() ? printf("DEVICE_ID raw=0x%04X didh=0x%03X didl=%u match=%s\n", info.raw, info.didh, info.didl, info.matchesExpected ? "yes" : "no") : printStatus(st);
+    st.ok() ? printf("DEVICE_ID raw=0x%04X didh=0x%03X didl=%u reserved_clear=%s match=%s\n",
+                     info.raw, info.didh, info.didl,
+                     info.reservedBitsClear ? "yes" : "no",
+                     info.matchesExpected ? "yes" : "no") : printStatus(st);
   } else if (strcmp(cmd, "config") == 0 || strcmp(cmd, "intcfg") == 0) {
     uint16_t raw = 0;
     const auto st = strcmp(cmd, "config") == 0 ? device.readConfiguration(raw) : device.readIntConfiguration(raw);

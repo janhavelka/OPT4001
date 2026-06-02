@@ -191,6 +191,15 @@ void loop() {
   target-hardware validation before production use.
 - `resetAndReapply()` exists for the same workflow used in the stronger sibling
   libraries: reset the device, then restore the cached configuration.
+- `probe()` reads `DEVICE_ID` register `0x11` through the raw configured
+  transport without updating health counters. Success means the register pattern
+  is exactly `0x0121`: fixed bits `[15:14] = 0`, `DIDL[13:12] = 0`, and
+  `DIDH[11:0] = 0x121`. This is identity-register validation, not optical or
+  measurement-path validation.
+- `probe()` and `begin()` preserve transport diagnostics instead of collapsing
+  them to `DEVICE_NOT_FOUND`. A successful I2C transaction with the wrong full
+  ID pattern returns `DEVICE_ID_MISMATCH` with the raw register value in
+  `Status::detail`.
 - `readSample()`, `readBurst()`, and the blocking helpers may return `CRC_ERROR`
   while still populating the decoded sample data.
 - Blocking read helpers have a finite polling cap in addition to their millisecond
@@ -238,6 +247,25 @@ void loop() {
   threshold registers.
 - Raw register access is bounded to documented public registers; blocks that span
   reserved gaps are rejected before touching the bus.
+
+### Probe Diagnostics
+
+| Condition during `probe()` / startup | Returned status | Detail field |
+| --- | --- | --- |
+| Address phase NACK, when the transport can distinguish it | `I2C_NACK_ADDR` | transport code |
+| Data phase NACK, when the transport can distinguish it | `I2C_NACK_DATA` | transport code |
+| I2C transaction timeout | `I2C_TIMEOUT` | transport code |
+| Bus/arbitration/driver-state fault | `I2C_BUS` | transport code |
+| Generic transport failure or unknown NACK phase | `I2C_ERROR` | transport code |
+| Successful read, but `DEVICE_ID` fixed bits/DIDL/DIDH are wrong | `DEVICE_ID_MISMATCH` | raw `DEVICE_ID` value |
+
+Arduino `Wire` adapters can distinguish address and data NACK during
+`endTransmission()`, but read-phase errors may still be generic because
+`requestFrom()` reports only how many bytes were read. The ESP-IDF example maps
+`ESP_ERR_TIMEOUT` to `I2C_TIMEOUT`, `ESP_ERR_INVALID_RESPONSE` to generic
+`I2C_ERROR` because the transaction API does not expose NACK phase, and other
+driver/bus state errors to `I2C_BUS` while preserving the raw `esp_err_t` in
+`detail`.
 
 ## Public Surface
 

@@ -52,9 +52,15 @@ struct Flags {
 
 /// Decoded device identification register.
 struct DeviceIdInfo {
+  /// Raw register 0x11 value.
   uint16_t raw = 0;
+  /// DIDH bits [11:0], expected `cmd::DIDH_EXPECTED`.
   uint16_t didh = 0;
+  /// DIDL bits [13:12], expected `cmd::DIDL_EXPECTED`.
   uint8_t didl = 0;
+  /// True when fixed/reserved bits [15:14] are clear.
+  bool reservedBitsClear = true;
+  /// True only when fixed bits, DIDL, and DIDH all match the OPT4001 pattern.
   bool matchesExpected = false;
 };
 
@@ -161,7 +167,11 @@ public:
   // === Diagnostics (probe uses raw transport, recover uses tracked transport) ===
   /// Probe the configured transport/address using raw I2C without requiring
   /// `begin()` and without updating health counters. Requires configured I2C
-  /// callbacks in the cached config.
+  /// callbacks in the cached config. A successful probe means the DEVICE_ID
+  /// register pattern is exactly the expected OPT4001 value; it is not an
+  /// optical or measurement-path validation. Transport statuses are returned
+  /// without being collapsed to `DEVICE_NOT_FOUND`; a successful I2C read with
+  /// an unexpected ID returns `DEVICE_ID_MISMATCH`.
   Status probe();
   /// Attempt recovery using tracked Device ID readback and config re-apply.
   /// Transport failures and Device ID mismatches update health counters.
@@ -381,6 +391,7 @@ private:
   Status _markConversionReadyByRegisterPoll();
   uint16_t _buildConfigurationRegister(Mode mode) const;
   uint16_t _buildIntConfigurationRegister() const;
+  Status _validateDeviceId(uint16_t raw) const;
   uint16_t _packThreshold(const Threshold& threshold) const;
   bool _thresholdValid(const Threshold& threshold) const;
   uint8_t _computeCrcNibble(uint8_t exponent, uint32_t mantissa, uint8_t counter) const;

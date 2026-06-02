@@ -20,6 +20,23 @@ The driver core remains framework-neutral. Hardware access is injected through
 `Config::i2cWrite`, `Config::i2cWriteRead`, optional `Config::gpioRead`,
 `Config::nowMs`, and `Config::cooperativeYield`.
 
+## Transport Status Mapping
+
+The IDF adapter preserves `esp_err_t` in `Status::detail`.
+
+| IDF result | OPT4001 status | Notes |
+| --- | --- | --- |
+| `ESP_OK` | `OK` | Transaction succeeded. |
+| `ESP_ERR_TIMEOUT` | `I2C_TIMEOUT` | Timeout is distinguishable. |
+| `ESP_ERR_INVALID_RESPONSE` | `I2C_ERROR` | Transaction-level NACK/invalid response; the API used here does not expose address vs data phase. |
+| `ESP_ERR_INVALID_ARG` | `INVALID_PARAM` | Adapter/API argument failure. |
+| `ESP_ERR_INVALID_STATE` | `I2C_BUS` | Driver or bus state fault. |
+| Other `esp_err_t` | `I2C_BUS` | Raw value is kept in `detail`. |
+
+`probe()` reads the full `DEVICE_ID` register pattern through this transport. A
+successful I2C read with an unexpected ID returns `DEVICE_ID_MISMATCH`; timeout,
+bus, and generic transaction failures are preserved as transport statuses.
+
 ## Version Header
 
 `include/OPT4001/Version.h` is generated from `library.json` and intentionally

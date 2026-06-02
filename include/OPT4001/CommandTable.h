@@ -123,8 +123,11 @@ static constexpr uint16_t MASK_FLAG_L = 0x0001;
 // Device ID Register 0x11
 // ============================================================================
 
-static constexpr uint16_t MASK_DIDL = 0x3000;
-static constexpr uint16_t MASK_DIDH = 0x0FFF;
+static constexpr uint16_t MASK_DEVICE_ID_RESERVED = 0xC000; ///< Fixed zero bits [15:14].
+static constexpr uint16_t MASK_DIDL = 0x3000;               ///< DEVICE_ID low field bits [13:12].
+static constexpr uint16_t MASK_DIDH = 0x0FFF;               ///< DEVICE_ID high field bits [11:0].
+static constexpr uint8_t BIT_DIDL = 12;
+static constexpr uint8_t DIDL_EXPECTED = 0x00;
 static constexpr uint16_t DIDH_EXPECTED = 0x0121;
 
 // ============================================================================

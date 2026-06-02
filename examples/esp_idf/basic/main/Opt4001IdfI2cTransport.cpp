@@ -24,8 +24,19 @@ OPT4001::Status mapEspErr(esp_err_t err, const char* context) {
     return OPT4001::Status::Error(OPT4001::Err::I2C_TIMEOUT, "I2C timeout",
                                   static_cast<int32_t>(err));
   }
+  if (err == ESP_ERR_INVALID_ARG) {
+    return OPT4001::Status::Error(OPT4001::Err::INVALID_PARAM, "IDF I2C invalid argument",
+                                  static_cast<int32_t>(err));
+  }
+  if (err == ESP_ERR_INVALID_STATE) {
+    return OPT4001::Status::Error(OPT4001::Err::I2C_BUS, "IDF I2C invalid state",
+                                  static_cast<int32_t>(err));
+  }
   if (err == ESP_ERR_INVALID_RESPONSE) {
-    return OPT4001::Status::Error(OPT4001::Err::I2C_ERROR, "I2C invalid response/NACK",
+    // The IDF transaction API used here reports NACK/invalid response without
+    // exposing whether the address or data phase failed.
+    return OPT4001::Status::Error(OPT4001::Err::I2C_ERROR,
+                                  "I2C NACK/invalid response; phase unknown",
                                   static_cast<int32_t>(err));
   }
   return OPT4001::Status::Error(OPT4001::Err::I2C_BUS, context, static_cast<int32_t>(err));

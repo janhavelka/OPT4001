@@ -116,6 +116,35 @@ Remaining limitation:
 - `end()` remains a compatibility best-effort `void` API; Prompt 3 documents
   the behavior rather than adding a new status-returning shutdown API.
 
+## Prompt 4 Status Update
+
+H4 status: complete for source-level probe, `begin()`, `recover()`, and decoded
+device-ID diagnostics.
+
+Evidence:
+
+- `CommandTable.h` now exposes the full `DEVICE_ID` fixed-bit/DIDL/DIDH layout:
+  reserved bits `[15:14]`, `DIDL[13:12]`, and `DIDH[11:0]`.
+- `decodeDeviceId()` reports `reservedBitsClear` and sets `matchesExpected` only
+  when reserved bits are clear, `DIDL == 0`, and `DIDH == 0x121`.
+- `probe()`, `begin()` through `probe()`, and `recover()` use the same strict
+  validation helper, so values such as `0x1121` and `0x4121` no longer pass just
+  because low `DIDH` matches.
+- `probe()` returns raw transport statuses such as `I2C_NACK_ADDR`,
+  `I2C_NACK_DATA`, `I2C_TIMEOUT`, `I2C_BUS`, and `I2C_ERROR` instead of
+  collapsing them to `DEVICE_NOT_FOUND`.
+- Native tests cover valid full ID, wrong DIDL/fixed bits in `probe()`,
+  `begin()`, and `recover()`, preserved probe transport statuses, decode helper
+  semantics, and the no-health-side-effect raw probe contract.
+- README and ESP-IDF port docs document the startup status mapping and the
+  ESP-IDF limitation that NACK phase is not exposed by the transaction API used
+  in the example adapter.
+
+Remaining limitation:
+
+- Prompt 4 improves the ESP-IDF adapter mapping and documentation, but real
+  target-IDF and hardware validation remain in Prompt 9.
+
 ## Prompt 2 Scope
 
 Prompt 2 should fix H1 only: make `Version.h` or an equivalent version source reproducible for clean manual/native/CMake and ESP-IDF consumers. It should not address lifecycle, probe, sample readiness, numeric, FIFO, docs honesty, metadata, or hardware validation unless directly required by the reproducibility fix.

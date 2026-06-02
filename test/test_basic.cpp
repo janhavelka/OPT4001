@@ -411,6 +411,206 @@ void test_update_health_ignores_in_progress() {
                           static_cast<uint8_t>(dev.state()));
 }
 
+void test_probe_accepts_valid_full_device_id() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  dev._config = makeConfig(bus);
+  bus.registers[cmd::REG_DEVICE_ID] = cmd::DEVICE_ID_RESET;
+
+  Status st = dev.probe();
+
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT32(1U, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(0U, bus.writeCalls);
+  TEST_ASSERT_FALSE(dev.isInitialized());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::UNINIT),
+                          static_cast<uint8_t>(dev.state()));
+  TEST_ASSERT_EQUAL_UINT32(0U, dev.totalSuccess());
+  TEST_ASSERT_EQUAL_UINT32(0U, dev.totalFailures());
+}
+
+void test_probe_rejects_matching_didh_with_nonzero_high_id_bits() {
+  const uint16_t badIds[] = {
+      static_cast<uint16_t>(cmd::DIDH_EXPECTED | 0x1000U),
+      static_cast<uint16_t>(cmd::DIDH_EXPECTED | 0x2000U),
+      static_cast<uint16_t>(cmd::DIDH_EXPECTED | 0x4000U),
+      static_cast<uint16_t>(cmd::DIDH_EXPECTED | 0x8000U),
+      static_cast<uint16_t>(cmd::DIDH_EXPECTED | 0xF000U),
+  };
+
+  for (uint16_t badId : badIds) {
+    FakeBus bus;
+    OPT4001::OPT4001 dev;
+    dev._config = makeConfig(bus);
+    bus.registers[cmd::REG_DEVICE_ID] = badId;
+
+    Status st = dev.probe();
+
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::DEVICE_ID_MISMATCH),
+                            static_cast<uint8_t>(st.code));
+    TEST_ASSERT_EQUAL_INT32(static_cast<int32_t>(badId), st.detail);
+    TEST_ASSERT_EQUAL_UINT32(1U, bus.readCalls);
+    TEST_ASSERT_EQUAL_UINT32(0U, dev.totalSuccess());
+    TEST_ASSERT_EQUAL_UINT32(0U, dev.totalFailures());
+    TEST_ASSERT_FALSE(dev.isInitialized());
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::UNINIT),
+                            static_cast<uint8_t>(dev.state()));
+  }
+}
+
+void test_begin_rejects_matching_didh_with_nonzero_high_id_bits() {
+  const uint16_t badIds[] = {
+      static_cast<uint16_t>(cmd::DIDH_EXPECTED | 0x1000U),
+      static_cast<uint16_t>(cmd::DIDH_EXPECTED | 0x4000U),
+  };
+
+  for (uint16_t badId : badIds) {
+    FakeBus bus;
+    OPT4001::OPT4001 dev;
+    bus.registers[cmd::REG_DEVICE_ID] = badId;
+
+    Status st = dev.begin(makeConfig(bus));
+
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::DEVICE_ID_MISMATCH),
+                            static_cast<uint8_t>(st.code));
+    TEST_ASSERT_EQUAL_INT32(static_cast<int32_t>(badId), st.detail);
+    TEST_ASSERT_EQUAL_UINT32(1U, bus.readCalls);
+    TEST_ASSERT_EQUAL_UINT32(0U, bus.writeCalls);
+    TEST_ASSERT_FALSE(dev.isInitialized());
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::UNINIT),
+                            static_cast<uint8_t>(dev.state()));
+    TEST_ASSERT_EQUAL_UINT32(0U, dev.totalSuccess());
+    TEST_ASSERT_EQUAL_UINT32(0U, dev.totalFailures());
+  }
+}
+
+void test_recover_rejects_matching_didh_with_nonzero_high_id_bits() {
+  const uint16_t badIds[] = {
+      static_cast<uint16_t>(cmd::DIDH_EXPECTED | 0x1000U),
+      static_cast<uint16_t>(cmd::DIDH_EXPECTED | 0x4000U),
+  };
+
+  for (uint16_t badId : badIds) {
+    FakeBus bus;
+    OPT4001::OPT4001 dev;
+    TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+    bus.nowMs = 2468U;
+    bus.registers[cmd::REG_DEVICE_ID] = badId;
+    Status st = dev.recover();
+
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::DEVICE_ID_MISMATCH),
+                            static_cast<uint8_t>(st.code));
+    TEST_ASSERT_EQUAL_INT32(static_cast<int32_t>(badId), st.detail);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::DEGRADED),
+                            static_cast<uint8_t>(dev.state()));
+    TEST_ASSERT_EQUAL_UINT32(1U, dev.totalFailures());
+    TEST_ASSERT_EQUAL_UINT8(1U, dev.consecutiveFailures());
+    TEST_ASSERT_EQUAL_UINT32(2468U, dev.lastErrorMs());
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::DEVICE_ID_MISMATCH),
+                            static_cast<uint8_t>(dev.lastError().code));
+    TEST_ASSERT_EQUAL_INT32(static_cast<int32_t>(badId), dev.lastError().detail);
+  }
+}
+
+void test_probe_preserves_transport_errors_and_detail() {
+  struct ProbeMapCase {
+    Err transportErr;
+    int32_t detail;
+  };
+
+  const ProbeMapCase cases[] = {
+      {Err::I2C_NACK_ADDR, -101},
+      {Err::I2C_NACK_DATA, -102},
+      {Err::I2C_TIMEOUT, -103},
+      {Err::I2C_BUS, -104},
+      {Err::I2C_ERROR, -105},
+  };
+
+  for (const ProbeMapCase& c : cases) {
+    FakeBus bus;
+    OPT4001::OPT4001 dev;
+    dev._config = makeConfig(bus);
+    bus.readStatus = Status::Error(c.transportErr, "transport error", c.detail);
+
+    Status st = dev.probe();
+
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(c.transportErr),
+                            static_cast<uint8_t>(st.code));
+    TEST_ASSERT_EQUAL_INT32(c.detail, st.detail);
+    TEST_ASSERT_EQUAL_STRING("transport error", st.msg);
+    TEST_ASSERT_EQUAL_UINT32(1U, bus.readCalls);
+    TEST_ASSERT_EQUAL_UINT32(0U, bus.writeCalls);
+    TEST_ASSERT_EQUAL_UINT32(0U, dev.totalSuccess());
+    TEST_ASSERT_EQUAL_UINT32(0U, dev.totalFailures());
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::UNINIT),
+                            static_cast<uint8_t>(dev.state()));
+  }
+}
+
+void test_probe_success_and_failure_do_not_update_health_or_state() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.offlineThreshold = 2;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  bus.nowMs = 3000U;
+  bus.readStatus = Status::Error(Err::I2C_TIMEOUT, "tracked timeout", -201);
+  Flags flags;
+  Status st = dev.readFlags(flags);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_TIMEOUT),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::DEGRADED),
+                          static_cast<uint8_t>(dev.state()));
+  const uint32_t degradedSuccess = dev.totalSuccess();
+  const uint32_t degradedFailures = dev.totalFailures();
+  const uint8_t degradedConsecutive = dev.consecutiveFailures();
+  const uint32_t degradedLastOk = dev.lastOkMs();
+  const uint32_t degradedLastError = dev.lastErrorMs();
+
+  bus.readStatus = Status::Ok();
+  st = dev.probe();
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::DEGRADED),
+                          static_cast<uint8_t>(dev.state()));
+  TEST_ASSERT_EQUAL_UINT32(degradedSuccess, dev.totalSuccess());
+  TEST_ASSERT_EQUAL_UINT32(degradedFailures, dev.totalFailures());
+  TEST_ASSERT_EQUAL_UINT8(degradedConsecutive, dev.consecutiveFailures());
+  TEST_ASSERT_EQUAL_UINT32(degradedLastOk, dev.lastOkMs());
+  TEST_ASSERT_EQUAL_UINT32(degradedLastError, dev.lastErrorMs());
+
+  bus.readStatus = Status::Error(Err::I2C_BUS, "raw bus error", -202);
+  st = dev.probe();
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_BUS),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_INT32(-202, st.detail);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::DEGRADED),
+                          static_cast<uint8_t>(dev.state()));
+  TEST_ASSERT_EQUAL_UINT32(degradedSuccess, dev.totalSuccess());
+  TEST_ASSERT_EQUAL_UINT32(degradedFailures, dev.totalFailures());
+  TEST_ASSERT_EQUAL_UINT8(degradedConsecutive, dev.consecutiveFailures());
+
+  bus.readStatus = Status::Error(Err::I2C_TIMEOUT, "tracked timeout", -203);
+  st = dev.readFlags(flags);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_TIMEOUT),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::OFFLINE),
+                          static_cast<uint8_t>(dev.state()));
+  const uint32_t offlineSuccess = dev.totalSuccess();
+  const uint32_t offlineFailures = dev.totalFailures();
+  const uint8_t offlineConsecutive = dev.consecutiveFailures();
+
+  bus.readStatus = Status::Ok();
+  st = dev.probe();
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::OFFLINE),
+                          static_cast<uint8_t>(dev.state()));
+  TEST_ASSERT_EQUAL_UINT32(offlineSuccess, dev.totalSuccess());
+  TEST_ASSERT_EQUAL_UINT32(offlineFailures, dev.totalFailures());
+  TEST_ASSERT_EQUAL_UINT8(offlineConsecutive, dev.consecutiveFailures());
+}
+
 void test_probe_failure_does_not_update_health() {
   FakeBus bus;
   OPT4001::OPT4001 dev;
@@ -419,10 +619,11 @@ void test_probe_failure_does_not_update_health() {
   const uint32_t beforeSuccess = dev.totalSuccess();
   const uint32_t beforeFailures = dev.totalFailures();
 
-  bus.readStatus = Status::Error(Err::TIMEOUT, "forced timeout", -7);
+  bus.readStatus = Status::Error(Err::I2C_TIMEOUT, "forced timeout", -7);
   Status st = dev.probe();
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::DEVICE_NOT_FOUND),
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_TIMEOUT),
                           static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_INT32(-7, st.detail);
   TEST_ASSERT_EQUAL_UINT32(beforeSuccess, dev.totalSuccess());
   TEST_ASSERT_EQUAL_UINT32(beforeFailures, dev.totalFailures());
 }
@@ -840,8 +1041,23 @@ void test_decoded_register_helpers() {
   TEST_ASSERT_TRUE(dev.readDeviceId(did).ok());
   TEST_ASSERT_EQUAL_HEX16(cmd::DEVICE_ID_RESET, did.raw);
   TEST_ASSERT_EQUAL_HEX16(cmd::DIDH_EXPECTED, did.didh);
-  TEST_ASSERT_EQUAL_UINT8(0u, did.didl);
+  TEST_ASSERT_EQUAL_UINT8(cmd::DIDL_EXPECTED, did.didl);
+  TEST_ASSERT_TRUE(did.reservedBitsClear);
   TEST_ASSERT_TRUE(did.matchesExpected);
+
+  DeviceIdInfo badDidl;
+  dev.decodeDeviceId(static_cast<uint16_t>(cmd::DIDH_EXPECTED | 0x1000U), badDidl);
+  TEST_ASSERT_EQUAL_HEX16(cmd::DIDH_EXPECTED, badDidl.didh);
+  TEST_ASSERT_EQUAL_UINT8(1u, badDidl.didl);
+  TEST_ASSERT_TRUE(badDidl.reservedBitsClear);
+  TEST_ASSERT_FALSE(badDidl.matchesExpected);
+
+  DeviceIdInfo badReserved;
+  dev.decodeDeviceId(static_cast<uint16_t>(cmd::DIDH_EXPECTED | 0x4000U), badReserved);
+  TEST_ASSERT_EQUAL_HEX16(cmd::DIDH_EXPECTED, badReserved.didh);
+  TEST_ASSERT_EQUAL_UINT8(cmd::DIDL_EXPECTED, badReserved.didl);
+  TEST_ASSERT_FALSE(badReserved.reservedBitsClear);
+  TEST_ASSERT_FALSE(badReserved.matchesExpected);
 
   ConfigurationInfo cfgInfo;
   TEST_ASSERT_TRUE(dev.readConfiguration(cfgInfo).ok());
@@ -1213,7 +1429,7 @@ void test_raw_register_access_after_failed_begin_is_guarded_without_bus_io() {
 
   bus.readStatus = Status::Error(Err::I2C_TIMEOUT, "forced probe timeout", -40);
   Status st = dev.begin(makeConfig(bus));
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::DEVICE_NOT_FOUND),
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_TIMEOUT),
                           static_cast<uint8_t>(st.code));
   TEST_ASSERT_FALSE(dev.isInitialized());
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::UNINIT),
@@ -1420,6 +1636,12 @@ int main() {
   RUN_TEST(test_begin_normalizes_offline_threshold_on_stored_copy);
   RUN_TEST(test_begin_success_sets_ready_without_health_counts);
   RUN_TEST(test_update_health_ignores_in_progress);
+  RUN_TEST(test_probe_accepts_valid_full_device_id);
+  RUN_TEST(test_probe_rejects_matching_didh_with_nonzero_high_id_bits);
+  RUN_TEST(test_begin_rejects_matching_didh_with_nonzero_high_id_bits);
+  RUN_TEST(test_recover_rejects_matching_didh_with_nonzero_high_id_bits);
+  RUN_TEST(test_probe_preserves_transport_errors_and_detail);
+  RUN_TEST(test_probe_success_and_failure_do_not_update_health_or_state);
   RUN_TEST(test_probe_failure_does_not_update_health);
   RUN_TEST(test_probe_id_mismatch_does_not_update_health);
   RUN_TEST(test_recover_failure_updates_health);
