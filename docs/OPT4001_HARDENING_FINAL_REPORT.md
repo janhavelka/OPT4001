@@ -8,7 +8,7 @@
 
 `hardening/opt4001-industry-readiness`
 
-## 3. Commit Range
+## 3. Commit Range And Closure Metadata
 
 Baseline: `4e76a03 feat: implement comprehensive prompts for OPT4001 industry readiness hardening`
 
@@ -26,7 +26,23 @@ Hardening commits before this final report:
 - `e0601ca fix: harden OPT4001 FIFO and partial config state`
 - `0c02162 docs: align OPT4001 readiness claims and IDF integration`
 
-This report is added by the final Prompt 9 commit.
+Prompt 9 final commit:
+`9950781e13ed72714dc9a8424fe1eadd02afcdcc docs: finalize OPT4001 industry hardening`.
+
+Prompt 9 push/sync result: pushed to
+`origin/hardening/opt4001-industry-readiness`; the push advanced the remote
+branch from `0c02162` to `9950781`. Follow-up closure sync check before this
+edit reported upstream `origin/hardening/opt4001-industry-readiness` and
+`git rev-list --left-right --count '@{u}...HEAD'` returned `0 0`.
+
+This follow-up closure pass updates the report on top of the Prompt 9 commit.
+The closure commit hash is reported in the final response after the commit is
+created; a Git commit cannot contain its own final hash without a second
+metadata-only commit.
+
+CI workflow URL for branch filtering:
+`https://github.com/janhavelka/OPT4001/actions?query=branch%3Ahardening%2Fopt4001-industry-readiness`.
+No branch workflow run ID was available during this closure pass.
 
 ## 4. Source Exploration Report
 
@@ -42,16 +58,17 @@ coverage, and public API contracts were hardened and validated with native fake
 transport tests plus PlatformIO ESP32-S2/S3 builds.
 
 No real OPT4001 hardware, optical reference setup, INT capture, FIFO timing
-capture, address-pin matrix, or fault-injection evidence was available in this
-Prompt 9 environment. The final verdict is therefore `READY TO MERGE` for the
-source-level hardening branch after CI passes, but not ready for a full
+capture, address-pin matrix, fault-injection evidence, completed branch CI run,
+or local pure ESP-IDF build evidence was available in this environment. The
+final verdict is therefore conditional: the source-level hardening branch is
+ready to merge if local checks and branch CI pass, but it is not ready for a full
 field-proven or industry-grade release claim.
 
 ## 6. Finding Closure Table
 
 | Finding / gap | Status | Evidence |
 | --- | --- | --- |
-| H1 Version/build reproducibility | Closed for source/build paths | `Version.h` is tracked and checked against `library.json`; manual/CMake/ESP-IDF public header include works from clean checkout. |
+| H1 Version/build reproducibility | Closed for source/header contract | `Version.h` is tracked and checked against `library.json`; `tools/check_version_header_contract.py` verifies the public header can resolve `OPT4001/Version.h` without PlatformIO-only generation. Completed pure ESP-IDF target build evidence remains separate and pending. |
 | H2 lifecycle raw register APIs | Closed | Public raw-register APIs are guarded while `UNINIT`/`OFFLINE`; object copy/move is deleted; native tests cover no-bus-touch paths. |
 | H3 freshness/readiness | Closed for source behavior | Fresh reads require flag, INT, or counter evidence; latest-vs-fresh is documented; native tests cover stale and wrap cases. |
 | H4 probe/device-ID/status | Closed | Full `DEVICE_ID` pattern validation and preserved transport status detail are implemented and tested. |
@@ -59,7 +76,7 @@ field-proven or industry-grade release claim.
 | Numeric/vector gaps | Closed | Raw lux, threshold, range, conversion-time, and CRC paths have independent native vectors and invalid-input policy. |
 | FIFO CRC gaps | Closed for source behavior | `readBurst()` decodes all four slots after transfer success and returns aggregate `CRC_ERROR` while preserving per-slot CRC fields. |
 | Partial-state dirty gaps | Closed for source behavior | Dirty hardware/cache state is exposed in accessors and snapshot, persists across reads, and clears after successful reapply/recover. |
-| ESP-IDF CI/example gaps | Closed for configured CI/static contract | Native IDF diagnostic CLI has nonblocking console polling, narrow include scope, and static contract checks; CI is configured for pure IDF builds. |
+| ESP-IDF CI/example gaps | Closed for configured CI/static contract; open for completed run evidence | Native IDF diagnostic CLI has nonblocking console polling, narrow include scope, and static contract checks; CI is configured for pure IDF builds, but no completed branch CI or local `idf.py` build log was captured. |
 | Public API contracts | Closed | Public headers document lifecycle, health, freshness, FIFO CRC, dirty state, blocking bounds, FLAGS/INT, transport, and numeric contracts. |
 | Metadata | Closed | `library.json`, `idf_component.yml`, `SECURITY.md`, README, and changelog align with `1.0.0` and current evidence. |
 | Hardware validation | Open validation work | Procedure and optional HIL runner exist; no hardware, optical, INT, FIFO timing/order, address-pin, or fault logs are captured. |
@@ -121,8 +138,21 @@ Final native run: `96 test cases: 96 succeeded`.
   `espressif/esp-idf-ci-action@v1`.
 - `.gitignore` now ignores PlatformIO package tarballs and `hil_logs/`.
 
-Configured CI IDF builds are not the same as locally captured pure-IDF evidence;
-completed workflow logs still need review.
+Configured CI IDF builds are not the same as completed CI evidence or locally
+captured pure-IDF evidence. During the follow-up closure pass, `gh` was not
+available on PATH. Public GitHub API checks returned no branch workflow runs,
+no check runs for `9950781e13ed72714dc9a8424fe1eadd02afcdcc`, and no PR for
+`janhavelka:hardening/opt4001-industry-readiness`.
+
+Validation categories are therefore:
+
+| Category | Closure status |
+| --- | --- |
+| Local PlatformIO validation | Completed and passing for native tests, ESP32-S3 Arduino build, ESP32-S2 Arduino build, and package pack. |
+| Configured CI validation | Present in `.github/workflows/ci.yml`, including guard scripts, PlatformIO matrix, package pack, and pure ESP-IDF matrix. |
+| Completed CI validation | Missing for this branch/commit; no branch workflow run or check-run evidence was found. |
+| Local pure ESP-IDF validation | Missing; `idf.py` is not installed or not on PATH in this shell. |
+| Hardware validation | Missing; no real OPT4001 fixture, optical setup, INT capture, FIFO timing/order capture, address-pin matrix, or fault-path session was run. |
 
 ## 11. Docs / Examples Changed
 
@@ -167,6 +197,35 @@ completed workflow logs still need review.
 PlatformIO printed the known obsolete-core warning for local Core `v6.1.18`
 while previous Core `v6.1.19` is also present.
 
+Follow-up closure rerun on 2026-06-02:
+
+| Command | Result |
+| --- | --- |
+| `git status --short` | Clean before closure edits. |
+| `git branch --show-current` | `hardening/opt4001-industry-readiness`. |
+| `git log --oneline -12` | Headed by `9950781 docs: finalize OPT4001 industry hardening`. |
+| `gh --version` | Failed locally: `gh` is not recognized as a command on PATH. |
+| GitHub Actions API branch run query | `total_count: 0` for `branch=hardening/opt4001-industry-readiness`. |
+| GitHub check-runs API for `9950781e13ed72714dc9a8424fe1eadd02afcdcc` | `total_count: 0`. |
+| GitHub PR API for `janhavelka:hardening/opt4001-industry-readiness` | `Count: 0`. |
+| `python tools/check_core_timing_guard.py` | `Core framework guard PASSED`. |
+| `python tools/check_cli_contract.py` | `CLI contract PASSED`. |
+| `python tools/check_idf_example_contract.py` | `IDF example contract PASSED`. |
+| `python tools/check_version_header_contract.py` | `Version header contract PASSED`; `Version.h` up to date. |
+| `python tools/check_readiness_claims.py` | `Readiness claims check PASSED`. |
+| `python tools/check_public_api_docs.py` | `Public API docs check PASSED`. |
+| `python scripts/generate_version.py check` | `Version.h` up to date. |
+| `python -m py_compile tools/hil_opt4001_runner.py` | Passed with no output. |
+| `python -m platformio test -e native` | Passed; `96 test cases: 96 succeeded in 00:00:00.900`. |
+| `python -m platformio run -e esp32s3dev` | Passed; `esp32s3dev SUCCESS` in `00:00:04.821`; RAM `6.9%`, flash `33.2%`. |
+| `python -m platformio run -e esp32s2dev` | Passed; `esp32s2dev SUCCESS` in `00:00:04.389`; RAM `11.3%`, flash `32.7%`. |
+| `python -m platformio pkg pack` | Passed; wrote `OPT4001-1.0.0.tar.gz`; artifact removed. |
+| `idf.py --version` | Failed locally: `idf.py` is not recognized as a command on PATH. |
+| `idf.py -C examples/esp_idf/basic set-target esp32s3 build` | Failed locally for the same missing-`idf.py` PATH reason. |
+| `idf.py -C examples/esp_idf/basic set-target esp32s2 build` | Failed locally for the same missing-`idf.py` PATH reason. |
+| Tracked artifact scan | No tracked `.pio/`, package tarballs, `build/`, `managed_components/`, `hil_logs/`, Python cache, ELF, BIN, or MAP outputs matched. |
+| `git status --short` after closure edits/checks before staging | ` M .gitignore`; ` M CHANGELOG.md`; ` M README.md`; ` M docs/OPT4001_HARDENING_FINAL_REPORT.md`. |
+
 ## 13. Commands Not Run And Why
 
 - No hardware smoke validation was run because no OPT4001 hardware fixture,
@@ -198,30 +257,36 @@ No files under `hil_logs/` were generated or committed.
 - Capture FIFO physical timing/order and CRC behavior on real conversions.
 - Capture NACK, timeout, unplug/replug, brownout, stuck-bus, OFFLINE latch, and
   manual recovery evidence.
-- Capture completed pure ESP-IDF build logs for ESP32-S2 and ESP32-S3.
+- Capture completed branch CI logs, including pure ESP-IDF build logs for
+  ESP32-S2 and ESP32-S3.
 
 ## 16. Known Risks
 
 - Hardware behavior may expose board-level timing, wiring, pullup, or optical
   issues not visible in fake-transport tests.
-- CI pure-IDF builds are configured but not locally proven in this shell.
+- CI pure-IDF builds are configured but not proven by a completed branch
+  workflow run or by local `idf.py` in this shell.
 - General-call reset is bus-wide and requires fixture/operator confirmation.
 - INT validation requires real SOT-5X3 wiring and external capture equipment.
 - Optical compensation remains application-specific.
 
 ## 17. Merge Verdict
 
-`READY TO MERGE` for the source-level hardening branch, assuming repository CI
-passes.
+Merge readiness: source-level hardening branch is ready to merge if local checks
+and branch CI pass. Local checks passed in this closure pass. Branch CI has not
+been proven because no branch workflow run, check run, or PR was found.
 
-Not `READY TO RELEASE` as a field-proven or industry-grade release. The remaining
-gaps are validation-only, but they are material for release claims involving real
-hardware, optics, interrupts, faults, FIFO timing, address wiring, and pure IDF
-target evidence.
+Release readiness: release as production-oriented / industry-readiness hardened
+only after wording avoids field-proven claims. Full industry-grade/field-proven
+claim remains blocked by hardware, optical, INT, FIFO timing/order, fault-path,
+address-pin, and pure ESP-IDF evidence.
 
-No P0 code/build correctness blocker remains in the locally available checks.
+No P0 source-level code/build correctness blocker remains in the locally
+available checks. The current blocker is evidence: completed branch CI, local or
+CI pure ESP-IDF logs, and hardware/HIL validation logs.
 
 ## 18. Required Statement
 
-Do not claim full field-proven industry-grade readiness until
-hardware/optical/INT/fault validation is completed.
+Do not claim full field-proven industry-grade readiness until hardware, optical,
+INT, FIFO timing/order, fault-path, address-pin, and pure ESP-IDF validation
+evidence is completed and logged.

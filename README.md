@@ -1,6 +1,6 @@
 # OPT4001 Driver Library
 
-Production-oriented, industry-readiness-hardened OPT4001 ambient light sensor
+Production-oriented, source-level hardened OPT4001 ambient light sensor
 driver with a framework-neutral core. Current evidence covers native
 fake-transport tests and Arduino/PlatformIO ESP32-S2/S3 builds. A native ESP-IDF
 component and diagnostic example are present, and CI is configured to build the

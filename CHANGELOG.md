@@ -39,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   captured board evidence.
 - Optional bounded serial HIL runner for smoke, conversion-time, stress, FIFO,
   and opt-in INT/fault diagnostic CLI groups.
+- Hardening closure evidence notes that separate merge readiness from release
+  readiness and avoid field-proven validation claims.
 
 ### Changed
 
@@ -99,6 +101,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so driver `tick()` is not intentionally tied to blocking console input.
 - The ESP-IDF example main component no longer exposes the repository root in
   its include directories.
+- Merge readiness wording now states that the source-level hardening branch is
+  ready to merge only if local checks and branch CI pass. Release readiness is
+  limited to production-oriented / industry-readiness hardened wording; full
+  field-proven claims remain blocked by hardware, optical, INT, FIFO
+  timing/order, fault-path, address-pin, and pure ESP-IDF evidence.
 
 ## [1.0.0] - 2026-04-14
 

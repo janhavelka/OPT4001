@@ -10,6 +10,9 @@
 *.bin
 *.map
 OPT4001-*.tar.gz
+package.tgz
+build/
+managed_components/
 
 # Python (for scripts/)
 __pycache__/
