@@ -200,3 +200,21 @@ Release steps:
 - Enum values: `CAPS_CASE` for register-style enums, otherwise preserve existing public API style
 - Locals/params: `camelCase`
 - Config fields: `camelCase`
+
+---
+
+## OPT4001 repository rules for coding agents
+
+- Core code under `include/` and `src/` must remain framework-neutral: no Arduino, Wire, ESP-IDF, FreeRTOS, Serial, logging frameworks, global bus objects, hidden framework delays, pin ownership, task ownership, or heap-heavy framework types.
+- I2C is injected and non-owning. Bus ownership, locking, timeout policy, reset-line ownership, INT GPIO ownership, and application scheduling belong to examples/adapters or the application.
+- Public fallible APIs must return structured `Status`; do not silently ignore failed I2C writes or collapse diagnostics without documentation.
+- Public APIs are not ISR-safe unless explicitly proven. Driver instances are not internally thread-safe; external serialization is required.
+- Transport callbacks must not re-enter the same driver instance.
+- PicoStar/YMN and SOT-5X3/DTS package differences must remain explicit. PicoStar lacks ADDR and INT. SOT-5X3 has ADDR and INT.
+- Fresh sample semantics must be tied to hardware evidence: `CONVERSION_READY_FLAG`, INT when configured and available, or output counter changes.
+- Do not treat repeated current output-register reads as new fresh samples unless the sample counter/ready evidence says so.
+- Numeric helpers must validate exponent/mantissa/threshold ranges and must not perform undefined shifts.
+- Multi-register configuration paths must either avoid partial hardware/cache divergence or expose a dirty/resync-required state.
+- The current Arduino and ESP-IDF CLIs are diagnostic/bring-up examples unless they clearly demonstrate production bus management.
+- Do not claim hardware validation, optical validation, interrupt validation, address-pin validation, FIFO validation, or pure ESP-IDF validation without captured evidence.
+- After each hardening prompt: run checks, update a report, commit, push/sync if possible, and stop.
