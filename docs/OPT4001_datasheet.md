@@ -1,7 +1,7 @@
 # OPT4001 — High Speed, High Precision Digital Ambient Light Sensor — Implementation Manual
 
 > **Source:** Texas Instruments OPT4001 Datasheet (SBOS993A, Rev. December 2022)  
-> **Relevance:** Complete register-level, timing, electrical, and algorithmic reference for building a production-grade OPT4001 driver.
+> **Relevance:** Complete register-level, timing, electrical, and algorithmic reference for implementing and reviewing the OPT4001 driver.
 
 ---
 

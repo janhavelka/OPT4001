@@ -1,7 +1,11 @@
 # OPT4001 Driver Library
 
-Production-grade OPT4001 ambient light sensor driver for ESP32-S2 / ESP32-S3
-using the Arduino framework, PlatformIO, and native ESP-IDF component metadata.
+Production-oriented, industry-readiness-hardened OPT4001 ambient light sensor
+driver with a framework-neutral core. Current evidence covers native
+fake-transport tests and Arduino/PlatformIO ESP32-S2/S3 builds. A native ESP-IDF
+component and diagnostic example are present, and CI is configured to build the
+pure ESP-IDF example. Local pure ESP-IDF, hardware, optical, and interrupt
+validation remain pending unless captured separately.
 
 The library follows the same non-owning I2C transport and `Status`-returning API
 pattern used by the other device libraries in this workspace:
@@ -11,6 +15,49 @@ pattern used by the other device libraries in this workspace:
 - deterministic control flow with bounded polling in `tick()`
 - health tracking with `READY`, `DEGRADED`, and `OFFLINE` states
 - no heap allocation in steady-state driver operation
+
+## Current Readiness
+
+Classification: source-level hardened and diagnostic-build tested. The core is
+designed for production use, but this repository does not currently claim full
+hardware, optical, interrupt, FIFO-timing, or pure ESP-IDF target validation.
+
+### Validation Evidence
+
+| Area | Evidence currently captured |
+| --- | --- |
+| Core portability | `tools/check_core_timing_guard.py` enforces no Arduino/ESP-IDF framework APIs in `include/` or `src/`. |
+| Public contracts | `tools/check_public_api_docs.py` checks lifecycle, freshness, FIFO CRC, dirty-state, blocking, INT/FLAGS, and transport documentation tokens. |
+| Claims/metadata | `tools/check_readiness_claims.py` checks unsupported readiness claims, CI guard coverage, and supported-version metadata. |
+| Native behavior | `python -m platformio test -e native` runs fake-transport unit coverage. |
+| Arduino ESP32 builds | `python -m platformio run -e esp32s3dev` and `python -m platformio run -e esp32s2dev` build the Arduino diagnostic example. |
+| Packaging | `python -m platformio pkg pack` verifies PlatformIO package metadata. |
+| ESP-IDF static contract | `tools/check_idf_example_contract.py` verifies the native IDF example boundary and command coverage. |
+| Pure ESP-IDF builds | CI job configured with Espressif's ESP-IDF action; local attempts failed because `idf.py` was not available on `PATH`. Treat as pending until a completed CI/local build log is captured. |
+
+### Pending Validation Matrix
+
+| Area | Current status |
+| --- | --- |
+| Hardware bring-up on real OPT4001 | Pending Prompt 9 validation log. |
+| Optical accuracy / cover-glass correction | Pending application-specific validation. |
+| SOT-5X3 address-pin combinations | Pending hardware matrix. |
+| INT threshold, every-conversion, and FIFO-full pulses | Pending logic-analyzer or board-captured evidence. |
+| FIFO physical timing/order under real conversions | Pending hardware matrix. |
+| SMBus alert arbitration | Pending controller-level validation. |
+| Pure ESP-IDF `idf.py` builds | CI configured; local and captured workflow evidence pending. |
+
+Hardware validation procedure: `docs/OPT4001_HARDWARE_VALIDATION_PROCEDURE.md`.
+
+### Package, Address, And Electrical Matrix
+
+| Package variant | Valid addresses | Lux LSB | INT / ADDR pins |
+| --- | --- | --- | --- |
+| PicoStar | `0x45` only | `312.5e-6 lux/code` | No INT pin, no ADDR pin |
+| SOT-5X3 | `0x44`, `0x45`, `0x46` | `437.5e-6 lux/code` | ADDR pin plus optional open-drain INT |
+
+Power OPT4001 from the datasheet VDD range, 1.6 V to 3.6 V. Digital I/O pins
+are 5.5 V tolerant; that does not make the device a 5 V powered part.
 
 ## Features
 
@@ -69,9 +116,10 @@ The repository root is an ESP-IDF component. Add it through `EXTRA_COMPONENT_DIR
 or component manager metadata, then provide `Config::i2cWrite`,
 `Config::i2cWriteRead`, `Config::nowMs`, optional `Config::cooperativeYield`,
 and optional `Config::gpioRead` from your application-owned adapter. The
-`examples/esp_idf/basic` project runs the same interactive bring-up shell as
-the Arduino example while using ESP-IDF-native UART, GPIO, timer, and new I2C
-master-driver glue.
+`examples/esp_idf/basic` project is a diagnostic bring-up CLI with comparable
+command coverage to the Arduino example. It owns its example I2C bus, uses
+ESP-IDF-native GPIO, timer, VFS console, and new I2C master-driver glue, and
+does not demonstrate production shared-bus locking.
 
 ### Version Header
 
@@ -229,8 +277,8 @@ void loop() {
 - Each burst/history `Sample` carries its own received CRC nibble and
   `crcValid` flag. The returned `Status` is aggregate: `OK` means the decoded
   slots passed the selected CRC policy, while `CRC_ERROR` means at least one
-  decoded slot failed verification. When an aggregate error is returned, only
-  slots decoded before that error are guaranteed meaningful.
+  decoded slot failed verification. After a successful register transfer,
+  `readBurst()` decodes all four slots even when one or more slots fail CRC.
 - `readSampleSlot(0..3)` provides direct access to the newest sample plus the
   three FIFO shadow samples without forcing a full burst decode. Slot 0 consumes
   freshness like `readSample()`; slots 1-3 are direct history reads.
@@ -466,11 +514,13 @@ driver/bus state errors to `I2C_BUS` while preserving the raw `esp_err_t` in
   - measurement and interrupt convenience flows exposed directly in the shell via `measure`, `int ready`, `int fifo`, and `int th`
   - consolidated `diag` report and optional periodic `healthmon` output using the shared health diagnostic helper
 - `examples/esp_idf/basic/`
-  - native ESP-IDF project with `app_main()`, fixed-buffer CLI input, and
-    `driver/i2c_master.h` transport callbacks
+  - native ESP-IDF diagnostic project with `app_main()`, fixed-buffer
+    nonblocking CLI input, and `driver/i2c_master.h` transport callbacks
   - command coverage for scan, probe, recover, reset, status/config decode,
     thresholds, raw register access, stress, stress-mix, selftest, and live
     watch workflows
+  - owns its example I2C bus and intentionally does not show production
+    shared-bus locking
   - no Arduino compatibility facade; parity is enforced by
     `tools/check_idf_example_contract.py`
 - `examples/common/`
@@ -523,7 +573,8 @@ driver/bus state errors to `I2C_BUS` while preserving the raw `esp_err_t` in
 - `docs/AN_high_speed_resolution.md` - high-speed / resolution trade-offs
 - `docs/AN_picostar_package.md` - PicoStar-specific package differences
 - `docs/IDF_PORT.md` - ESP-IDF portability guidance
-- `docs/IDF_PORT_IMPLEMENTATION.md` - ESP-IDF implementation notes and validation status
+- `docs/IDF_PORT_IMPLEMENTATION.md` - ESP-IDF implementation notes and validation limitations
+- `docs/OPT4001_HARDWARE_VALIDATION_PROCEDURE.md` - procedure for Prompt 9 hardware evidence capture
 - `include/OPT4001/CommandTable.h` - public register constants and masks
 - `ASSUMPTIONS.md` - implementation choices made where the device notes needed interpretation
 
@@ -546,22 +597,34 @@ driver/bus state errors to `I2C_BUS` while preserving the raw `esp_err_t` in
 ## Validation
 
 ```bash
-pio test -e native
+python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
 python tools/check_idf_example_contract.py
-python tools/check_core_timing_guard.py
 python tools/check_version_header_contract.py
+python tools/check_readiness_claims.py
+python tools/check_public_api_docs.py
 python scripts/generate_version.py check
-pio run -e esp32s3dev
-pio run -e esp32s2dev
-# from examples/esp_idf/basic when ESP-IDF is installed:
-idf.py set-target esp32s3 build
-idf.py set-target esp32s2 build
+python -m platformio test -e native
+python -m platformio run -e esp32s3dev
+python -m platformio run -e esp32s2dev
+python -m platformio pkg pack
+```
+
+CI is expected to run the same guard/test/build/package command set above. It
+also configures a pure ESP-IDF matrix build for `esp32s3` and `esp32s2`; the
+static IDF contract check still does not replace reviewing the completed IDF
+workflow logs.
+
+Run real ESP-IDF builds when ESP-IDF is installed:
+
+```bash
+idf.py -C examples/esp_idf/basic set-target esp32s3 build
+idf.py -C examples/esp_idf/basic set-target esp32s2 build
 ```
 
 The static IDF contract check does not replace a real `idf.py` build. Local
-Prompt 2 validation attempted `idf.py --version`, but ESP-IDF was not available
-on `PATH`, so local pure ESP-IDF builds were not run in that pass.
+Prompt 8 validation attempted `idf.py --version`, but ESP-IDF was not available
+on `PATH`, so local pure ESP-IDF builds were not run.
 
 ## License
 

@@ -10,6 +10,8 @@ Native boundaries:
   `i2c_master_bus_add_device()`, `i2c_master_probe()`,
   `i2c_master_transmit()`, and `i2c_master_transmit_receive()`.
 - CLI input: fixed C buffer using `getchar()`.
+- CLI polling: stdin is configured with `O_NONBLOCK` so idle diagnostic input
+  does not intentionally stall the driver's periodic `tick()` call.
 - Timing/yield: `esp_timer_get_time()` and FreeRTOS task APIs through the
   example transport callbacks.
 - Forbidden in IDF examples: `Arduino.h`, `Wire.h`, `String`, `Serial`,
@@ -57,12 +59,13 @@ CMake/manual consumers get stable `"unknown"` fallback metadata unless their
 build system defines `OPT4001_BUILD_DATE`, `OPT4001_BUILD_TIME`,
 `OPT4001_BUILD_TIMESTAMP`, `OPT4001_GIT_COMMIT`, or `OPT4001_GIT_STATUS`.
 
-Run the static contract check after touching the IDF example:
+Run the static contract checks after touching the IDF example:
 
 ```sh
 python tools/check_idf_example_contract.py
 python tools/check_core_timing_guard.py
 python tools/check_version_header_contract.py
+python tools/check_readiness_claims.py
 ```
 
 Run real ESP-IDF builds when ESP-IDF is installed:
@@ -72,4 +75,6 @@ idf.py -C examples/esp_idf/basic set-target esp32s3 build
 idf.py -C examples/esp_idf/basic set-target esp32s2 build
 ```
 
-The static checks do not prove pure ESP-IDF builds by themselves.
+CI is configured to attempt those same target builds with Espressif's ESP-IDF CI
+action. The static checks do not prove pure ESP-IDF builds by themselves, and
+configured CI is not a replacement for reviewing completed workflow logs.

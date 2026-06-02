@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `examples/esp_idf/basic` application using `app_main`, fixed-buffer CLI
   input, and ESP-IDF `driver/i2c_master.h` transport glue.
 - IDF port implementation notes documenting the framework-neutral core boundary,
-  general-call reset caveat, and validation status.
+  general-call reset caveat, and validation limitations.
 - `tools/check_idf_example_contract.py` to enforce native ESP-IDF example
   boundaries and command coverage without Arduino compatibility facades.
 - `softReset()` and `resetAndReapply()` to align OPT4001 reset handling with the stronger sibling libraries while preserving the datasheet's general-call reset behavior.
@@ -32,8 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI coverage for the convenience-helper layer: `tryread`, `trylux`, `measure`,
   `threshold default`, `begin`, `intpin`, and interrupt preset commands.
 - Non-blocking CLI watch mode with `watch`, `watch force`, and `stop` for live
-  bench validation of continuous and repeated one-shot measurement flows.
+  diagnostic observation of continuous and repeated one-shot measurement flows.
 - Root `AGENTS.md` production guidelines for future driver work.
+- Readiness-claims and public-API documentation guard scripts for CI.
+- Hardware-validation procedure outline for future captured board evidence.
 
 ### Changed
 
@@ -87,12 +89,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rejected reserved raw-register addresses and register blocks before touching the bus.
 - Rejected NaN and infinite lux threshold inputs before converting to packed threshold registers.
 - Readiness-poll I2C errors are no longer flattened into `false`, not-ready, or timeout results by `tryRead*()` and blocking read helpers.
+- Readiness claims, package metadata, SECURITY supported versions, and IDF
+  example documentation now distinguish tested source/build coverage from
+  pending pure ESP-IDF and target-hardware validation.
+- The native ESP-IDF diagnostic CLI now configures stdin for nonblocking polling
+  so driver `tick()` is not intentionally tied to blocking console input.
+- The ESP-IDF example main component no longer exposes the repository root in
+  its include directories.
 
 ## [1.0.0] - 2026-04-14
 
 ### Added
 
-- Production-grade OPT4001 driver with injected I2C transport and tracked health state.
+- Production-oriented OPT4001 driver with injected I2C transport and tracked health state.
 - Support for PicoStar and SOT-5X3 package variants with address validation and package-specific lux scaling.
 - Power-down, continuous, one-shot, and one-shot forced auto-range measurement flows.
 - Decoded sample, burst FIFO readout, CRC verification, raw register helpers, and threshold / interrupt configuration.

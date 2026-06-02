@@ -25,10 +25,14 @@ OPT4001::Status mapEspErr(esp_err_t err, const char* context) {
                                   static_cast<int32_t>(err));
   }
   if (err == ESP_ERR_INVALID_ARG) {
+    // Adapter/API argument failures are validation errors, not bus-health
+    // failures caused by the OPT4001 device.
     return OPT4001::Status::Error(OPT4001::Err::INVALID_PARAM, "IDF I2C invalid argument",
                                   static_cast<int32_t>(err));
   }
   if (err == ESP_ERR_INVALID_STATE) {
+    // Invalid driver/bus state is treated as an I2C bus fault so initialized
+    // driver calls can move through the normal health model.
     return OPT4001::Status::Error(OPT4001::Err::I2C_BUS, "IDF I2C invalid state",
                                   static_cast<int32_t>(err));
   }

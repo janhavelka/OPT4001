@@ -1,7 +1,7 @@
 {
   "name": "OPT4001",
   "version": "1.0.0",
-  "description": "Production-grade OPT4001 ambient light sensor driver",
+  "description": "Production-oriented OPT4001 ambient light sensor driver with framework-neutral core",
   "keywords": [
     "opt4001",
     "ambient-light",

@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "OPT4001/OPT4001.h"
 #include "Opt4001IdfI2cTransport.h"
@@ -430,6 +432,22 @@ void configureI2c() {
   ESP_ERROR_CHECK(i2c_master_bus_add_device(i2c.bus, &generalCallConfig, &i2c.generalCallDev));
 }
 
+bool configureConsole() {
+  setvbuf(stdin, nullptr, _IONBF, 0);
+  setvbuf(stdout, nullptr, _IONBF, 0);
+
+  const int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+  if (flags < 0) {
+    puts("stdin flags unavailable; refusing to start blocking diagnostic CLI.");
+    return false;
+  }
+  if (fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK) < 0) {
+    puts("stdin nonblocking mode failed; refusing to start blocking diagnostic CLI.");
+    return false;
+  }
+  return true;
+}
+
 void cliLoop() {
   static char input[INPUT_MAX];
   size_t len = 0;
@@ -467,9 +485,9 @@ void cliLoop() {
 }  // namespace
 
 extern "C" void app_main(void) {
-  setvbuf(stdin, nullptr, _IONBF, 0);
-  setvbuf(stdout, nullptr, _IONBF, 0);
-
+  if (!configureConsole()) {
+    return;
+  }
   puts("=== OPT4001 native ESP-IDF bringup ===");
   configureI2c();
   scanI2c();

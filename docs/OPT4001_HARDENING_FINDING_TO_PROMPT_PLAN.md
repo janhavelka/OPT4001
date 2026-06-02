@@ -249,6 +249,54 @@ Remaining limitation:
   address-pin wiring, optical response, and pure ESP-IDF target builds remains
   assigned to Prompt 9.
 
+## Prompt 8 Status Update
+
+H5 documentation/metadata/CI status: complete for claim honesty, ESP-IDF
+diagnostic example behavior, CI configuration, metadata consistency, and public
+contract documentation.
+
+Evidence:
+
+- README, `library.json`, `idf_component.yml`, `CHANGELOG.md`, and datasheet
+  notes no longer use unsupported `production-grade` wording. Current wording is
+  production-oriented / industry-readiness-hardened and distinguishes tested
+  source/build coverage from pending hardware, optical, INT, FIFO, address-pin,
+  and local pure ESP-IDF validation.
+- README now includes a readiness classification, validation evidence table,
+  pending validation matrix, package/address/electrical matrix, build and CI
+  commands, latest/fresh semantics, FIFO CRC semantics, dirty config state, and
+  a hardware-validation procedure link.
+- `SECURITY.md` now supports `1.0.x` and removes stale `0.3.x` / NVS wording.
+- `ASSUMPTIONS.md` now matches the hardware-evidence freshness contract.
+- The native ESP-IDF example is documented and implemented as diagnostic
+  bring-up. It configures stdin with `O_NONBLOCK` and refuses to enter the CLI if
+  nonblocking setup fails, so `tick()` is not intentionally stalled by idle
+  console input.
+- ESP-IDF example include scope is narrowed to private local includes; the
+  example depends on the root `OPT4001` component for public headers instead of
+  exposing repository parent paths.
+- `tools/check_idf_example_contract.py` now enforces nonblocking CLI tokens,
+  private include scope, parent-include rejection, and status-mapping tokens.
+- `.github/workflows/ci.yml` now runs the Prompt 8 guard/test/build/package set
+  with `python -m platformio`, includes `scripts/generate_version.py check`,
+  runs `tools/check_readiness_claims.py` and `tools/check_public_api_docs.py`,
+  and configures a pure ESP-IDF build matrix using Espressif's CI action for
+  `esp32s3` and `esp32s2`.
+- Public headers document the Prompt 3-7 contracts more completely: lifecycle
+  failure/dirty state, `tick()` I2C polling and health side effects, probe and
+  recover outcomes, health tracking scope, burst CRC guarantees, lux CRC output
+  behavior, blocking helper bounds, FLAGS side effects, threshold partial-write
+  dirty state, INT ownership, invalid helper inputs, and modulo-16 sample
+  counters.
+
+Remaining limitation:
+
+- Local pure ESP-IDF validation remains unavailable in this shell because
+  `idf.py` is not on `PATH`. CI is configured to attempt pure IDF builds, but a
+  completed workflow log still needs to be reviewed before claiming captured
+  pure-IDF build evidence. Hardware/optical/INT/FIFO/address/fault validation
+  remains assigned to Prompt 9.
+
 ## Prompt 2 Scope
 
 Prompt 2 should fix H1 only: make `Version.h` or an equivalent version source reproducible for clean manual/native/CMake and ESP-IDF consumers. It should not address lifecycle, probe, sample readiness, numeric, FIFO, docs honesty, metadata, or hardware validation unless directly required by the reproducibility fix.

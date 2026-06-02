@@ -176,11 +176,18 @@ public:
 
   // === Lifecycle ===
   /// Initialize the driver, verify Device ID, and apply the supplied config.
-  /// On failure the driver remains `UNINIT`; normal public I2C APIs remain
-  /// guarded and return `NOT_INITIALIZED`.
+  /// Config application writes multiple registers. If a later write fails after
+  /// earlier writes reached hardware, `hardwareConfigDirty()` may be set even
+  /// though the driver remains `UNINIT`; use `recover()` or `resetAndReapply()`
+  /// after the bus is healthy. Normal public I2C APIs stay guarded and return
+  /// `NOT_INITIALIZED` until `begin()` succeeds.
   Status begin(const Config& config);
   /// Advance conversion timing/poll state. Elapsed time is only a poll gate;
-  /// readiness is reported only after hardware evidence is observed.
+  /// readiness is reported only after hardware evidence is observed. After the
+  /// timing gate, `tick()` may perform tracked I2C readiness polling, which can
+  /// update health and latch `OFFLINE`; poll errors are retained in health state
+  /// rather than returned because `tick()` is void. No I2C is attempted while
+  /// `UNINIT` or `OFFLINE`.
   void tick(uint32_t nowMs);
   /// Best-effort shutdown. Attempts a raw power-down write only when initialized
   /// and online, ignores that write status, then clears runtime state and moves
@@ -191,10 +198,11 @@ public:
   const Config& getConfig() const { return _config; }
 
   // === Diagnostics (probe uses raw transport, recover uses tracked transport) ===
-  /// Probe the configured transport/address using raw I2C without requiring
-  /// `begin()` and without updating health counters. Requires configured I2C
-  /// callbacks in the cached config. A successful probe means the DEVICE_ID
-  /// register pattern is exactly the expected OPT4001 value; it is not an
+  /// Probe the currently cached transport/address using raw I2C without
+  /// requiring a successful lifecycle and without updating health, runtime
+  /// state, or driver state. This can touch I2C even while `OFFLINE`. Requires
+  /// configured I2C callbacks in the cached config. A successful probe means the
+  /// DEVICE_ID register pattern is exactly the expected OPT4001 value; it is not
   /// optical or measurement-path validation. Transport statuses are returned
   /// without being collapsed to `DEVICE_NOT_FOUND`; a successful I2C read with
   /// an unexpected ID returns `DEVICE_ID_MISMATCH`.
@@ -203,6 +211,9 @@ public:
   /// Transport failures and Device ID mismatches update health counters. Use
   /// this after OFFLINE state or suspected dirty hardware/cache state from raw
   /// writes, partial multi-register application, brownout, or external reset.
+  /// Success re-applies cached configuration, clears dirty config state, and
+  /// returns to `READY`. Failure remains health-tracked; an originally `OFFLINE`
+  /// driver remains latched offline unless recovery fully succeeds.
   Status recover();
   /// Perform the documented general-call reset (address 0x00, data 0x06).
   /// This is bus-wide, can touch I2C while `OFFLINE`, and leaves the driver in
@@ -231,6 +242,11 @@ public:
   }
 
   // === Health Tracking ===
+  /// Health tracking counts only tracked transport outcomes after initialization.
+  /// Validation errors, precondition failures, and `probe()` do not count as
+  /// transport health failures. A tracked success resets consecutive failures
+  /// and moves `DEGRADED`/`OFFLINE` back to `READY`. Counters saturate at
+  /// `UINT32_MAX`; timestamps use `Config::nowMs` when available, otherwise 0.
   uint32_t lastOkMs() const { return _lastOkMs; }
   uint32_t lastErrorMs() const { return _lastErrorMs; }
   Status lastError() const { return _lastError; }
@@ -265,9 +281,10 @@ public:
   ///
   /// The returned status is aggregate. `OK` means all decoded slots satisfied
   /// the selected CRC policy. `CRC_ERROR` means at least one decoded slot failed
-  /// CRC verification; inspect each slot's `crcValid`/`crc` fields and treat
-  /// slots after the aggregate error as unspecified unless they were decoded by
-  /// the current implementation path.
+  /// CRC verification; inspect each slot's `crcValid`/`crc` fields. After a
+  /// successful register transfer, all four slots are decoded and populated.
+  /// When CRC verification is disabled, slot `crcValid` remains false and CRC
+  /// mismatches do not change the aggregate status.
   Status readBurst(BurstFrame& out);
   /// Read one slot from the 4-deep history window: 0 = newest RESULT, 1 = FIFO0,
   /// 2 = FIFO1, 3 = FIFO2. Slot 0 consumes freshness; slots 1-3 are direct FIFO
@@ -282,11 +299,20 @@ public:
   /// @param nowMs Current monotonic timestamp in milliseconds
   /// @return `nowMs - sampleTimestampMs()` when a sample exists, otherwise 0
   uint32_t sampleAgeMs(uint32_t nowMs) const;
+  /// Fresh lux read using `readSample()` semantics. On `CRC_ERROR`, the decoded
+  /// output is still written and freshness is consumed.
   Status readLux(float& lux);
+  /// Fresh milli-lux read using `readSample()` semantics. On `CRC_ERROR`, the
+  /// decoded output is still written and freshness is consumed.
   Status readMilliLux(uint32_t& milliLux);
+  /// Fresh micro-lux read using `readSample()` semantics. On `CRC_ERROR`, the
+  /// decoded output is still written and freshness is consumed.
   Status readMicroLux(uint64_t& microLux);
   /// Blocking read helpers require `Config::nowMs` and poll until a fresh sample,
-  /// timeout, transport error, or finite internal poll cap.
+  /// timeout, transport error, or finite internal poll cap. Each I2C transaction
+  /// is bounded by `Config::i2cTimeoutMs`; `Config::cooperativeYield`, when
+  /// configured, is called between polls. On `CRC_ERROR`, sample/lux output is
+  /// still populated.
   /// @pre `Config::nowMs` must be configured, monotonic, and non-blocking.
   Status readBlocking(Sample& out, uint32_t timeoutMs = 1000);
   Status readBlocking(Sample& out, Mode mode, uint32_t timeoutMs);
@@ -306,13 +332,18 @@ public:
   // === Flags / Status ===
   /// Read FLAGS register. Register 0x0C is clear-on-read; this clears the
   /// device's latched FLAGS view, including conversion-ready and threshold flags.
-  /// Raw reads of 0x0C or raw blocks spanning 0x0C have the same side effect.
+  /// The driver captures conversion-ready evidence before the hardware clear.
+  /// Raw reads of 0x0C or raw blocks spanning 0x0C have the same hardware side
+  /// effect.
   Status readFlags(Flags& out);
-  /// Raw FLAGS read with the same clear-on-read hardware side effect.
+  /// Raw FLAGS read with the same clear-on-read hardware side effect; this also
+  /// clears driver readiness evidence associated with the latched FLAGS view.
   Status readFlagsRaw(uint16_t& value);
-  /// Clear CONVERSION_READY_FLAG only by writing a non-zero value to 0x0C.
+  /// Clear CONVERSION_READY_FLAG only by writing a non-zero value to 0x0C; this
+  /// clears driver readiness evidence for the pending conversion.
   Status clearConversionReadyFlag();
-  /// Clear all sticky status indications using the documented clear-on-read behavior.
+  /// Clear all sticky status indications using the documented clear-on-read
+  /// behavior; this clears driver readiness evidence for the latched view.
   Status clearFlags();
   /// Read the configured INT GPIO hook and report assertion using INT_POL.
   /// @param[out] asserted True when the configured pin is active
@@ -360,7 +391,12 @@ public:
   Status setBurstMode(bool enable);
   bool getBurstMode() const { return _config.burstMode; }
 
+  /// Write raw threshold registers after field-range validation. This low-level
+  /// setter does not enforce `low <= high`; interrupt convenience helpers do.
+  /// If the low write succeeds and the high write fails, hardware dirty state is
+  /// marked because cache and hardware may diverge.
   Status setThresholds(const Threshold& low, const Threshold& high);
+  /// Read threshold registers from hardware and refresh the cached thresholds.
   Status getThresholds(Threshold& low, Threshold& high);
   Status getThresholdsLux(float& lowLux, float& highLux);
   Status setThresholdsLux(float lowLux, float highLux);
@@ -375,8 +411,11 @@ public:
   /// Convenience helper for common output-mode threshold interrupt use with lux values.
   Status enableThresholdInterruptLux(float lowLux, float highLux);
   /// Configure SOT_5X3 INT as an open-drain output pulse after every conversion.
+  /// The application owns pullup, GPIO/ISR setup, and hardware validation.
   Status enableConversionReadyInterrupt();
-  /// Configure SOT_5X3 INT as an open-drain output pulse when the 4-deep FIFO window is full.
+  /// Configure SOT_5X3 INT as an open-drain output pulse when the 4-deep FIFO
+  /// window is full. The application owns pullup, GPIO/ISR setup, and hardware
+  /// validation.
   Status enableFifoFullInterrupt();
 
   Status readConfiguration(uint16_t& value);
@@ -429,16 +468,21 @@ public:
   /// returns NaN for invalid thresholds.
   float thresholdToLux(const Threshold& threshold) const;
   float getLuxLsb() const;
+  /// Invalid ranges return NaN.
   float getRangeFullScaleLux(Range range) const;
   float getCurrentFullScaleLux() const;
   float getSampleFullScaleLux(const Sample& sample) const;
+  /// Invalid conversion times return 0.
   uint8_t getEffectiveBits(ConversionTime time) const;
   uint8_t getEffectiveBits() const;
+  /// Invalid range or conversion-time inputs return NaN.
   float getRangeResolutionLux(Range range, ConversionTime time) const;
   float getCurrentResolutionLux() const;
   float getSampleResolutionLux(const Sample& sample) const;
+  /// Invalid conversion-time inputs return 0.
   uint32_t getConversionTimeUs() const;
   uint32_t getConversionTimeMs() const;
+  /// Invalid one-shot mode inputs return 0.
   uint32_t getOneShotBudgetUs(Mode mode) const;
   uint32_t getOneShotBudgetMs(Mode mode) const;
   /// Pack a lux threshold using nearest-code rounding before register
@@ -449,6 +493,7 @@ public:
   Status thresholdToAdcCodes(const Threshold& threshold, uint64_t& adcCodes) const;
   /// Compatibility threshold decode. Saturates at UINT32_MAX instead of wrapping.
   uint32_t thresholdToAdcCodes(const Threshold& threshold) const;
+  /// Return modulo-16 forward delta between hardware sample counters.
   uint8_t sampleCounterDelta(uint8_t previousCounter, uint8_t currentCounter) const;
 
 private:
