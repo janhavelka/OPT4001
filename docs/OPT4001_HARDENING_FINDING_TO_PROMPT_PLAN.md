@@ -206,9 +206,48 @@ Evidence:
 
 Remaining limitation:
 
-- FIFO per-slot CRC/ordering visibility, INT behavior, and partial-state
-  consistency remain assigned to Prompt 7. Hardware and pure ESP-IDF target
-  validation remain assigned to Prompt 9.
+- Hardware and pure ESP-IDF target validation remain assigned to Prompt 9.
+
+## Prompt 7 Status Update
+
+FIFO/INT/partial-state status: complete for source-level FIFO CRC aggregation,
+documentation clarity, and partial hardware-config dirty tracking.
+
+Evidence:
+
+- `readBurst()` now decodes newest/current, FIFO0, FIFO1, and FIFO2 even when
+  one or more slots have CRC mismatches. The aggregate status is `CRC_ERROR`
+  when any decoded slot fails CRC, while all slot fields and per-slot
+  `Sample::crcValid` remain available.
+- FIFO slot ordering is documented as `newest` = current `RESULT`, `fifo0` =
+  previous conversion, `fifo1` = two conversions ago, and `fifo2` = three
+  conversions ago.
+- `hardwareConfigDirty()`, `hardwareConfigDirtyError()`, and
+  `SettingsSnapshot::hardwareConfigDirty` expose possible hardware/cache
+  divergence after partial multi-register writes.
+- `_applyConfig()` marks dirty after failures in write positions 2-4, while a
+  first-write failure leaves dirty false when no hardware mutation occurred.
+- `setThresholds()` marks dirty when low threshold writes successfully and high
+  threshold fails.
+- `resetAndReapply()` marks dirty after a successful general-call reset if
+  configuration re-apply fails, including first re-apply write failure.
+- Successful full configuration re-apply through `_applyConfig()`, `recover()`,
+  or `resetAndReapply()` clears dirty state; ordinary reads do not.
+- Native tests cover all-valid burst order, CRC errors in newest/middle/last and
+  multiple FIFO slots, non-burst fallback CRC aggregation, dirty accessor and
+  snapshot visibility, all `_applyConfig()` failure positions, threshold pair
+  partial failure, unrelated-read persistence, recover success/failure, and
+  reset/reapply success/failure.
+- README, Doxygen, and extracted notes document FIFO CRC semantics, FLAGS
+  clear-on-read/write side effects, SOT-5X3-only open-drain INT ownership,
+  INT modes, threshold/INT hardware-validation caveats, and dirty-state
+  recovery guidance.
+
+Remaining limitation:
+
+- Hardware validation for FIFO timing/order, INT pulses/threshold behavior,
+  address-pin wiring, optical response, and pure ESP-IDF target builds remains
+  assigned to Prompt 9.
 
 ## Prompt 2 Scope
 

@@ -269,6 +269,103 @@ void seedSample(FakeBus& bus, uint8_t msbReg, uint8_t exponent,
       sampleLsbCrcReg(mantissa, counter, crc);
 }
 
+uint16_t packThresholdForTest(const Threshold& threshold) {
+  return static_cast<uint16_t>(
+      ((static_cast<uint16_t>(threshold.exponent) << cmd::BIT_THRESHOLD_EXPONENT) &
+       cmd::MASK_THRESHOLD_EXPONENT) |
+      (threshold.result & cmd::MASK_THRESHOLD_RESULT));
+}
+
+void assertStatusSame(const Status& expected, const Status& actual) {
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(expected.code),
+                          static_cast<uint8_t>(actual.code));
+  TEST_ASSERT_EQUAL_INT32(expected.detail, actual.detail);
+  TEST_ASSERT_EQUAL_STRING(expected.msg, actual.msg);
+}
+
+void assertHardwareConfigDirty(OPT4001::OPT4001& dev, bool expected) {
+  TEST_ASSERT_EQUAL(expected, dev.hardwareConfigDirty());
+
+  SettingsSnapshot snap;
+  TEST_ASSERT_TRUE(dev.getSettings(snap).ok());
+  TEST_ASSERT_EQUAL(expected, snap.hardwareConfigDirty);
+}
+
+void assertHardwareConfigDirtyError(OPT4001::OPT4001& dev,
+                                    const Status& expected) {
+  assertStatusSame(expected, dev.hardwareConfigDirtyError());
+}
+
+void assertSampleFields(const OPT4001::OPT4001& dev, const Sample& sample,
+                        uint8_t exponent, uint32_t mantissa, uint8_t counter,
+                        bool crcGood) {
+  uint8_t expectedCrc = datasheetCrc(exponent, mantissa, counter);
+  if (!crcGood) {
+    expectedCrc ^= 0x1U;
+  }
+  const uint32_t adcCodes = mantissa << exponent;
+
+  TEST_ASSERT_EQUAL_UINT16(sampleResultReg(exponent, mantissa), sample.resultReg);
+  TEST_ASSERT_EQUAL_UINT16(sampleLsbCrcReg(mantissa, counter, expectedCrc),
+                           sample.resultLsbCrcReg);
+  TEST_ASSERT_EQUAL_UINT8(exponent, sample.exponent);
+  TEST_ASSERT_EQUAL_UINT32(mantissa, sample.mantissa);
+  TEST_ASSERT_EQUAL_UINT32(adcCodes, sample.adcCodes);
+  TEST_ASSERT_EQUAL_UINT8(counter, sample.counter);
+  TEST_ASSERT_EQUAL_UINT8(expectedCrc, sample.crc);
+  TEST_ASSERT_EQUAL(crcGood, sample.crcValid);
+  TEST_ASSERT_FLOAT_WITHIN(0.001f, dev.adcCodesToLux(adcCodes), sample.lux);
+}
+
+void assertBurstFrameFields(const OPT4001::OPT4001& dev, const BurstFrame& frame,
+                            bool newestCrcGood, bool fifo0CrcGood,
+                            bool fifo1CrcGood, bool fifo2CrcGood) {
+  assertSampleFields(dev, frame.newest, 0, 0x11111, 9, newestCrcGood);
+  assertSampleFields(dev, frame.fifo0, 1, 0x22222, 8, fifo0CrcGood);
+  assertSampleFields(dev, frame.fifo1, 2, 0x33333, 7, fifo1CrcGood);
+  assertSampleFields(dev, frame.fifo2, 3, 0x44444, 6, fifo2CrcGood);
+}
+
+Status readSeededBurst(bool newestCrcGood, bool fifo0CrcGood,
+                       bool fifo1CrcGood, bool fifo2CrcGood,
+                       BurstFrame& frame, OPT4001::OPT4001& dev) {
+  FakeBus* bus = static_cast<FakeBus*>(dev._config.i2cUser);
+  seedSample(*bus, cmd::REG_RESULT, 0, 0x11111, 9, newestCrcGood);
+  seedSample(*bus, cmd::REG_FIFO0_MSB, 1, 0x22222, 8, fifo0CrcGood);
+  seedSample(*bus, cmd::REG_FIFO1_MSB, 2, 0x33333, 7, fifo1CrcGood);
+  seedSample(*bus, cmd::REG_FIFO2_MSB, 3, 0x44444, 6, fifo2CrcGood);
+  bus->nowMs += 150;
+  dev.tick(bus->nowMs);
+  return dev.readBurst(frame);
+}
+
+Status makeThresholdPairDirty(OPT4001::OPT4001& dev, FakeBus& bus,
+                              const Threshold& low,
+                              const Threshold& high) {
+  bus.failWriteCall = bus.writeCalls + 2U;
+  return dev.setThresholds(low, high);
+}
+
+void assertApplyConfigFailureDirtyState(uint8_t relativeWrite,
+                                        bool expectedDirty) {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+  assertHardwareConfigDirty(dev, false);
+
+  const Threshold low{0, static_cast<uint16_t>(0x0010U + relativeWrite)};
+  const Threshold high{0, static_cast<uint16_t>(0x0080U + relativeWrite)};
+  bus.failWriteCall = bus.writeCalls + relativeWrite;
+  Status st = dev.enableThresholdInterrupt(low, high);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_ERROR),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_INT32(-22, st.detail);
+  assertHardwareConfigDirty(dev, expectedDirty);
+  if (expectedDirty) {
+    assertHardwareConfigDirtyError(dev, st);
+  }
+}
+
 void markConversionReady(FakeBus& bus) {
   bus.registers[cmd::REG_FLAGS] =
       static_cast<uint16_t>(bus.registers[cmd::REG_FLAGS] |
@@ -1174,6 +1271,90 @@ void test_read_burst_nonburst_path_decodes_fifo() {
   TEST_ASSERT_EQUAL_UINT32(0x44444u, frame.fifo2.mantissa);
 }
 
+void test_read_burst_all_four_slots_valid_populates_fields_and_counter_order() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  BurstFrame frame;
+  Status st = readSeededBurst(true, true, true, true, frame, dev);
+  TEST_ASSERT_TRUE(st.ok());
+  assertBurstFrameFields(dev, frame, true, true, true, true);
+}
+
+void test_read_burst_newest_crc_error_populates_all_slots() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  BurstFrame frame;
+  Status st = readSeededBurst(false, true, true, true, frame, dev);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::CRC_ERROR),
+                          static_cast<uint8_t>(st.code));
+  assertBurstFrameFields(dev, frame, false, true, true, true);
+}
+
+void test_read_burst_middle_fifo_crc_error_populates_all_slots() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  BurstFrame frame;
+  Status st = readSeededBurst(true, true, false, true, frame, dev);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::CRC_ERROR),
+                          static_cast<uint8_t>(st.code));
+  assertBurstFrameFields(dev, frame, true, true, false, true);
+}
+
+void test_read_burst_last_fifo_crc_error_populates_all_slots() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  BurstFrame frame;
+  Status st = readSeededBurst(true, true, true, false, frame, dev);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::CRC_ERROR),
+                          static_cast<uint8_t>(st.code));
+  assertBurstFrameFields(dev, frame, true, true, true, false);
+}
+
+void test_read_burst_multiple_crc_errors_populates_all_slots() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  BurstFrame frame;
+  Status st = readSeededBurst(false, true, false, false, frame, dev);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::CRC_ERROR),
+                          static_cast<uint8_t>(st.code));
+  assertBurstFrameFields(dev, frame, false, true, false, false);
+}
+
+void test_read_burst_nonburst_path_aggregates_crc_and_populates_all_slots() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  cfg.burstMode = false;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  BurstFrame frame;
+  Status st = readSeededBurst(true, false, true, false, frame, dev);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::CRC_ERROR),
+                          static_cast<uint8_t>(st.code));
+  assertBurstFrameFields(dev, frame, true, false, true, false);
+}
+
 void test_set_thresholds_lux_updates_threshold_registers() {
   FakeBus bus;
   OPT4001::OPT4001 dev;
@@ -1862,6 +2043,124 @@ void test_failed_recover_from_offline_reasserts_latch_after_apply_failure() {
   TEST_ASSERT_EQUAL_UINT32(writesAfterRecover, bus.writeCalls);
 }
 
+void test_apply_config_fail_positions_track_partial_hardware_dirty() {
+  assertApplyConfigFailureDirtyState(1, false);
+  assertApplyConfigFailureDirtyState(2, true);
+  assertApplyConfigFailureDirtyState(3, true);
+  assertApplyConfigFailureDirtyState(4, true);
+}
+
+void test_threshold_high_failure_marks_dirty_and_preserves_status() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+  assertHardwareConfigDirty(dev, false);
+
+  const Threshold low{0, 0x0010};
+  const Threshold high{0, 0x0020};
+  Status st = makeThresholdPairDirty(dev, bus, low, high);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_ERROR),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_INT32(-22, st.detail);
+  TEST_ASSERT_EQUAL_UINT16(packThresholdForTest(low), bus.registers[cmd::REG_THRESHOLD_L]);
+  TEST_ASSERT_EQUAL_UINT16(cmd::THRESHOLD_H_RESET, bus.registers[cmd::REG_THRESHOLD_H]);
+  assertHardwareConfigDirty(dev, true);
+  assertHardwareConfigDirtyError(dev, st);
+}
+
+void test_dirty_state_survives_unrelated_read_and_preserves_error() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  const Threshold low{0, 0x0030};
+  const Threshold high{0, 0x0040};
+  Status dirtySt = makeThresholdPairDirty(dev, bus, low, high);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_ERROR),
+                          static_cast<uint8_t>(dirtySt.code));
+  assertHardwareConfigDirty(dev, true);
+
+  uint16_t deviceId = 0;
+  TEST_ASSERT_TRUE(dev.readDeviceId(deviceId).ok());
+  TEST_ASSERT_EQUAL_UINT16(cmd::DEVICE_ID_RESET, deviceId);
+  assertHardwareConfigDirty(dev, true);
+  assertHardwareConfigDirtyError(dev, dirtySt);
+}
+
+void test_successful_recover_clears_hardware_config_dirty_state() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  const Threshold low{0, 0x0050};
+  const Threshold high{0, 0x0060};
+  Status dirtySt = makeThresholdPairDirty(dev, bus, low, high);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_ERROR),
+                          static_cast<uint8_t>(dirtySt.code));
+  assertHardwareConfigDirty(dev, true);
+
+  Status st = dev.recover();
+  TEST_ASSERT_TRUE(st.ok());
+  assertHardwareConfigDirty(dev, false);
+  TEST_ASSERT_TRUE(dev.hardwareConfigDirtyError().ok());
+}
+
+void test_failed_recover_leaves_hardware_config_dirty_state_set() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  const Threshold low{0, 0x0070};
+  const Threshold high{0, 0x0080};
+  Status dirtySt = makeThresholdPairDirty(dev, bus, low, high);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_ERROR),
+                          static_cast<uint8_t>(dirtySt.code));
+  assertHardwareConfigDirty(dev, true);
+
+  bus.failWriteCall = bus.writeCalls + 2U;
+  Status st = dev.recover();
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_ERROR),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_INT32(-22, st.detail);
+  assertHardwareConfigDirty(dev, true);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_ERROR),
+                          static_cast<uint8_t>(dev.hardwareConfigDirtyError().code));
+}
+
+void test_reset_and_reapply_failure_after_reset_marks_dirty() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+  assertHardwareConfigDirty(dev, false);
+
+  bus.failWriteCall = bus.writeCalls + 2U;
+  Status st = dev.resetAndReapply();
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_ERROR),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_FALSE(dev.isInitialized());
+  assertHardwareConfigDirty(dev, true);
+  assertHardwareConfigDirtyError(dev, st);
+}
+
+void test_successful_reset_and_reapply_clears_hardware_config_dirty_state() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  const Threshold low{0, 0x0090};
+  const Threshold high{0, 0x00A0};
+  Status dirtySt = makeThresholdPairDirty(dev, bus, low, high);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_ERROR),
+                          static_cast<uint8_t>(dirtySt.code));
+  assertHardwareConfigDirty(dev, true);
+
+  Status st = dev.resetAndReapply();
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_TRUE(dev.isInitialized());
+  assertHardwareConfigDirty(dev, false);
+  TEST_ASSERT_TRUE(dev.hardwareConfigDirtyError().ok());
+}
+
 void test_scale_and_counter_helpers() {
   FakeBus bus;
   OPT4001::OPT4001 dev;
@@ -2437,6 +2736,12 @@ int main() {
   RUN_TEST(test_lux_helpers_preserve_outputs_on_crc_warning);
   RUN_TEST(test_read_burst_decodes_fifo);
   RUN_TEST(test_read_burst_nonburst_path_decodes_fifo);
+  RUN_TEST(test_read_burst_all_four_slots_valid_populates_fields_and_counter_order);
+  RUN_TEST(test_read_burst_newest_crc_error_populates_all_slots);
+  RUN_TEST(test_read_burst_middle_fifo_crc_error_populates_all_slots);
+  RUN_TEST(test_read_burst_last_fifo_crc_error_populates_all_slots);
+  RUN_TEST(test_read_burst_multiple_crc_errors_populates_all_slots);
+  RUN_TEST(test_read_burst_nonburst_path_aggregates_crc_and_populates_all_slots);
   RUN_TEST(test_set_thresholds_lux_updates_threshold_registers);
   RUN_TEST(test_threshold_lux_helpers_roundtrip);
   RUN_TEST(test_threshold_adc_vectors_use_64_bit_and_legacy_saturates);
@@ -2466,6 +2771,13 @@ int main() {
   RUN_TEST(test_read_blocking_propagates_readiness_i2c_error);
   RUN_TEST(test_offline_blocks_normal_operation_without_bus_io);
   RUN_TEST(test_failed_recover_from_offline_reasserts_latch_after_apply_failure);
+  RUN_TEST(test_apply_config_fail_positions_track_partial_hardware_dirty);
+  RUN_TEST(test_threshold_high_failure_marks_dirty_and_preserves_status);
+  RUN_TEST(test_dirty_state_survives_unrelated_read_and_preserves_error);
+  RUN_TEST(test_successful_recover_clears_hardware_config_dirty_state);
+  RUN_TEST(test_failed_recover_leaves_hardware_config_dirty_state_set);
+  RUN_TEST(test_reset_and_reapply_failure_after_reset_marks_dirty);
+  RUN_TEST(test_successful_reset_and_reapply_clears_hardware_config_dirty_state);
   RUN_TEST(test_scale_and_counter_helpers);
   RUN_TEST(test_all_conversion_time_vectors_and_invalid_values);
   RUN_TEST(test_range_vectors_and_invalid_values);

@@ -128,6 +128,22 @@ Status offlineBusyStatus() {
   return Status::Error(Err::BUSY, "Driver is offline; call recover()");
 }
 
+bool mergeSampleDecodeStatus(Status& aggregate, const Status& slotStatus) {
+  if (slotStatus.ok()) {
+    return true;
+  }
+  if (slotStatus.code == Err::CRC_ERROR) {
+    if (aggregate.ok()) {
+      aggregate = slotStatus;
+    }
+    return true;
+  }
+  if (aggregate.ok() || aggregate.code == Err::CRC_ERROR) {
+    aggregate = slotStatus;
+  }
+  return false;
+}
+
 class ScopedOfflineI2cAllowance {
 public:
   explicit ScopedOfflineI2cAllowance(bool& flag, bool allow) : _flag(flag), _old(flag) {
@@ -157,6 +173,7 @@ Status OPT4001::begin(const Config& config) {
   _initialized = false;
   _driverState = DriverState::UNINIT;
   _allowOfflineI2c = false;
+  _clearHardwareConfigDirty();
   _clearRuntimeState();
 
   _lastOkMs = 0;
@@ -346,6 +363,7 @@ Status OPT4001::resetAndReapply() {
 
   st = _applyConfig();
   if (!st.ok()) {
+    _markHardwareConfigDirty(st);
     _initialized = false;
     _driverState = DriverState::UNINIT;
     return st;
@@ -409,6 +427,8 @@ Status OPT4001::getSettings(SettingsSnapshot& out) const {
   out.lastCounter = _lastCounter;
   out.lastAdcCodes = _lastAdcCodes;
   out.lastLux = _lastLux;
+  out.hardwareConfigDirty = _hardwareConfigDirty;
+  out.hardwareConfigDirtyError = _hardwareConfigDirtyError;
   return Status::Ok();
 }
 
@@ -542,15 +562,35 @@ Status OPT4001::readBurst(BurstFrame& out) {
       static_cast<uint16_t>((buffer[14] << 8) | buffer[15]),
     };
 
-    status = _decodeSampleRegisters(regs[0], regs[1], out.newest);
-    if (status.ok()) status = _decodeSampleRegisters(regs[2], regs[3], out.fifo0);
-    if (status.ok()) status = _decodeSampleRegisters(regs[4], regs[5], out.fifo1);
-    if (status.ok()) status = _decodeSampleRegisters(regs[6], regs[7], out.fifo2);
+    Status slotStatus = _decodeSampleRegisters(regs[0], regs[1], out.newest);
+    (void)mergeSampleDecodeStatus(status, slotStatus);
+    slotStatus = _decodeSampleRegisters(regs[2], regs[3], out.fifo0);
+    (void)mergeSampleDecodeStatus(status, slotStatus);
+    slotStatus = _decodeSampleRegisters(regs[4], regs[5], out.fifo1);
+    (void)mergeSampleDecodeStatus(status, slotStatus);
+    slotStatus = _decodeSampleRegisters(regs[6], regs[7], out.fifo2);
+    (void)mergeSampleDecodeStatus(status, slotStatus);
   } else {
-    status = _readSampleAt(cmd::REG_RESULT, out.newest);
-    if (status.ok()) status = _readSampleAt(cmd::REG_FIFO0_MSB, out.fifo0);
-    if (status.ok()) status = _readSampleAt(cmd::REG_FIFO1_MSB, out.fifo1);
-    if (status.ok()) status = _readSampleAt(cmd::REG_FIFO2_MSB, out.fifo2);
+    Status slotStatus = _readSampleAt(cmd::REG_RESULT, out.newest);
+    if (!mergeSampleDecodeStatus(status, slotStatus)) {
+      return status;
+    }
+    slotStatus = _readSampleAt(cmd::REG_FIFO0_MSB, out.fifo0);
+    if (!mergeSampleDecodeStatus(status, slotStatus)) {
+      return status;
+    }
+    slotStatus = _readSampleAt(cmd::REG_FIFO1_MSB, out.fifo1);
+    if (!mergeSampleDecodeStatus(status, slotStatus)) {
+      return status;
+    }
+    slotStatus = _readSampleAt(cmd::REG_FIFO2_MSB, out.fifo2);
+    if (!mergeSampleDecodeStatus(status, slotStatus)) {
+      return status;
+    }
+  }
+
+  if (!status.ok() && status.code != Err::CRC_ERROR) {
+    return status;
   }
 
   if (!_sampleCounterIsFresh(out.newest.counter)) {
@@ -1067,6 +1107,7 @@ Status OPT4001::setThresholds(const Threshold& low, const Threshold& high) {
   }
   st = _writeRegister16Tracked(cmd::REG_THRESHOLD_H, _packThreshold(high));
   if (!st.ok()) {
+    _markHardwareConfigDirty(st);
     _config = oldConfig;
   }
   return st;
@@ -2025,23 +2066,38 @@ void OPT4001::_reassertOfflineLatch() {
 // ============================================================================
 
 Status OPT4001::_applyConfig() {
+  uint8_t writesApplied = 0;
   Status st = _writeRegister16Tracked(cmd::REG_THRESHOLD_L, _packThreshold(_config.lowThreshold));
   if (!st.ok()) {
     return st;
   }
+  ++writesApplied;
   st = _writeRegister16Tracked(cmd::REG_THRESHOLD_H, _packThreshold(_config.highThreshold));
   if (!st.ok()) {
+    if (writesApplied > 0U) {
+      _markHardwareConfigDirty(st);
+    }
     return st;
   }
+  ++writesApplied;
   st = _writeRegister16Tracked(cmd::REG_INT_CONFIGURATION, _buildIntConfigurationRegister());
   if (!st.ok()) {
+    if (writesApplied > 0U) {
+      _markHardwareConfigDirty(st);
+    }
     return st;
   }
+  ++writesApplied;
   st = _writeRegister16Tracked(cmd::REG_CONFIGURATION, _buildConfigurationRegister(_config.mode));
   if (!st.ok()) {
+    if (writesApplied > 0U) {
+      _markHardwareConfigDirty(st);
+    }
     return st;
   }
+  ++writesApplied;
 
+  _clearHardwareConfigDirty();
   _clearRuntimeState();
 
   if (_config.mode == Mode::CONTINUOUS) {
@@ -2053,6 +2109,22 @@ Status OPT4001::_applyConfig() {
   }
 
   return Status::Ok();
+}
+
+void OPT4001::_markHardwareConfigDirty(const Status& st) {
+  if (st.ok() || st.inProgress()) {
+    return;
+  }
+  if (_hardwareConfigDirty) {
+    return;
+  }
+  _hardwareConfigDirty = true;
+  _hardwareConfigDirtyError = st;
+}
+
+void OPT4001::_clearHardwareConfigDirty() {
+  _hardwareConfigDirty = false;
+  _hardwareConfigDirtyError = Status::Ok();
 }
 
 void OPT4001::_clearRuntimeState() {
