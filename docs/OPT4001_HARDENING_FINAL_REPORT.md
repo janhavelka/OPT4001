@@ -232,6 +232,9 @@ Follow-up closure rerun on 2026-06-02:
   serial port, board wiring, or operator metadata was provided in this session.
 - No real HIL runner session was run for the same reason. Only dry-run command
   selection and safety checks were executed.
+- Follow-up Prompt 2 hardware/HIL validation was not run because the required
+  operator metadata, board/package details, serial port, optical setup, INT
+  wiring/capture details, and fault-test approval were not provided.
 - Pure ESP-IDF local builds could not run because `idf.py` is not installed or
   not on PATH in this shell.
 
@@ -242,6 +245,15 @@ No hardware or HIL validation logs were captured.
 Created procedure: `docs/OPT4001_HARDWARE_VALIDATION_PROCEDURE.md`.
 
 Created optional runner: `tools/hil_opt4001_runner.py`.
+
+Created pending hardware log:
+`docs/OPT4001_HARDWARE_VALIDATION_LOG_20260602.md`.
+
+Follow-up Prompt 2 status: not run. No board/package/operator/serial metadata
+was supplied, so no safe smoke, conversion-time, continuous, FIFO/burst,
+address/package, optical, INT, or fault/recovery sequence was executed. The log
+records the missing metadata and preserves the validation as pending without
+claiming device evidence.
 
 No files under `hil_logs/` were generated or committed.
 
