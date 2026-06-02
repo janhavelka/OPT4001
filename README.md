@@ -27,9 +27,9 @@ pattern used by the other device libraries in this workspace:
 - Measurement support:
   - decoded exponent / mantissa sample format
   - lux, milli-lux, and micro-lux helpers
-  - 4-sample burst read (`RESULT` + FIFO shadows)
+  - 4-sample burst read (`RESULT` newest + FIFO0..FIFO2 shadows)
   - per-slot history reads (`slot 0` = newest, `1-3` = FIFO shadows)
-  - per-sample CRC verification
+  - per-sample CRC fields with aggregate read status
 - Configuration support:
   - range selection or auto-range
   - conversion-time selection
@@ -223,8 +223,17 @@ void loop() {
   loop, but it is not a replacement clock.
 - `readLux()`, `readMilliLux()`, `readMicroLux()`, and `tryReadLux()` follow the
   same rule: on `CRC_ERROR`, the scaled output value is still written.
+- `readBurst()` returns `BurstFrame::newest` from `RESULT`, followed by
+  `fifo0`, `fifo1`, and `fifo2` from the FIFO shadow register pairs. Treat that
+  order as newest to oldest within the four-deep history window.
+- Each burst/history `Sample` carries its own received CRC nibble and
+  `crcValid` flag. The returned `Status` is aggregate: `OK` means the decoded
+  slots passed the selected CRC policy, while `CRC_ERROR` means at least one
+  decoded slot failed verification. When an aggregate error is returned, only
+  slots decoded before that error are guaranteed meaningful.
 - `readSampleSlot(0..3)` provides direct access to the newest sample plus the
-  three FIFO shadow samples without forcing a full burst decode.
+  three FIFO shadow samples without forcing a full burst decode. Slot 0 consumes
+  freshness like `readSample()`; slots 1-3 are direct history reads.
 - `getLastSample()` / `sampleTimestampMs()` / `sampleAgeMs()` provide RAM-only
   access to the last successfully decoded sample.
 - `tryReadSample()` / `tryReadFreshSample()` / `tryReadLux()` are intended for
@@ -237,6 +246,14 @@ void loop() {
   touching the bus. Use `recover()` to probe and re-apply cached configuration,
   or use the explicit reset / reset-and-reapply diagnostics when a bus-wide
   reset is acceptable.
+- A dirty hardware/cache state means the driver's cached settings may no longer
+  describe the sensor registers. Typical causes are raw register writes,
+  external/general-call resets, brownout, or a failed multi-register sequence
+  after some earlier writes reached the device. The recovery recipe is to stop
+  relying on threshold, INT, and freshness assumptions, call `recover()` to
+  probe and re-apply cached configuration, then read back configuration,
+  INT-configuration, and thresholds if the application needs confirmation. If a
+  bus-wide reset is acceptable, `resetAndReapply()` is the stronger recipe.
 - `end()` is best-effort: when initialized and online it attempts a raw
   power-down write, ignores that write status, clears runtime state, and leaves
   the driver `UNINIT`.
@@ -246,7 +263,9 @@ void loop() {
 - Cached configuration setters roll back the cached state if the required I2C
   write sequence fails.
 - `readFlags()` and `readFlagsRaw()` read register `0x0C`, which is clear-on-read.
-  Use them only when consuming/clearing the latched FLAGS view is intended.
+  Use them only when consuming/clearing the latched FLAGS view is intended. Raw
+  register reads of `0x0C`, or raw register blocks that include `0x0C`, have the
+  same hardware side effect.
 - `clearConversionReadyFlag()` performs the datasheet's write-nonzero clear of
   only `CONVERSION_READY_FLAG`, while `clearFlags()` intentionally uses the
   destructive read path to clear the full sticky status view.
@@ -256,15 +275,24 @@ void loop() {
   `IntConfigurationInfo`) are available so bring-up code does not need to unpack
   bit fields manually.
 - Interrupt preset helpers (`enableThresholdInterrupt*()`,
-  `enableConversionReadyInterrupt()`, `enableFifoFullInterrupt()`) are convenience
-  wrappers over the existing register model; they do not take ownership of GPIOs,
-  alert handling, or the I2C transport.
-- INT is SOT-5X3-only. The driver can read a configured GPIO hook and apply
-  interrupt polarity, but it never configures, reserves, attaches interrupts to,
-  debounces, drives, or owns the pin. PicoStar users should leave INT disabled.
+  `enableConversionReadyInterrupt()`, `enableFifoFullInterrupt()`) are
+  convenience wrappers over the existing register model; they do not take
+  ownership of GPIOs, alert handling, ISRs, or the I2C transport.
+- INT is SOT-5X3-only and is an open-drain signal. The driver can read a
+  configured GPIO hook and apply interrupt polarity, but it never configures,
+  reserves, attaches interrupts to, debounces, drives, or owns the pin. The
+  application owns pullups, GPIO mode, ISR attachment, ISR-to-task signaling,
+  and pin lifetime. PicoStar users should leave INT disabled.
+- INT output modes are threshold/SMBus alert, pulse after every conversion, and
+  pulse after every four conversions for FIFO-full indication. The reserved
+  `INT_CFG=2` value is rejected. `INT_DIR=0` makes INT a one-shot trigger input,
+  so it cannot simultaneously be used as an interrupt output.
 - The threshold-interrupt convenience helpers reject inverted windows
   (`low > high`) up front; the lower-level raw threshold setters remain available
   when an application really needs exact register control.
+- Threshold and INT register packing are covered by native tests, but end-to-end
+  threshold flag, SMBus alert, INT pulse, and ISR behavior still require
+  target-hardware validation before production reliance.
 - Threshold lux helpers reject negative, NaN, and infinite inputs before packing
   threshold registers.
 - Raw register access is bounded to documented public registers; blocks that span
@@ -457,9 +485,12 @@ driver/bus state errors to `I2C_BUS` while preserving the raw `esp_err_t` in
   configured INT GPIO hook and applies the configured interrupt polarity.
 - `config`, `intcfg`, `flags`, `reg`, and `wreg` are intended for bring-up and
   diagnostics; raw writes can desynchronize the cached config until `recover()`
-  or `resetAndReapply()` is used.
+  or `resetAndReapply()` is used. Treat that as a dirty hardware/cache state:
+  stop relying on cached settings, recover or reset-and-reapply, then read back
+  the affected registers.
 - `flags readyclear` uses the write-to-clear-ready path, while `flags` and
-  `flags clear` use the register read path that also clears latched threshold flags.
+  `flags clear` use the register read path that also clears latched threshold
+  flags. Raw `reg 0x0c` reads have the same clear-on-read side effect.
 - `status` / `status_raw` are CLI aliases for the decoded and raw `FLAGS` views.
 - `threshold raw <low> <high>` accepts packed 16-bit threshold register values for
   register-level bring-up, while `threshold <lowLux> <highLux>` uses the lux helpers.
@@ -503,7 +534,11 @@ driver/bus state errors to `I2C_BUS` while preserving the raw `esp_err_t` in
   wrapped as a dedicated driver API.
 - INT-input hardware triggering is left to the board/application layer, but the
   driver can read a configured INT GPIO hook through `readIntPinAsserted()` and
-  apply the configured polarity. It does not generate GPIO trigger pulses.
+  apply the configured polarity. It does not configure or own GPIO/INT hardware
+  and does not generate GPIO trigger pulses.
+- Threshold and interrupt helper behavior is contract-tested at the register
+  level. Physical threshold comparator behavior, SMBus alert arbitration,
+  open-drain pulse timing, and ISR integration remain board-validation items.
 - Window transmission compensation and similar application-note calibration
   factors are intentionally left at the application layer rather than baked into
   the core lux conversion path.

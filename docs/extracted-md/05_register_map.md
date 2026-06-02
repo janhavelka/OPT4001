@@ -18,7 +18,7 @@ All documented registers are 16 bits.
 | `0x09` | `THRESHOLD_H_EXPONENT`, `THRESHOLD_H_RESULT` | `0xBFFF` | High threshold. |
 | `0x0A` | `QWAKE`, `RANGE`, `CONVERSION_TIME`, `OPERATING_MODE`, `LATCH`, `INT_POL`, `FAULT_COUNT` | `0x3208` | Main configuration register. |
 | `0x0B` | Reserved pattern, `INT_DIR`, `INT_CFG`, `I2C_BURST` | `0x8011` | INT direction/mode and burst-read control. |
-| `0x0C` | `OVERLOAD_FLAG`, `CONVERSION_READY_FLAG`, `FLAG_H`, `FLAG_L` | `0x0000` | Status flags. |
+| `0x0C` | `OVERLOAD_FLAG`, `CONVERSION_READY_FLAG`, `FLAG_H`, `FLAG_L` | `0x0000` | Status flags; read clears the latched view. |
 | `0x11` | Device ID fields | `0x0121` | Identity register per datasheet extraction. |
 
 ## Register 0x0A key fields
@@ -42,8 +42,8 @@ Source: OPT4001 datasheet, p. 31.
 | Bits | Field | Reset | Meaning |
 | --- | --- | --- | --- |
 | 15:5 | Required pattern | `0x400` field value | Must read/write decimal 1024 (`0x400`) in this field. |
-| 4 | `INT_DIR` | 1 | 0 input, 1 output. SOT-5X3 only. |
-| 3:2 | `INT_CFG` | 0 | 0 SMBus alert, 1 pulse every conversion, 2 invalid, 3 pulse every 4 conversions/FIFO full. |
+| 4 | `INT_DIR` | 1 | 0 input trigger, 1 open-drain output. SOT-5X3 only. |
+| 3:2 | `INT_CFG` | 0 | 0 threshold/SMBus alert, 1 pulse every conversion, 2 invalid, 3 pulse every 4 conversions/FIFO full. |
 | 1 | Reserved | 0 | Must read/write 0. |
 | 0 | `I2C_BURST` | 1 | Enables pointer auto-increment during reads. |
 
@@ -57,6 +57,11 @@ Source: OPT4001 datasheet, pp. 31-32.
 | `CONVERSION_READY_FLAG` | Set when conversion completes; cleared when register `0x0C` is read or written with nonzero value. |
 | `FLAG_H` | Result exceeded high threshold. |
 | `FLAG_L` | Result fell below low threshold. |
+
+Any read of register `0x0C`, including a raw register read or a multi-register
+block that spans it, consumes the latched FLAGS view. A nonzero write to `0x0C`
+is the documented write-clear path for `CONVERSION_READY_FLAG`; use it only when
+that side effect is intended.
 
 ## Documented reserved and required-write behavior
 

@@ -24,7 +24,11 @@ using I2cWriteReadFn = Status (*)(uint8_t addr, const uint8_t* txData, size_t tx
                                   uint8_t* rxData, size_t rxLen, uint32_t timeoutMs,
                                   void* user);
 
-/// Optional GPIO read callback for the device INT pin.
+/// Optional GPIO read callback for the SOT-5X3 INT pin.
+///
+/// The application owns GPIO configuration, pullups, ISR attachment,
+/// ISR-to-task signaling, debouncing, and pin lifetime. The driver only samples
+/// this hook from normal task context; public driver APIs are not ISR-safe.
 using GpioReadFn = bool (*)(int pin, void* user);
 
 /// Optional monotonic millisecond timestamp callback.
@@ -105,16 +109,16 @@ enum class FaultCount : uint8_t {
 
 /// INT pin direction.
 enum class IntDirection : uint8_t {
-  PIN_INPUT  = 0,  ///< Hardware one-shot trigger input.
-  PIN_OUTPUT = 1   ///< Open-drain interrupt output.
+  PIN_INPUT  = 0,  ///< SOT-5X3 hardware one-shot trigger input; no interrupt output.
+  PIN_OUTPUT = 1   ///< SOT-5X3 open-drain interrupt output.
 };
 
 /// INT pin output function.
 enum class IntConfig : uint8_t {
   THRESHOLD        = 0,  ///< Threshold / SMBus alert behavior.
-  EVERY_CONVERSION = 1,  ///< ~1 us pulse after each conversion.
+  EVERY_CONVERSION = 1,  ///< Open-drain ~1 us pulse after each conversion.
   RESERVED         = 2,  ///< Reserved; do not use.
-  FIFO_FULL        = 3   ///< ~1 us pulse every four conversions.
+  FIFO_FULL        = 3   ///< Open-drain ~1 us pulse every four conversions.
 };
 
 /// Threshold register representation.
@@ -169,7 +173,11 @@ struct Config {
   Threshold highThreshold{0x0B, 0x0FFF};
 
   // === Optional INT Pin Hook ===
+  /// Optional SOT-5X3 INT pin number meaningful to the application GPIO hook.
+  /// PicoStar has no INT pin; leave this disabled for that package.
   int intPin = -1;
+  /// Optional task-context INT sampler. The core never configures GPIO, attaches
+  /// ISRs, owns the pin, or calls platform GPIO APIs directly.
   GpioReadFn gpioRead = nullptr;
   void* gpioUser = nullptr;
 

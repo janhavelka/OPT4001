@@ -27,7 +27,7 @@ Source: OPT4001 datasheet, p. 4.
 | 4 | GND | Power | Ground. |
 | 5 | SCL | Digital input | I2C clock; pull up to 1.6 V to 5.5 V rail. |
 | 6 | NC | No connect | No driver role. |
-| 7 | INT | Digital I/O | Open-drain interrupt input/output; can also trigger one-shot measurements. |
+| 7 | INT | Digital I/O | Open-drain interrupt input/output; can also trigger one-shot measurements. Application-owned GPIO/ISR. |
 | 8 | SDA | Digital I/O | I2C data; pull up to 1.6 V to 5.5 V rail. |
 
 ## Address selection
@@ -48,4 +48,7 @@ The SOT-5X3 table in the PDF lists the SCL row as `1000101`, duplicating VDD. Th
 
 - `SDA`, `SCL`, and SOT-5X3 `INT` use pullups; typical application text uses 10 kOhm examples.
 - `INT` direction is controlled by `INT_DIR` and only exists on SOT-5X3.
+- The driver core does not configure, own, attach interrupts to, debounce, or
+  drive INT. Board/application code owns the pullup, GPIO mode, ISR, and
+  ISR-to-task handoff.
 - The optical sensing direction and package mounting differ by variant; keep package selection visible in board examples.

@@ -42,7 +42,12 @@ struct Sample {
   float lux = 0.0f;
 };
 
-/// Four-deep burst frame: newest sample plus three FIFO shadows.
+/// Four-deep burst frame ordered newest to oldest within the history window.
+///
+/// `newest` maps to RESULT registers 0x00/0x01. `fifo0`, `fifo1`, and `fifo2`
+/// map to FIFO shadow pairs 0x02/0x03, 0x04/0x05, and 0x06/0x07. Each `Sample`
+/// carries its own received CRC nibble and `crcValid` flag; burst APIs return an
+/// aggregate status for the frame.
 struct BurstFrame {
   Sample newest;
   Sample fifo0;
@@ -99,6 +104,11 @@ struct IntConfigurationInfo {
 };
 
 /// Snapshot of cached configuration and runtime state without I2C access.
+///
+/// This is the driver's cache, not a live hardware readback. After raw register
+/// writes, external resets, brownout, or partial multi-register failures, treat
+/// the hardware/cache relation as dirty until `recover()` or `resetAndReapply()`
+/// re-applies configuration and any required registers are read back.
 struct SettingsSnapshot {
   bool initialized = false;
   DriverState state = DriverState::UNINIT;
@@ -134,6 +144,13 @@ struct SettingsSnapshot {
   uint8_t lastCounter = 0;
   uint32_t lastAdcCodes = 0;
   float lastLux = 0.0f;
+  /// True when a multi-register hardware update may have partially applied and
+  /// hardware may not match the cached configuration. Clear with successful
+  /// full config re-apply through recover(), resetAndReapply(), or a full
+  /// configuration write path.
+  bool hardwareConfigDirty = false;
+  /// Original status that first marked `hardwareConfigDirty`.
+  Status hardwareConfigDirtyError = Status::Ok();
 };
 
 /// OPT4001 driver class.
@@ -183,7 +200,9 @@ public:
   /// an unexpected ID returns `DEVICE_ID_MISMATCH`.
   Status probe();
   /// Attempt recovery using tracked Device ID readback and config re-apply.
-  /// Transport failures and Device ID mismatches update health counters.
+  /// Transport failures and Device ID mismatches update health counters. Use
+  /// this after OFFLINE state or suspected dirty hardware/cache state from raw
+  /// writes, partial multi-register application, brownout, or external reset.
   Status recover();
   /// Perform the documented general-call reset (address 0x00, data 0x06).
   /// This is bus-wide, can touch I2C while `OFFLINE`, and leaves the driver in
@@ -195,6 +214,12 @@ public:
   Status readDeviceId(uint16_t& value);
   Status readDeviceId(DeviceIdInfo& out);
   Status getSettings(SettingsSnapshot& out) const;
+  /// True when a multi-register config operation may have partially changed
+  /// hardware before failing. The flag persists across ordinary reads and
+  /// clears only after a successful full config re-apply.
+  bool hardwareConfigDirty() const { return _hardwareConfigDirty; }
+  /// First failure that marked `hardwareConfigDirty()`.
+  Status hardwareConfigDirtyError() const { return _hardwareConfigDirtyError; }
 
   // === Driver State ===
   DriverState state() const { return _driverState; }
@@ -232,8 +257,21 @@ public:
   /// fresh sample. Returns `MEASUREMENT_NOT_READY` when no fresh evidence exists.
   /// On `OK` or `CRC_ERROR`, the fresh token is consumed and the cache updates.
   Status readSample(Sample& out);
+  /// Read newest RESULT plus FIFO0/FIFO1/FIFO2. Slot order is newest/current
+  /// output register, then prior FIFO shadows in hardware order. Every slot is
+  /// decoded; if any slot fails CRC, all decoded fields remain populated and the
+  /// aggregate status is `CRC_ERROR`.
+  /// Read a fresh four-sample history frame ordered newest to oldest.
+  ///
+  /// The returned status is aggregate. `OK` means all decoded slots satisfied
+  /// the selected CRC policy. `CRC_ERROR` means at least one decoded slot failed
+  /// CRC verification; inspect each slot's `crcValid`/`crc` fields and treat
+  /// slots after the aggregate error as unspecified unless they were decoded by
+  /// the current implementation path.
   Status readBurst(BurstFrame& out);
-  /// Read one slot from the 4-deep history window: 0 = newest RESULT, 1-3 = FIFO shadows.
+  /// Read one slot from the 4-deep history window: 0 = newest RESULT, 1 = FIFO0,
+  /// 2 = FIFO1, 3 = FIFO2. Slot 0 consumes freshness; slots 1-3 are direct FIFO
+  /// shadow reads and carry independent `crcValid` state.
   Status readSampleSlot(uint8_t slot, Sample& out);
   Status getLastSample(Sample& out) const;
   /// True after at least one sample has been cached. Cached samples are
@@ -268,6 +306,7 @@ public:
   // === Flags / Status ===
   /// Read FLAGS register. Register 0x0C is clear-on-read; this clears the
   /// device's latched FLAGS view, including conversion-ready and threshold flags.
+  /// Raw reads of 0x0C or raw blocks spanning 0x0C have the same side effect.
   Status readFlags(Flags& out);
   /// Raw FLAGS read with the same clear-on-read hardware side effect.
   Status readFlagsRaw(uint16_t& value);
@@ -278,8 +317,9 @@ public:
   /// Read the configured INT GPIO hook and report assertion using INT_POL.
   /// @param[out] asserted True when the configured pin is active
   /// @return Status::Ok() on success, INVALID_CONFIG when no INT hook is available.
-  /// INT is available only on SOT_5X3; the application owns GPIO setup,
-  /// interrupts, debouncing, and pin lifetime.
+  /// INT is an open-drain SOT_5X3-only signal. The application owns pullups,
+  /// GPIO setup, ISR attachment, ISR-to-task signaling, debouncing, and pin
+  /// lifetime; the driver only samples the configured `gpioRead` hook.
   Status readIntPinAsserted(bool& asserted) const;
 
   // === Configuration ===
@@ -328,13 +368,15 @@ public:
   Status configureMeasurement(Range range, ConversionTime time, Mode mode, bool quickWake = false);
   /// Restore threshold registers to their documented reset defaults.
   Status restoreDefaultThresholds();
-  /// Convenience helper for common output-mode threshold interrupt use.
+  /// Convenience helper for common SOT_5X3 output-mode threshold interrupt use.
+  /// Configures INT as open-drain output with `INT_CFG=THRESHOLD`; hardware
+  /// threshold/SMBus-alert behavior still needs target-board validation.
   Status enableThresholdInterrupt(const Threshold& low, const Threshold& high);
   /// Convenience helper for common output-mode threshold interrupt use with lux values.
   Status enableThresholdInterruptLux(float lowLux, float highLux);
-  /// Configure INT as an output pulse after every conversion.
+  /// Configure SOT_5X3 INT as an open-drain output pulse after every conversion.
   Status enableConversionReadyInterrupt();
-  /// Configure INT as an output pulse when the 4-deep FIFO window is full.
+  /// Configure SOT_5X3 INT as an open-drain output pulse when the 4-deep FIFO window is full.
   Status enableFifoFullInterrupt();
 
   Status readConfiguration(uint16_t& value);
@@ -351,7 +393,8 @@ public:
   // === Raw Register Access ===
   /// Read a contiguous byte window from public 16-bit registers.
   /// Requires `begin()`. Blocks spanning reserved register gaps are rejected
-  /// before I2C. Returns `BUSY` without I2C while `OFFLINE`.
+  /// before I2C. Returns `BUSY` without I2C while `OFFLINE`. Blocks including
+  /// FLAGS register 0x0C clear that register's latched view.
   Status readRegisters(uint8_t startReg, uint8_t* buf, size_t len);
   /// Read one public 16-bit register. Requires `begin()`; returns
   /// `NOT_INITIALIZED` without I2C while `UNINIT`. Reserved addresses are
@@ -359,7 +402,9 @@ public:
   Status readRegister16(uint8_t reg, uint16_t& value);
   /// Write one public 16-bit register. Requires `begin()`; returns
   /// `NOT_INITIALIZED` without I2C while `UNINIT`. Reserved addresses are
-  /// rejected before I2C. Returns `BUSY` without I2C while `OFFLINE`.
+  /// rejected before I2C. Returns `BUSY` without I2C while `OFFLINE`. Raw
+  /// writes can make cached settings dirty; use typed setters or recover after
+  /// diagnostic writes that change configuration, INT, threshold, or FLAGS state.
   Status writeRegister16(uint8_t reg, uint16_t value);
   Status readRegister(uint8_t reg, uint16_t& value) { return readRegister16(reg, value); }
   Status writeRegister(uint8_t reg, uint16_t value) { return writeRegister16(reg, value); }
@@ -431,6 +476,8 @@ private:
 
   // === Internal Helpers ===
   Status _applyConfig();
+  void _markHardwareConfigDirty(const Status& st);
+  void _clearHardwareConfigDirty();
   void _clearRuntimeState();
   void _cacheSample(const Sample& sample);
   Status _markConversionReadyByRegisterPoll();
@@ -456,6 +503,8 @@ private:
   bool _initialized = false;
   DriverState _driverState = DriverState::UNINIT;
   bool _allowOfflineI2c = false;
+  bool _hardwareConfigDirty = false;
+  Status _hardwareConfigDirtyError = Status::Ok();
 
   // === Health Counters ===
   uint32_t _lastOkMs = 0;

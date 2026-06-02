@@ -27,7 +27,7 @@ Source: OPT4001 datasheet, p. 20.
 | Byte order | Big-endian, MSB first. |
 | Package-address behavior | PicoStar fixed `0x45`; SOT-5X3 uses ADDR table with the `ADDR=SCL` caveat above. |
 | Burst read | `I2C_BURST` reset value is 1; pointer auto-increments after every 16-bit register read and resets to the original register address on STOP. |
-| INT support | SOT-5X3 only. |
+| INT support | SOT-5X3 only; open-drain, application-owned GPIO/ISR. |
 
 ## Not documented in PDFs
 
@@ -37,3 +37,10 @@ Source: OPT4001 datasheet, p. 20.
 | A PEC byte or PEC enable register | The OPT4001 I2C transaction figures and register map contain no packet error checking field or byte. |
 | CRC polynomial name for result CRC | Register `0x01` documents XOR equations for `CRC[3:0]`, but the checked-in datasheet text does not name a standard CRC polynomial. |
 | PicoStar INT behavior | PicoStar has no INT pin in the pin table; INT behavior is SOT-5X3-only in the checked-in datasheet. |
+
+## Validation caveats
+
+| Topic | Status |
+| --- | --- |
+| Threshold / INT hardware validation | Register packing and driver contracts can be tested without hardware, but physical threshold comparator behavior, SMBus alert arbitration, open-drain pulse timing, and ISR integration remain board-validation items. |
+| Dirty hardware/cache state | Raw writes, external resets, brownout, or partial multi-register failures can make cached driver settings differ from hardware registers. Use `recover()` to re-probe/re-apply cached settings, or `resetAndReapply()` when a bus-wide reset is acceptable. |
