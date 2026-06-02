@@ -202,15 +202,15 @@ def _render_version_header(namespace: str, version: str) -> str:
 #endif
 
 #ifndef {prefix}_BUILD_DATE
-#define {prefix}_BUILD_DATE __DATE__
+#define {prefix}_BUILD_DATE "unknown"
 #endif
 
 #ifndef {prefix}_BUILD_TIME
-#define {prefix}_BUILD_TIME __TIME__
+#define {prefix}_BUILD_TIME "unknown"
 #endif
 
 #ifndef {prefix}_BUILD_TIMESTAMP
-#define {prefix}_BUILD_TIMESTAMP {prefix}_BUILD_DATE " " {prefix}_BUILD_TIME
+#define {prefix}_BUILD_TIMESTAMP "unknown"
 #endif
 
 #ifndef {prefix}_GIT_COMMIT

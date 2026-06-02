@@ -66,6 +66,30 @@ Required first commands:
 | Example transports are not production shared-bus examples | Prompt 8 | `examples/01_basic_bringup_cli/main.cpp:2`, `examples/esp_idf/basic/main/main.cpp:1`, `examples/common/BoardConfig.h:6` | Examples and adapters are labeled diagnostic/bring-up and shared-bus locking guidance is documented. |
 | Hardware/optical/address/INT/FIFO/fault validation pending | Prompt 9 | `docs/OPT4001_INDUSTRY_READINESS_EXPLORATION_REPORT.md:342`, `docs/OPT4001_INDUSTRY_READINESS_EXPLORATION_REPORT.md:563` | Validation logs capture board, package, firmware hash, commands, expected results, observed results, and failures. |
 
+## Prompt 2 Status Update
+
+H1 status: complete for source-level clean-checkout, manual include, and
+ESP-IDF/CMake public-header reproducibility.
+
+Evidence:
+
+- `.gitignore` no longer ignores `include/OPT4001/Version.h`.
+- `include/OPT4001/Version.h` is staged/tracked as a generated header derived
+  from `library.json`.
+- `scripts/generate_version.py check` reports the tracked header is up to date.
+- `tools/check_version_header_contract.py` verifies public include resolution,
+  tracked-header status, `library.json` version consistency, and generator
+  freshness.
+- CI runs `tools/check_version_header_contract.py` before PlatformIO can mask a
+  missing generated header.
+- README and ESP-IDF docs document the tracked header and verification commands.
+
+Remaining limitation:
+
+- Real pure ESP-IDF builds are still not locally validated because `idf.py` is
+  not available on `PATH` in this shell. Prompt 9 remains responsible for full
+  pure ESP-IDF and hardware validation evidence.
+
 ## Prompt 2 Scope
 
 Prompt 2 should fix H1 only: make `Version.h` or an equivalent version source reproducible for clean manual/native/CMake and ESP-IDF consumers. It should not address lifecycle, probe, sample readiness, numeric, FIFO, docs honesty, metadata, or hardware validation unless directly required by the reproducibility fix.

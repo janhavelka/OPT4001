@@ -6,9 +6,13 @@ Implementation status:
   framework-neutral driver callbacks.
 - The ESP-IDF CMake target compiles only native IDF sources plus the callback
   adapter.
+- `include/OPT4001/Version.h` is committed and checked against `library.json`,
+  so clean ESP-IDF checkouts can resolve `OPT4001/OPT4001.h` without a
+  PlatformIO pre-generation step.
 - Compatibility files (`Arduino.h`, `Wire.h`, Arduino shim sources) are not
   part of the IDF example.
 
-The command contract is enforced by `tools/check_idf_example_contract.py`.
+The command contract is enforced by `tools/check_idf_example_contract.py`. The
+version-header contract is enforced by `tools/check_version_header_contract.py`.
 When adding a CLI command to the Arduino bring-up example, add the matching
 native IDF command or explicitly document why parity is not applicable.

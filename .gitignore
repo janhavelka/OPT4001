@@ -37,5 +37,5 @@ wifi_credentials.h
 *.bak
 *.log
 
-# Auto-generated files
-include/OPT4001/Version.h
+# Version.h is generated from library.json and intentionally tracked so clean
+# manual, CMake, and ESP-IDF consumers can include OPT4001/OPT4001.h.
