@@ -174,6 +174,12 @@ void loop() {
 - The driver is not internally synchronized or ISR-safe. Call public APIs from one
   task or protect the shared driver instance and transport with an application
   lock. ISRs should only signal work to a task; they should not call driver methods.
+- Transport callbacks must not call back into the same driver instance. On a
+  shared bus, the application lock must cover both the driver call and the
+  callback transaction.
+- Public APIs that can perform I2C require a successful `begin()` unless their
+  header contract explicitly says otherwise. While `UNINIT`, public raw-register
+  APIs return `NOT_INITIALIZED` without touching the bus.
 - `Config.mode` accepts only `POWER_DOWN` or `CONTINUOUS`.
   One-shot measurements are started explicitly with `startConversion()` or
   `readBlocking()`.
@@ -204,6 +210,9 @@ void loop() {
   touching the bus. Use `recover()` to probe and re-apply cached configuration,
   or use the explicit reset / reset-and-reapply diagnostics when a bus-wide
   reset is acceptable.
+- `end()` is best-effort: when initialized and online it attempts a raw
+  power-down write, ignores that write status, clears runtime state, and leaves
+  the driver `UNINIT`.
 - `configureMeasurement()` applies range, conversion time, quick-wake, and the
   stable operating mode in one coherent update while still using the same cached
   config model and injected transport.

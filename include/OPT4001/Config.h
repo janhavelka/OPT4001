@@ -10,10 +10,16 @@
 namespace OPT4001 {
 
 /// I2C write callback signature.
+///
+/// I2C callbacks are application-owned blocking operations and must honor
+/// `timeoutMs` as their per-transaction bound. They must map platform errors to
+/// `OPT4001::Status`, must externally serialize shared-bus access, and must not
+/// re-enter public methods on the same driver instance.
 using I2cWriteFn = Status (*)(uint8_t addr, const uint8_t* data, size_t len,
                               uint32_t timeoutMs, void* user);
 
-/// I2C write-then-read callback signature.
+/// I2C write-then-read callback signature. See `I2cWriteFn` for ownership,
+/// timeout, serialization, and non-reentrancy requirements.
 using I2cWriteReadFn = Status (*)(uint8_t addr, const uint8_t* txData, size_t txLen,
                                   uint8_t* rxData, size_t rxLen, uint32_t timeoutMs,
                                   void* user);
@@ -121,7 +127,11 @@ struct Threshold {
 /// Configuration for OPT4001 driver.
 struct Config {
   // === I2C Transport (required) ===
+  /// Required application-owned write callback. The driver never configures,
+  /// owns, or locks the bus.
   I2cWriteFn i2cWrite = nullptr;
+  /// Required application-owned write/read callback. On shared buses, the
+  /// application lock must cover driver calls and the callback transaction.
   I2cWriteReadFn i2cWriteRead = nullptr;
   void* i2cUser = nullptr;
 
@@ -158,6 +168,8 @@ struct Config {
   void* gpioUser = nullptr;
 
   // === Health Tracking ===
+  /// Consecutive tracked I2C failures required to latch OFFLINE. A value of 0
+  /// is normalized to 1 during begin().
   uint8_t offlineThreshold = 5;
 };
 

@@ -122,25 +122,56 @@ struct SettingsSnapshot {
 };
 
 /// OPT4001 driver class.
+///
+/// Public methods are not internally synchronized and are not ISR-safe. Use one
+/// task/context per instance or protect the instance and the application-owned
+/// I2C transport with external serialization. Transport callbacks must not
+/// re-enter the same driver instance.
+///
+/// Public methods that can perform I2C require a successful `begin()` unless
+/// explicitly documented otherwise. They return `Err::NOT_INITIALIZED` without
+/// touching the bus when the driver is `UNINIT`. When health state is `OFFLINE`,
+/// normal public I2C APIs return `Err::BUSY` without bus access; `recover()`,
+/// `softReset()`, and `resetAndReapply()` are the explicit recovery/reset
+/// exceptions.
 class OPT4001 {
 public:
+  OPT4001() = default;
+  OPT4001(const OPT4001&) = delete;
+  OPT4001& operator=(const OPT4001&) = delete;
+  OPT4001(OPT4001&&) = delete;
+  OPT4001& operator=(OPT4001&&) = delete;
+
   // === Lifecycle ===
+  /// Initialize the driver, verify Device ID, and apply the supplied config.
+  /// On failure the driver remains `UNINIT`; normal public I2C APIs remain
+  /// guarded and return `NOT_INITIALIZED`.
   Status begin(const Config& config);
+  /// Advance conversion timing/poll state. May perform at most one bounded I2C
+  /// poll after a one-shot conversion budget expires.
   void tick(uint32_t nowMs);
+  /// Best-effort shutdown. Attempts a raw power-down write only when initialized
+  /// and online, ignores that write status, then clears runtime state and moves
+  /// the driver to `UNINIT`.
   void end();
 
   bool isInitialized() const { return _initialized; }
   const Config& getConfig() const { return _config; }
 
   // === Diagnostics (probe uses raw transport, recover uses tracked transport) ===
+  /// Probe the configured transport/address using raw I2C without requiring
+  /// `begin()` and without updating health counters. Requires configured I2C
+  /// callbacks in the cached config.
   Status probe();
   /// Attempt recovery using tracked Device ID readback and config re-apply.
   /// Transport failures and Device ID mismatches update health counters.
   Status recover();
   /// Perform the documented general-call reset (address 0x00, data 0x06).
-  /// This is bus-wide and leaves the driver in UNINIT state.
+  /// This is bus-wide, can touch I2C while `OFFLINE`, and leaves the driver in
+  /// `UNINIT` state on success.
   Status softReset();
-  /// General-call reset followed by re-applying the cached configuration.
+  /// General-call reset followed by re-applying the cached configuration. This
+  /// can touch I2C while `OFFLINE`.
   Status resetAndReapply();
   Status readDeviceId(uint16_t& value);
   Status readDeviceId(DeviceIdInfo& out);
@@ -187,6 +218,9 @@ public:
   Status readLux(float& lux);
   Status readMilliLux(uint32_t& milliLux);
   Status readMicroLux(uint64_t& microLux);
+  /// Blocking read helpers poll until a sample, timeout, transport error, or
+  /// finite internal poll cap. Deadlines use `Config::nowMs`; if provided,
+  /// `Config::cooperativeYield` is called between polls.
   Status readBlocking(Sample& out, uint32_t timeoutMs = 1000);
   Status readBlocking(Sample& out, Mode mode, uint32_t timeoutMs);
   Status readBlockingLux(float& lux, uint32_t timeoutMs = 1000);
@@ -279,11 +313,16 @@ public:
 
   // === Raw Register Access ===
   /// Read a contiguous byte window from public 16-bit registers.
-  /// Blocks spanning reserved register gaps are rejected before I2C.
+  /// Requires `begin()`. Blocks spanning reserved register gaps are rejected
+  /// before I2C. Returns `BUSY` without I2C while `OFFLINE`.
   Status readRegisters(uint8_t startReg, uint8_t* buf, size_t len);
-  /// Read one public 16-bit register; reserved addresses are rejected before I2C.
+  /// Read one public 16-bit register. Requires `begin()`; returns
+  /// `NOT_INITIALIZED` without I2C while `UNINIT`. Reserved addresses are
+  /// rejected before I2C. Returns `BUSY` without I2C while `OFFLINE`.
   Status readRegister16(uint8_t reg, uint16_t& value);
-  /// Write one public 16-bit register; reserved addresses are rejected before I2C.
+  /// Write one public 16-bit register. Requires `begin()`; returns
+  /// `NOT_INITIALIZED` without I2C while `UNINIT`. Reserved addresses are
+  /// rejected before I2C. Returns `BUSY` without I2C while `OFFLINE`.
   Status writeRegister16(uint8_t reg, uint16_t value);
   Status readRegister(uint8_t reg, uint16_t& value) { return readRegister16(reg, value); }
   Status writeRegister(uint8_t reg, uint16_t value) { return writeRegister16(reg, value); }
@@ -324,6 +363,8 @@ private:
   Status _i2cWriteTracked(const uint8_t* buf, size_t len);
 
   // === Register Access ===
+  Status _readRegister16Tracked(uint8_t reg, uint16_t& value);
+  Status _writeRegister16Tracked(uint8_t reg, uint16_t value);
   Status _readRegister16Raw(uint8_t reg, uint16_t& value);
   Status _readSampleAt(uint8_t msbReg, Sample& out);
   Status _decodeSampleRegisters(uint16_t resultReg, uint16_t lsbCrcReg, Sample& out) const;

@@ -5,6 +5,7 @@
 
 #include <limits>
 #include <cstring>
+#include <type_traits>
 
 #include "Arduino.h"
 #include "Wire.h"
@@ -19,6 +20,17 @@ TwoWire Wire;
 using namespace OPT4001;
 
 namespace {
+
+static_assert(std::is_default_constructible<OPT4001::OPT4001>::value,
+              "OPT4001 must remain default constructible");
+static_assert(!std::is_copy_constructible<OPT4001::OPT4001>::value,
+              "OPT4001 copy construction must be disabled");
+static_assert(!std::is_copy_assignable<OPT4001::OPT4001>::value,
+              "OPT4001 copy assignment must be disabled");
+static_assert(!std::is_move_constructible<OPT4001::OPT4001>::value,
+              "OPT4001 move construction must be disabled");
+static_assert(!std::is_move_assignable<OPT4001::OPT4001>::value,
+              "OPT4001 move assignment must be disabled");
 
 struct FakeBus {
   Status writeStatus = Status::Ok();
@@ -1173,6 +1185,144 @@ void test_raw_register_access_rejects_invalid_bounds_without_bus_io() {
   TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
 }
 
+void test_raw_register_access_before_begin_is_guarded_without_bus_io() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+
+  uint16_t value = 0xBEEF;
+  Status st = dev.readRegister16(cmd::REG_DEVICE_ID, value);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::NOT_INITIALIZED),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_HEX16(0xBEEF, value);
+
+  st = dev.writeRegister16(cmd::REG_CONFIGURATION, cmd::CONFIGURATION_RESET);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::NOT_INITIALIZED),
+                          static_cast<uint8_t>(st.code));
+
+  TEST_ASSERT_FALSE(dev.isInitialized());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::UNINIT),
+                          static_cast<uint8_t>(dev.state()));
+  TEST_ASSERT_EQUAL_UINT32(0u, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(0u, bus.writeCalls);
+  TEST_ASSERT_EQUAL_UINT32(0u, dev.totalFailures());
+}
+
+void test_raw_register_access_after_failed_begin_is_guarded_without_bus_io() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+
+  bus.readStatus = Status::Error(Err::I2C_TIMEOUT, "forced probe timeout", -40);
+  Status st = dev.begin(makeConfig(bus));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::DEVICE_NOT_FOUND),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_FALSE(dev.isInitialized());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::UNINIT),
+                          static_cast<uint8_t>(dev.state()));
+
+  bus.readStatus = Status::Ok();
+  const uint32_t readsBefore = bus.readCalls;
+  const uint32_t writesBefore = bus.writeCalls;
+
+  uint16_t value = 0xCAFE;
+  st = dev.readRegister16(cmd::REG_DEVICE_ID, value);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::NOT_INITIALIZED),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_HEX16(0xCAFE, value);
+
+  st = dev.writeRegister16(cmd::REG_CONFIGURATION, cmd::CONFIGURATION_RESET);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::NOT_INITIALIZED),
+                          static_cast<uint8_t>(st.code));
+
+  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
+  TEST_ASSERT_EQUAL_UINT32(0u, dev.totalFailures());
+}
+
+void test_raw_register_access_after_end_is_guarded_without_bus_io() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  dev.end();
+  TEST_ASSERT_FALSE(dev.isInitialized());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::UNINIT),
+                          static_cast<uint8_t>(dev.state()));
+
+  const uint32_t readsBefore = bus.readCalls;
+  const uint32_t writesBefore = bus.writeCalls;
+
+  uint16_t value = 0x1234;
+  Status st = dev.readRegister16(cmd::REG_DEVICE_ID, value);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::NOT_INITIALIZED),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_HEX16(0x1234, value);
+
+  st = dev.writeRegister16(cmd::REG_CONFIGURATION, cmd::CONFIGURATION_RESET);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::NOT_INITIALIZED),
+                          static_cast<uint8_t>(st.code));
+
+  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
+}
+
+void test_raw_register_access_offline_matches_normal_operation_without_bus_io() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.offlineThreshold = 1;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  bus.readStatus = Status::Error(Err::I2C_TIMEOUT, "forced offline timeout", -41);
+  Flags flags;
+  Status st = dev.readFlags(flags);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_TIMEOUT),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::OFFLINE),
+                          static_cast<uint8_t>(dev.state()));
+
+  bus.readStatus = Status::Ok();
+  const uint32_t readsBefore = bus.readCalls;
+  const uint32_t writesBefore = bus.writeCalls;
+
+  st = dev.readFlags(flags);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::BUSY), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_STRING("Driver is offline; call recover()", st.msg);
+
+  uint16_t value = 0;
+  st = dev.readRegister16(cmd::REG_DEVICE_ID, value);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::BUSY), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_STRING("Driver is offline; call recover()", st.msg);
+
+  st = dev.writeRegister16(cmd::REG_CONFIGURATION, cmd::CONFIGURATION_RESET);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::BUSY), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_STRING("Driver is offline; call recover()", st.msg);
+
+  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::OFFLINE),
+                          static_cast<uint8_t>(dev.state()));
+}
+
+void test_probe_without_begin_uses_raw_transport_when_cached_config_present() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  dev._config = makeConfig(bus);
+
+  TEST_ASSERT_FALSE(dev.isInitialized());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::UNINIT),
+                          static_cast<uint8_t>(dev.state()));
+
+  Status st = dev.probe();
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT32(1U, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(0U, bus.writeCalls);
+  TEST_ASSERT_EQUAL_UINT32(0U, dev.totalFailures());
+  TEST_ASSERT_EQUAL_UINT32(0U, dev.totalSuccess());
+  TEST_ASSERT_FALSE(dev.isInitialized());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::UNINIT),
+                          static_cast<uint8_t>(dev.state()));
+}
+
 void test_lux_to_threshold_rejects_non_finite_inputs() {
   FakeBus bus;
   OPT4001::OPT4001 dev;
@@ -1304,6 +1454,11 @@ int main() {
   RUN_TEST(test_configuration_and_interrupt_convenience_helpers);
   RUN_TEST(test_cached_configuration_rolls_back_after_i2c_failure);
   RUN_TEST(test_raw_register_access_rejects_invalid_bounds_without_bus_io);
+  RUN_TEST(test_raw_register_access_before_begin_is_guarded_without_bus_io);
+  RUN_TEST(test_raw_register_access_after_failed_begin_is_guarded_without_bus_io);
+  RUN_TEST(test_raw_register_access_after_end_is_guarded_without_bus_io);
+  RUN_TEST(test_raw_register_access_offline_matches_normal_operation_without_bus_io);
+  RUN_TEST(test_probe_without_begin_uses_raw_transport_when_cached_config_present);
   RUN_TEST(test_lux_to_threshold_rejects_non_finite_inputs);
   RUN_TEST(test_soft_reset_moves_driver_to_uninit);
   RUN_TEST(test_reset_and_reapply_restores_ready_and_config);

@@ -349,7 +349,7 @@ Status OPT4001::readDeviceId(uint16_t& value) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
-  return readRegister16(cmd::REG_DEVICE_ID, value);
+  return _readRegister16Tracked(cmd::REG_DEVICE_ID, value);
 }
 
 Status OPT4001::readDeviceId(DeviceIdInfo& out) {
@@ -422,7 +422,7 @@ Status OPT4001::startConversion(Mode mode) {
     return Status::Error(Err::BUSY, "Conversion already in progress");
   }
 
-  Status st = writeRegister16(cmd::REG_CONFIGURATION, _buildConfigurationRegister(mode));
+  Status st = _writeRegister16Tracked(cmd::REG_CONFIGURATION, _buildConfigurationRegister(mode));
   if (!st.ok()) {
     return st;
   }
@@ -850,7 +850,7 @@ Status OPT4001::readFlags(Flags& out) {
   }
 
   uint16_t raw = 0;
-  Status st = readRegister16(cmd::REG_FLAGS, raw);
+  Status st = _readRegister16Tracked(cmd::REG_FLAGS, raw);
   if (!st.ok()) {
     return st;
   }
@@ -875,7 +875,7 @@ Status OPT4001::readFlagsRaw(uint16_t& value) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
-  return readRegister16(cmd::REG_FLAGS, value);
+  return _readRegister16Tracked(cmd::REG_FLAGS, value);
 }
 
 Status OPT4001::clearConversionReadyFlag() {
@@ -883,7 +883,7 @@ Status OPT4001::clearConversionReadyFlag() {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
 
-  return writeRegister16(cmd::REG_FLAGS, 0x0001);
+  return _writeRegister16Tracked(cmd::REG_FLAGS, 0x0001);
 }
 
 Status OPT4001::clearFlags() {
@@ -1100,12 +1100,12 @@ Status OPT4001::setThresholds(const Threshold& low, const Threshold& high) {
   _config.lowThreshold = low;
   _config.highThreshold = high;
 
-  Status st = writeRegister16(cmd::REG_THRESHOLD_L, _packThreshold(low));
+  Status st = _writeRegister16Tracked(cmd::REG_THRESHOLD_L, _packThreshold(low));
   if (!st.ok()) {
     _config = oldConfig;
     return st;
   }
-  st = writeRegister16(cmd::REG_THRESHOLD_H, _packThreshold(high));
+  st = _writeRegister16Tracked(cmd::REG_THRESHOLD_H, _packThreshold(high));
   if (!st.ok()) {
     _config = oldConfig;
   }
@@ -1119,11 +1119,11 @@ Status OPT4001::getThresholds(Threshold& low, Threshold& high) {
 
   uint16_t lowRaw = 0;
   uint16_t highRaw = 0;
-  Status st = readRegister16(cmd::REG_THRESHOLD_L, lowRaw);
+  Status st = _readRegister16Tracked(cmd::REG_THRESHOLD_L, lowRaw);
   if (!st.ok()) {
     return st;
   }
-  st = readRegister16(cmd::REG_THRESHOLD_H, highRaw);
+  st = _readRegister16Tracked(cmd::REG_THRESHOLD_H, highRaw);
   if (!st.ok()) {
     return st;
   }
@@ -1293,7 +1293,7 @@ Status OPT4001::readConfiguration(uint16_t& value) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
-  return readRegister16(cmd::REG_CONFIGURATION, value);
+  return _readRegister16Tracked(cmd::REG_CONFIGURATION, value);
 }
 
 Status OPT4001::readConfiguration(ConfigurationInfo& out) {
@@ -1337,7 +1337,7 @@ Status OPT4001::writeConfiguration(uint16_t value) {
     return Status::Error(Err::INVALID_PARAM, "Invalid configuration value");
   }
 
-  Status st = writeRegister16(cmd::REG_CONFIGURATION, value);
+  Status st = _writeRegister16Tracked(cmd::REG_CONFIGURATION, value);
   if (!st.ok()) {
     return st;
   }
@@ -1381,7 +1381,7 @@ Status OPT4001::readIntConfiguration(uint16_t& value) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
-  return readRegister16(cmd::REG_INT_CONFIGURATION, value);
+  return _readRegister16Tracked(cmd::REG_INT_CONFIGURATION, value);
 }
 
 Status OPT4001::readIntConfiguration(IntConfigurationInfo& out) {
@@ -1413,7 +1413,7 @@ Status OPT4001::writeIntConfiguration(uint16_t value) {
     return Status::Error(Err::INVALID_PARAM, "Invalid INT configuration value");
   }
 
-  Status st = writeRegister16(cmd::REG_INT_CONFIGURATION, value);
+  Status st = _writeRegister16Tracked(cmd::REG_INT_CONFIGURATION, value);
   if (!st.ok()) {
     return st;
   }
@@ -1442,6 +1442,20 @@ Status OPT4001::readRegisters(uint8_t startReg, uint8_t* buf, size_t len) {
 }
 
 Status OPT4001::readRegister16(uint8_t reg, uint16_t& value) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+  return _readRegister16Tracked(reg, value);
+}
+
+Status OPT4001::writeRegister16(uint8_t reg, uint16_t value) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+  return _writeRegister16Tracked(reg, value);
+}
+
+Status OPT4001::_readRegister16Tracked(uint8_t reg, uint16_t& value) {
   if (!isValidPublicRegisterAddress(reg)) {
     return Status::Error(Err::INVALID_PARAM, "Invalid register address");
   }
@@ -1454,7 +1468,7 @@ Status OPT4001::readRegister16(uint8_t reg, uint16_t& value) {
   return Status::Ok();
 }
 
-Status OPT4001::writeRegister16(uint8_t reg, uint16_t value) {
+Status OPT4001::_writeRegister16Tracked(uint8_t reg, uint16_t value) {
   if (!isValidPublicRegisterAddress(reg)) {
     return Status::Error(Err::INVALID_PARAM, "Invalid register address");
   }
@@ -1745,11 +1759,11 @@ Status OPT4001::_readRegister16Raw(uint8_t reg, uint16_t& value) {
 Status OPT4001::_readSampleAt(uint8_t msbReg, Sample& out) {
   uint16_t result = 0;
   uint16_t lsbCrc = 0;
-  Status st = readRegister16(msbReg, result);
+  Status st = _readRegister16Tracked(msbReg, result);
   if (!st.ok()) {
     return st;
   }
-  st = readRegister16(static_cast<uint8_t>(msbReg + 1U), lsbCrc);
+  st = _readRegister16Tracked(static_cast<uint8_t>(msbReg + 1U), lsbCrc);
   if (!st.ok()) {
     return st;
   }
@@ -1851,19 +1865,19 @@ void OPT4001::_reassertOfflineLatch() {
 // ============================================================================
 
 Status OPT4001::_applyConfig() {
-  Status st = writeRegister16(cmd::REG_THRESHOLD_L, _packThreshold(_config.lowThreshold));
+  Status st = _writeRegister16Tracked(cmd::REG_THRESHOLD_L, _packThreshold(_config.lowThreshold));
   if (!st.ok()) {
     return st;
   }
-  st = writeRegister16(cmd::REG_THRESHOLD_H, _packThreshold(_config.highThreshold));
+  st = _writeRegister16Tracked(cmd::REG_THRESHOLD_H, _packThreshold(_config.highThreshold));
   if (!st.ok()) {
     return st;
   }
-  st = writeRegister16(cmd::REG_INT_CONFIGURATION, _buildIntConfigurationRegister());
+  st = _writeRegister16Tracked(cmd::REG_INT_CONFIGURATION, _buildIntConfigurationRegister());
   if (!st.ok()) {
     return st;
   }
-  st = writeRegister16(cmd::REG_CONFIGURATION, _buildConfigurationRegister(_config.mode));
+  st = _writeRegister16Tracked(cmd::REG_CONFIGURATION, _buildConfigurationRegister(_config.mode));
   if (!st.ok()) {
     return st;
   }
@@ -1906,7 +1920,7 @@ void OPT4001::_cacheSample(const Sample& sample) {
 
 Status OPT4001::_markConversionReadyByRegisterPoll() {
   uint16_t configReg = 0;
-  Status st = readRegister16(cmd::REG_CONFIGURATION, configReg);
+  Status st = _readRegister16Tracked(cmd::REG_CONFIGURATION, configReg);
   if (!st.ok()) {
     return st;
   }

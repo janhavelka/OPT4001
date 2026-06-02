@@ -90,6 +90,32 @@ Remaining limitation:
   not available on `PATH` in this shell. Prompt 9 remains responsible for full
   pure ESP-IDF and hardware validation evidence.
 
+## Prompt 3 Status Update
+
+H2 status: complete for public raw-register lifecycle guards and object-model
+contracts.
+
+Evidence:
+
+- `readRegister16()` and `writeRegister16()` now return `NOT_INITIALIZED`
+  without I2C while `UNINIT`.
+- Internal register access uses private tracked helpers so `begin()`, `recover()`,
+  and reset/reapply paths do not depend on public lifecycle APIs.
+- Normal public raw-register access returns `BUSY` without I2C while `OFFLINE`,
+  matching the documented normal public-operation policy.
+- `OPT4001` is default constructible but copy construction, copy assignment, move
+  construction, and move assignment are deleted.
+- Public headers now document lifecycle, offline, blocking, thread-safety,
+  ISR-safety, callback non-reentrancy, and shared-bus serialization contracts.
+- Native tests cover public raw-register access before `begin()`, after failed
+  `begin()`, after `end()`, while `OFFLINE`, compile-time object traits, and
+  `probe()` raw transport behavior without requiring an initialized lifecycle.
+
+Remaining limitation:
+
+- `end()` remains a compatibility best-effort `void` API; Prompt 3 documents
+  the behavior rather than adding a new status-returning shutdown API.
+
 ## Prompt 2 Scope
 
 Prompt 2 should fix H1 only: make `Version.h` or an equivalent version source reproducible for clean manual/native/CMake and ESP-IDF consumers. It should not address lifecycle, probe, sample readiness, numeric, FIFO, docs honesty, metadata, or hardware validation unless directly required by the reproducibility fix.
