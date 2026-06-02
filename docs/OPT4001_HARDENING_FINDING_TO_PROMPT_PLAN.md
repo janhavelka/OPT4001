@@ -145,6 +145,37 @@ Remaining limitation:
 - Prompt 4 improves the ESP-IDF adapter mapping and documentation, but real
   target-IDF and hardware validation remain in Prompt 9.
 
+## Prompt 5 Status Update
+
+H3 status: complete for source-level freshness/readiness semantics and bounded
+blocking contracts.
+
+Evidence:
+
+- `tick()` and `conversionReady()` no longer mark samples ready from elapsed time
+  alone; elapsed time is only a gate for hardware-evidence polling.
+- Freshness is now defined by `CONVERSION_READY_FLAG`, configured SOT-5X3 INT
+  assertion, or sample-counter advance from the previous accepted fresh sample.
+- `readSample()`, `readBurst()`, `tryReadSample()`, `tryReadFreshSample()`, and
+  `readFreshBlocking()` consume fresh readiness on `OK` or `CRC_ERROR`, so
+  repeated reads of the same counter do not report a new sample.
+- `readLatestSample()` provides explicit current-register access for callers
+  that want latest data without freshness proof.
+- Blocking reads now require `Config::nowMs` before starting a conversion, while
+  retaining a finite poll cap as a guardrail.
+- Native tests cover continuous first-fresh, duplicate counter rejection,
+  counter wrap `15 -> 0`, same lux with changed counter, one-shot flag gating,
+  forced-auto early timeout, stale one-shot-to-continuous transitions, missing
+  `nowMs`, and CRC-on-fresh consumption.
+- README and public Doxygen document latest/fresh/cached definitions, counter
+  wrap behavior, flag clear side effects, auto-range timing, blocking timebase
+  requirements, and INT/PicoStar/SOT-5X3 ownership boundaries.
+
+Remaining limitation:
+
+- Hardware timing, INT pulse behavior, and pure ESP-IDF runtime validation remain
+  pending for Prompt 9.
+
 ## Prompt 2 Scope
 
 Prompt 2 should fix H1 only: make `Version.h` or an equivalent version source reproducible for clean manual/native/CMake and ESP-IDF consumers. It should not address lifecycle, probe, sample readiness, numeric, FIFO, docs honesty, metadata, or hardware validation unless directly required by the reproducibility fix.

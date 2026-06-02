@@ -15,8 +15,10 @@ pattern used by the other device libraries in this workspace:
 ## Features
 
 - OPT4001 package support:
-  - PicoStar variant with fixed address `0x45`
-  - SOT-5X3 variant with selectable addresses `0x44`, `0x45`, `0x46`
+  - PicoStar variant with fixed address `0x45`, package-specific lux scale,
+    no ADDR pin, and no INT pin
+  - SOT-5X3 variant with selectable addresses `0x44`, `0x45`, `0x46`,
+    package-specific lux scale, ADDR pin support, and optional INT support
 - Operating modes:
   - power-down
   - continuous conversion
@@ -183,6 +185,10 @@ void loop() {
 - `Config.mode` accepts only `POWER_DOWN` or `CONTINUOUS`.
   One-shot measurements are started explicitly with `startConversion()` or
   `readBlocking()`.
+- Forced auto-range one-shots have a longer wait budget than normal one-shots:
+  conversion time plus standby wake time when quick-wake is disabled plus the
+  forced-auto-range extra time. Use `getOneShotBudget*()`, not
+  `getConversionTime*()`, when sizing one-shot deadlines.
 - `softReset()` uses the documented general-call reset (`0x00` / `0x06`).
   That reset is bus-wide; use it only when the bus topology allows it.
 - ESP-IDF reset support requires the application adapter to support the
@@ -200,20 +206,32 @@ void loop() {
   them to `DEVICE_NOT_FOUND`. A successful I2C transaction with the wrong full
   ID pattern returns `DEVICE_ID_MISMATCH` with the raw register value in
   `Status::detail`.
-- `readSample()`, `readBurst()`, and the blocking helpers may return `CRC_ERROR`
-  while still populating the decoded sample data.
-- Blocking read helpers have a finite polling cap in addition to their millisecond
-  deadline, so a stalled injected clock cannot spin forever.
+- `readLatestSample()` reads the current output registers without freshness proof.
+  It is diagnostic/latest-register access and may return duplicate samples.
+- `readSample()`, `readBurst()`, lux reads, `tryReadSample()` /
+  `tryReadFreshSample()`, and blocking helpers are fresh-sample APIs. Fresh
+  means conversion-ready flag evidence, configured SOT-5X3 INT assertion, or a
+  sample-counter advance from the previous accepted fresh sample.
+- The sample counter is modulo 16. `sampleCounterDelta()` is wrap-aware, but
+  counter-only freshness cannot detect a missed full modulo-16 wrap; poll faster
+  than 16 conversions when every conversion matters.
+- Fresh sample APIs may return `CRC_ERROR` while still populating the decoded
+  sample data; that sample is consumed as fresh and cached.
+- Blocking read helpers require `Config::nowMs`; it must be monotonic and
+  advance in milliseconds. `timeoutMs` must cover `getOneShotBudgetMs(mode)`
+  plus transport and scheduler margin. The finite poll cap prevents an infinite
+  loop, but it is not a replacement clock.
 - `readLux()`, `readMilliLux()`, `readMicroLux()`, and `tryReadLux()` follow the
   same rule: on `CRC_ERROR`, the scaled output value is still written.
 - `readSampleSlot(0..3)` provides direct access to the newest sample plus the
   three FIFO shadow samples without forcing a full burst decode.
 - `getLastSample()` / `sampleTimestampMs()` / `sampleAgeMs()` provide RAM-only
   access to the last successfully decoded sample.
-- `tryReadSample()` / `tryReadLux()` are intended for cooperative polling loops:
-  they return `OK` with `didRead=false` when no sample is ready yet, so the
-  application does not have to treat `MEASUREMENT_NOT_READY` as control flow.
-  I2C or register-poll failures are still returned as errors.
+- `tryReadSample()` / `tryReadFreshSample()` / `tryReadLux()` are intended for
+  cooperative polling loops: they return `OK` with `didRead=false` when no fresh
+  sample is ready yet, so the application does not have to treat
+  `MEASUREMENT_NOT_READY` as control flow. I2C or register-poll failures are
+  still returned as errors.
 - `OFFLINE` is latched. After the health threshold is reached, normal public I2C
   operations return `BUSY` with `"Driver is offline; call recover()"` without
   touching the bus. Use `recover()` to probe and re-apply cached configuration,
@@ -227,10 +245,11 @@ void loop() {
   config model and injected transport.
 - Cached configuration setters roll back the cached state if the required I2C
   write sequence fails.
-- `readFlags()` reads register `0x0C`; that register is clear-on-read on the device.
+- `readFlags()` and `readFlagsRaw()` read register `0x0C`, which is clear-on-read.
+  Use them only when consuming/clearing the latched FLAGS view is intended.
 - `clearConversionReadyFlag()` performs the datasheet's write-nonzero clear of
-  only `CONVERSION_READY_FLAG`, while `clearFlags()` uses the clear-on-read path
-  to clear the full sticky status view.
+  only `CONVERSION_READY_FLAG`, while `clearFlags()` intentionally uses the
+  destructive read path to clear the full sticky status view.
 - `writeIntConfiguration()` verifies the fixed register pattern documented for `0x0B`
   before writing.
 - Decoded register helpers (`DeviceIdInfo`, `ConfigurationInfo`,
@@ -240,6 +259,9 @@ void loop() {
   `enableConversionReadyInterrupt()`, `enableFifoFullInterrupt()`) are convenience
   wrappers over the existing register model; they do not take ownership of GPIOs,
   alert handling, or the I2C transport.
+- INT is SOT-5X3-only. The driver can read a configured GPIO hook and apply
+  interrupt polarity, but it never configures, reserves, attaches interrupts to,
+  debounces, drives, or owns the pin. PicoStar users should leave INT disabled.
 - The threshold-interrupt convenience helpers reject inverted windows
   (`low > high`) up front; the lower-level raw threshold setters remain available
   when an application really needs exact register control.
@@ -247,6 +269,22 @@ void loop() {
   threshold registers.
 - Raw register access is bounded to documented public registers; blocks that span
   reserved gaps are rejected before touching the bus.
+
+### Sample Freshness
+
+| Term / API | Meaning |
+| --- | --- |
+| Latest sample | Current `RESULT` register contents; may be the same counter/data as a previous read. |
+| Fresh sample | Newly observed conversion since the previous accepted fresh sample. Evidence is `CONVERSION_READY_FLAG`, configured SOT-5X3 INT assertion, or counter advance. |
+| Cached sample | RAM copy from the last successful latest/fresh decode; use `getLastSample()`, `hasSample()`, `sampleTimestampMs()`, and `sampleAgeMs()`. |
+| Not ready | No fresh evidence is available; direct fresh reads return `MEASUREMENT_NOT_READY`, try APIs return `OK` with `didRead=false`, and readiness checks return `ready=false`. |
+| `readLatestSample()` | Reads current output registers without freshness proof. |
+| `readSample()`, `readBurst()`, `tryReadSample()`, `tryReadFreshSample()`, `readFreshBlocking()` | Fresh-sample APIs that consume readiness on `OK` or `CRC_ERROR`. |
+
+`tick()` and `conversionReady()` may use elapsed conversion time as a poll gate,
+but elapsed time alone is not reported as completion. This matters in auto-range:
+overflow can abort a measurement, increase range, and make completion exceed the
+nominal conversion-time setting.
 
 ### Probe Diagnostics
 
@@ -289,6 +327,7 @@ driver/bus state errors to `I2C_BUS` while preserving the raw `esp_err_t` in
 - `conversionReady()`
 - `conversionReady(bool&)`
 - `hasSample()`
+- `readLatestSample(Sample&)`
 - `readSample(Sample&)`
 - `readBurst(BurstFrame&)`
 - `readSampleSlot(slot, Sample&)`
@@ -299,8 +338,10 @@ driver/bus state errors to `I2C_BUS` while preserving the raw `esp_err_t` in
 - `readMilliLux(uint32_t&)`
 - `readMicroLux(uint64_t&)`
 - `readBlocking(...)`
+- `readFreshBlocking(...)`
 - `readBlockingLux(...)`
 - `tryReadSample(Sample&, bool&)`
+- `tryReadFreshSample(Sample&, bool&)`
 - `tryReadLux(float&, bool&)`
 
 ### Configuration And Raw Access

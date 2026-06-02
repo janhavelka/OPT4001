@@ -209,11 +209,9 @@ void OPT4001::tick(uint32_t nowMs) {
   }
 
   if (_config.mode == Mode::CONTINUOUS) {
-    if (!_conversionReady &&
-        (nowMs - _conversionStartMs) >= getConversionTimeMs()) {
-      _conversionStarted = false;
-      _conversionReady = true;
-      _sampleAvailable = true;
+    if (!_conversionReady && (nowMs - _conversionStartMs) >= getConversionTimeMs()) {
+      bool ready = false;
+      (void)_refreshReadinessEvidence(ready);
     }
     return;
   }
@@ -226,7 +224,8 @@ void OPT4001::tick(uint32_t nowMs) {
     return;
   }
 
-  (void)_markConversionReadyByRegisterPoll();
+  bool ready = false;
+  (void)_refreshReadinessEvidence(ready);
 }
 
 void OPT4001::end() {
@@ -438,40 +437,7 @@ Status OPT4001::conversionReady(bool& ready) {
     return offlineBusyStatus();
   }
 
-  if (_config.mode == Mode::CONTINUOUS) {
-    if (_conversionReady) {
-      ready = true;
-      return Status::Ok();
-    }
-    if ((_nowMs() - _conversionStartMs) >= getConversionTimeMs()) {
-      _conversionStarted = false;
-      _conversionReady = true;
-      _sampleAvailable = true;
-    }
-    ready = _conversionReady;
-    return Status::Ok();
-  }
-
-  if (_conversionReady) {
-    ready = true;
-    return Status::Ok();
-  }
-  if (!_conversionStarted) {
-    return Status::Ok();
-  }
-  if ((_nowMs() - _conversionStartMs) < getOneShotBudgetMs(_pendingMode)) {
-    return Status::Ok();
-  }
-
-  Status st = _markConversionReadyByRegisterPoll();
-  if (st.ok()) {
-    ready = _conversionReady;
-    return Status::Ok();
-  }
-  if (st.code == Err::MEASUREMENT_NOT_READY) {
-    return Status::Ok();
-  }
-  return st;
+  return _refreshReadinessEvidence(ready);
 }
 
 bool OPT4001::conversionReady() {
@@ -485,31 +451,33 @@ Status OPT4001::readSample(Sample& out) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
 
-  if (_config.mode == Mode::CONTINUOUS) {
-    bool ready = _conversionReady;
-    if (!ready) {
-      Status readySt = conversionReady(ready);
-      if (!readySt.ok()) {
-        return readySt;
-      }
-    }
-    if (!ready) {
-      return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
-    }
-  } else {
-    if (_conversionStarted) {
-      bool ready = false;
-      Status readySt = conversionReady(ready);
-      if (!readySt.ok()) {
-        return readySt;
-      }
-      if (!ready) {
-        return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
-      }
-    }
-    if (!_sampleAvailable) {
-      return Status::Error(Err::MEASUREMENT_NOT_READY, "No sample available");
-    }
+  bool ready = false;
+  Status readySt = _refreshReadinessEvidence(ready);
+  if (!readySt.ok()) {
+    return readySt;
+  }
+  if (!ready) {
+    return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
+  }
+
+  Status st = _readSampleAt(cmd::REG_RESULT, out);
+  if (!st.ok() && st.code != Err::CRC_ERROR) {
+    return st;
+  }
+
+  if (!_sampleCounterIsFresh(out.counter)) {
+    _clearReadinessEvidence();
+    return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
+  }
+
+  _markFreshSampleConsumed(out);
+
+  return st;
+}
+
+Status OPT4001::readLatestSample(Sample& out) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
 
   Status st = _readSampleAt(cmd::REG_RESULT, out);
@@ -518,11 +486,6 @@ Status OPT4001::readSample(Sample& out) {
   }
 
   _cacheSample(out);
-
-  if (_config.mode == Mode::POWER_DOWN) {
-    _conversionReady = false;
-  }
-
   return st;
 }
 
@@ -531,31 +494,13 @@ Status OPT4001::readBurst(BurstFrame& out) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
 
-  if (_config.mode == Mode::CONTINUOUS) {
-    bool ready = _conversionReady;
-    if (!ready) {
-      Status readySt = conversionReady(ready);
-      if (!readySt.ok()) {
-        return readySt;
-      }
-    }
-    if (!ready) {
-      return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
-    }
-  } else {
-    if (_conversionStarted) {
-      bool ready = false;
-      Status readySt = conversionReady(ready);
-      if (!readySt.ok()) {
-        return readySt;
-      }
-      if (!ready) {
-        return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
-      }
-    }
-    if (!_sampleAvailable) {
-      return Status::Error(Err::MEASUREMENT_NOT_READY, "No sample available");
-    }
+  bool ready = false;
+  Status readySt = _refreshReadinessEvidence(ready);
+  if (!readySt.ok()) {
+    return readySt;
+  }
+  if (!ready) {
+    return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
   }
 
   Status status = Status::Ok();
@@ -589,12 +534,12 @@ Status OPT4001::readBurst(BurstFrame& out) {
     if (status.ok()) status = _readSampleAt(cmd::REG_FIFO2_MSB, out.fifo2);
   }
 
-  _cacheSample(out.newest);
-
-  if (_config.mode == Mode::POWER_DOWN) {
-    _conversionReady = false;
+  if (!_sampleCounterIsFresh(out.newest.counter)) {
+    _clearReadinessEvidence();
+    return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
   }
 
+  _markFreshSampleConsumed(out.newest);
   return status;
 }
 
@@ -606,31 +551,13 @@ Status OPT4001::readSampleSlot(uint8_t slot, Sample& out) {
     return Status::Error(Err::INVALID_PARAM, "Sample slot must be 0..3");
   }
 
-  if (_config.mode == Mode::CONTINUOUS) {
-    bool ready = _conversionReady;
-    if (!ready) {
-      Status readySt = conversionReady(ready);
-      if (!readySt.ok()) {
-        return readySt;
-      }
-    }
-    if (!ready) {
-      return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
-    }
-  } else {
-    if (_conversionStarted) {
-      bool ready = false;
-      Status readySt = conversionReady(ready);
-      if (!readySt.ok()) {
-        return readySt;
-      }
-      if (!ready) {
-        return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
-      }
-    }
-    if (!_sampleAvailable) {
-      return Status::Error(Err::MEASUREMENT_NOT_READY, "No sample available");
-    }
+  bool ready = false;
+  Status readySt = _refreshReadinessEvidence(ready);
+  if (!readySt.ok()) {
+    return readySt;
+  }
+  if (!ready) {
+    return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
   }
 
   const uint8_t msbReg = static_cast<uint8_t>(cmd::REG_RESULT + (slot * 2U));
@@ -640,10 +567,11 @@ Status OPT4001::readSampleSlot(uint8_t slot, Sample& out) {
   }
 
   if (slot == 0U) {
-    _cacheSample(out);
-    if (_config.mode == Mode::POWER_DOWN) {
-      _conversionReady = false;
+    if (!_sampleCounterIsFresh(out.counter)) {
+      _clearReadinessEvidence();
+      return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
     }
+    _markFreshSampleConsumed(out);
   }
 
   return st;
@@ -704,25 +632,36 @@ Status OPT4001::readMicroLux(uint64_t& microLux) {
 }
 
 Status OPT4001::readBlocking(Sample& out, uint32_t timeoutMs) {
-  return readBlocking(out, Mode::ONE_SHOT, timeoutMs);
+  return readFreshBlocking(out, Mode::ONE_SHOT, timeoutMs);
 }
 
 Status OPT4001::readBlocking(Sample& out, Mode mode, uint32_t timeoutMs) {
+  return readFreshBlocking(out, mode, timeoutMs);
+}
+
+Status OPT4001::readFreshBlocking(Sample& out, uint32_t timeoutMs) {
+  return readFreshBlocking(out, Mode::ONE_SHOT, timeoutMs);
+}
+
+Status OPT4001::readFreshBlocking(Sample& out, Mode mode, uint32_t timeoutMs) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+  if (_config.nowMs == nullptr) {
+    return Status::Error(Err::INVALID_CONFIG, "Blocking reads require Config::nowMs");
   }
   if (_config.mode == Mode::CONTINUOUS) {
     const uint32_t deadlineMs = _nowMs() + timeoutMs;
     uint32_t polls = 0;
     const uint32_t maxPolls = blockingPollLimit(timeoutMs);
     while (static_cast<int32_t>(_nowMs() - deadlineMs) < 0 && polls < maxPolls) {
-      bool ready = false;
-      Status readySt = conversionReady(ready);
-      if (!readySt.ok()) {
-        return readySt;
+      bool didRead = false;
+      Status st = tryReadFreshSample(out, didRead);
+      if (!st.ok() && st.code != Err::CRC_ERROR) {
+        return st;
       }
-      if (ready) {
-        return readSample(out);
+      if (didRead) {
+        return st;
       }
       ++polls;
       _cooperativeYield();
@@ -768,8 +707,7 @@ Status OPT4001::readBlocking(Sample& out, Mode mode, uint32_t timeoutMs) {
   }
 
   _conversionStarted = false;
-  _conversionReady = false;
-  _sampleAvailable = false;
+  _clearReadinessEvidence();
   _pendingMode = Mode::POWER_DOWN;
   return Status::Error(Err::TIMEOUT, "Conversion timeout");
 }
@@ -789,20 +727,17 @@ Status OPT4001::readBlockingLux(float& lux, Mode mode, uint32_t timeoutMs) {
 }
 
 Status OPT4001::tryReadSample(Sample& out, bool& didRead) {
+  return tryReadFreshSample(out, didRead);
+}
+
+Status OPT4001::tryReadFreshSample(Sample& out, bool& didRead) {
   didRead = false;
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
 
   bool ready = false;
-  Status readySt = Status::Ok();
-  if (_config.mode == Mode::CONTINUOUS) {
-    readySt = conversionReady(ready);
-  } else if (_conversionStarted) {
-    readySt = conversionReady(ready);
-  } else {
-    ready = _sampleAvailable;
-  }
+  Status readySt = _refreshReadinessEvidence(ready);
   if (!readySt.ok()) {
     return readySt;
   }
@@ -869,7 +804,11 @@ Status OPT4001::readFlagsRaw(uint16_t& value) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
-  return _readRegister16Tracked(cmd::REG_FLAGS, value);
+  Status st = _readRegister16Tracked(cmd::REG_FLAGS, value);
+  if (st.ok()) {
+    _clearReadinessEvidence();
+  }
+  return st;
 }
 
 Status OPT4001::clearConversionReadyFlag() {
@@ -877,7 +816,11 @@ Status OPT4001::clearConversionReadyFlag() {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
 
-  return _writeRegister16Tracked(cmd::REG_FLAGS, 0x0001);
+  Status st = _writeRegister16Tracked(cmd::REG_FLAGS, 0x0001);
+  if (st.ok()) {
+    _clearReadinessEvidence();
+  }
+  return st;
 }
 
 Status OPT4001::clearFlags() {
@@ -886,7 +829,11 @@ Status OPT4001::clearFlags() {
   }
 
   Flags flags;
-  return readFlags(flags);
+  Status st = readFlags(flags);
+  if (st.ok()) {
+    _clearReadinessEvidence();
+  }
+  return st;
 }
 
 Status OPT4001::readIntPinAsserted(bool& asserted) const {
@@ -1497,6 +1444,114 @@ Status OPT4001::_validateDeviceId(uint16_t raw) const {
   return Status::Ok();
 }
 
+Status OPT4001::_pollConversionReadyFlag(bool& ready) {
+  ready = false;
+  Flags flags;
+  Status st = readFlags(flags);
+  if (!st.ok()) {
+    return st;
+  }
+  ready = flags.conversionReady;
+  return Status::Ok();
+}
+
+Status OPT4001::_refreshReadinessEvidence(bool& ready) {
+  ready = false;
+  if (_conversionReady || _sampleAvailable) {
+    ready = true;
+    return Status::Ok();
+  }
+
+  bool evidence = _intFreshEvidenceAsserted();
+  bool flagReady = false;
+  Status st = _pollConversionReadyFlag(flagReady);
+  if (!st.ok()) {
+    return st;
+  }
+  evidence = evidence || flagReady;
+
+  if (!evidence && _shouldProbeCounterForFreshness()) {
+    uint16_t lsbCrc = 0;
+    st = _readRegister16Tracked(cmd::REG_RESULT_LSB_CRC, lsbCrc);
+    if (!st.ok()) {
+      return st;
+    }
+    const uint8_t counter =
+        static_cast<uint8_t>((lsbCrc & cmd::MASK_COUNTER) >> cmd::BIT_COUNTER);
+    evidence = _sampleCounterIsFresh(counter);
+  }
+
+  if (evidence) {
+    _sampleAvailable = true;
+    _conversionReady = true;
+    if (_config.mode != Mode::CONTINUOUS) {
+      _conversionStarted = false;
+      _pendingMode = Mode::POWER_DOWN;
+    }
+    ready = true;
+  }
+  return Status::Ok();
+}
+
+bool OPT4001::_intFreshEvidenceAsserted() const {
+  if (_config.packageVariant != PackageVariant::SOT_5X3 ||
+      _config.intPin < 0 ||
+      _config.gpioRead == nullptr ||
+      _config.intDirection != IntDirection::PIN_OUTPUT) {
+    return false;
+  }
+  if (_config.intConfig != IntConfig::EVERY_CONVERSION &&
+      _config.intConfig != IntConfig::FIFO_FULL) {
+    return false;
+  }
+
+  const bool levelHigh = _config.gpioRead(_config.intPin, _config.gpioUser);
+  return (_config.interruptPolarity == InterruptPolarity::ACTIVE_HIGH)
+             ? levelHigh
+             : !levelHigh;
+}
+
+bool OPT4001::_oneShotBudgetElapsed() const {
+  return _conversionStarted &&
+         (static_cast<uint32_t>(_nowMs() - _conversionStartMs) >=
+          getOneShotBudgetMs(_pendingMode));
+}
+
+bool OPT4001::_shouldProbeCounterForFreshness() const {
+  if (!_lastFreshCounterValid) {
+    return false;
+  }
+  if (_config.mode == Mode::CONTINUOUS) {
+    return static_cast<uint32_t>(_nowMs() - _conversionStartMs) >= getConversionTimeMs();
+  }
+  return _oneShotBudgetElapsed();
+}
+
+bool OPT4001::_sampleCounterIsFresh(uint8_t counter) const {
+  return !_lastFreshCounterValid ||
+         ((counter & (cmd::SAMPLE_COUNT_MODULO - 1U)) !=
+          (_lastFreshCounter & (cmd::SAMPLE_COUNT_MODULO - 1U)));
+}
+
+void OPT4001::_markFreshSampleConsumed(const Sample& sample) {
+  _cacheSample(sample);
+  _lastFreshCounterValid = true;
+  _lastFreshCounter = sample.counter;
+  _clearReadinessEvidence();
+  if (_config.mode == Mode::CONTINUOUS) {
+    _conversionStarted = true;
+    _conversionStartMs = _nowMs();
+  } else {
+    _conversionStarted = false;
+    _pendingMode = Mode::POWER_DOWN;
+  }
+}
+
+void OPT4001::_clearReadinessEvidence() {
+  _sampleAvailable = false;
+  _conversionReady = false;
+}
+
 void OPT4001::decodeConfiguration(uint16_t raw, ConfigurationInfo& out) const {
   out.raw = raw;
   out.quickWake = (raw & cmd::MASK_QWAKE) != 0;
@@ -1910,6 +1965,8 @@ void OPT4001::_clearRuntimeState() {
   _lastSampleTimestampMs = 0;
   _lastSample = Sample{};
   _pendingMode = Mode::POWER_DOWN;
+  _lastFreshCounterValid = false;
+  _lastFreshCounter = 0;
   _lastCounter = 0;
   _lastAdcCodes = 0;
   _lastLux = 0.0f;

@@ -27,6 +27,9 @@ struct Sample {
   uint8_t exponent = 0;
   uint32_t mantissa = 0;
   uint32_t adcCodes = 0;
+  /// 4-bit hardware sample counter; wraps modulo 16. A changed counter is
+  /// freshness evidence, while a duplicate counter means duplicate data or an
+  /// unobserved full wrap.
   uint8_t counter = 0;
   uint8_t crc = 0;
   bool crcValid = false;
@@ -153,8 +156,8 @@ public:
   /// On failure the driver remains `UNINIT`; normal public I2C APIs remain
   /// guarded and return `NOT_INITIALIZED`.
   Status begin(const Config& config);
-  /// Advance conversion timing/poll state. May perform at most one bounded I2C
-  /// poll after a one-shot conversion budget expires.
+  /// Advance conversion timing/poll state. Elapsed time is only a poll gate;
+  /// readiness is reported only after hardware evidence is observed.
   void tick(uint32_t nowMs);
   /// Best-effort shutdown. Attempts a raw power-down write only when initialized
   /// and online, ignores that write status, then clears runtime state and moves
@@ -207,18 +210,28 @@ public:
   // === Measurement API ===
   Status startConversion();
   Status startConversion(Mode mode);
-  /// Status-returning readiness check.
-  /// @param[out] ready Set true when a sample can be read
+  /// Status-returning fresh-readiness check.
+  /// @param[out] ready Set true when a fresh sample can be read
   /// @return Status::Ok() with ready=false when no sample is ready; transport errors are returned
   Status conversionReady(bool& ready);
   /// Convenience readiness check. Transport/poll errors are collapsed to false.
   bool conversionReady();
+  /// Read the current RESULT registers without proving freshness. This returns
+  /// the latest register contents and may return the same sample repeatedly.
+  /// Callers that need newly completed conversions should use readSample(),
+  /// tryReadFreshSample(), or readFreshBlocking().
+  Status readLatestSample(Sample& out);
+  /// Read a fresh sample. Freshness requires hardware evidence: ready flag, INT
+  /// assertion when configured, or a changed sample counter after a previous
+  /// fresh sample. Returns `MEASUREMENT_NOT_READY` when no fresh evidence exists.
+  /// On `OK` or `CRC_ERROR`, the fresh token is consumed and the cache updates.
   Status readSample(Sample& out);
   Status readBurst(BurstFrame& out);
   /// Read one slot from the 4-deep history window: 0 = newest RESULT, 1-3 = FIFO shadows.
   Status readSampleSlot(uint8_t slot, Sample& out);
   Status getLastSample(Sample& out) const;
-  /// True after at least one sample has been cached.
+  /// True after at least one sample has been cached. Cached samples are
+  /// convenience data and are not proof of freshness.
   bool hasSample() const { return _lastSampleValid; }
   uint32_t sampleTimestampMs() const;
   /// Age of the cached sample in milliseconds.
@@ -228,23 +241,29 @@ public:
   Status readLux(float& lux);
   Status readMilliLux(uint32_t& milliLux);
   Status readMicroLux(uint64_t& microLux);
-  /// Blocking read helpers poll until a sample, timeout, transport error, or
-  /// finite internal poll cap. Deadlines use `Config::nowMs`; if provided,
-  /// `Config::cooperativeYield` is called between polls.
+  /// Blocking read helpers require `Config::nowMs` and poll until a fresh sample,
+  /// timeout, transport error, or finite internal poll cap.
+  /// @pre `Config::nowMs` must be configured, monotonic, and non-blocking.
   Status readBlocking(Sample& out, uint32_t timeoutMs = 1000);
   Status readBlocking(Sample& out, Mode mode, uint32_t timeoutMs);
+  Status readFreshBlocking(Sample& out, uint32_t timeoutMs = 1000);
+  Status readFreshBlocking(Sample& out, Mode mode, uint32_t timeoutMs);
   Status readBlockingLux(float& lux, uint32_t timeoutMs = 1000);
   Status readBlockingLux(float& lux, Mode mode, uint32_t timeoutMs);
-  /// Poll-friendly helper: returns OK with didRead=false if no sample is ready yet.
-  /// If a sample was read successfully, or read with CRC warning, didRead is set true.
+  /// Poll-friendly fresh helper: returns OK with didRead=false if no fresh sample
+  /// is ready yet. If a sample was read successfully, or read with CRC warning,
+  /// didRead is set true.
   Status tryReadSample(Sample& out, bool& didRead);
+  Status tryReadFreshSample(Sample& out, bool& didRead);
   /// Poll-friendly helper returning lux directly without treating "not ready" as an error.
   /// If a sample was read successfully, or read with CRC warning, didRead is set true.
   Status tryReadLux(float& lux, bool& didRead);
 
   // === Flags / Status ===
-  /// Read FLAGS register. Reading register 0x0C clears latched flags and ready flag.
+  /// Read FLAGS register. Register 0x0C is clear-on-read; this clears the
+  /// device's latched FLAGS view, including conversion-ready and threshold flags.
   Status readFlags(Flags& out);
+  /// Raw FLAGS read with the same clear-on-read hardware side effect.
   Status readFlagsRaw(uint16_t& value);
   /// Clear CONVERSION_READY_FLAG only by writing a non-zero value to 0x0C.
   Status clearConversionReadyFlag();
@@ -252,7 +271,9 @@ public:
   Status clearFlags();
   /// Read the configured INT GPIO hook and report assertion using INT_POL.
   /// @param[out] asserted True when the configured pin is active
-  /// @return Status::Ok() on success, INVALID_CONFIG when no INT hook is available
+  /// @return Status::Ok() on success, INVALID_CONFIG when no INT hook is available.
+  /// INT is available only on SOT_5X3; the application owns GPIO setup,
+  /// interrupts, debouncing, and pin lifetime.
   Status readIntPinAsserted(bool& asserted) const;
 
   // === Configuration ===
@@ -392,6 +413,14 @@ private:
   uint16_t _buildConfigurationRegister(Mode mode) const;
   uint16_t _buildIntConfigurationRegister() const;
   Status _validateDeviceId(uint16_t raw) const;
+  Status _pollConversionReadyFlag(bool& ready);
+  Status _refreshReadinessEvidence(bool& ready);
+  bool _intFreshEvidenceAsserted() const;
+  bool _oneShotBudgetElapsed() const;
+  bool _shouldProbeCounterForFreshness() const;
+  bool _sampleCounterIsFresh(uint8_t counter) const;
+  void _markFreshSampleConsumed(const Sample& sample);
+  void _clearReadinessEvidence();
   uint16_t _packThreshold(const Threshold& threshold) const;
   bool _thresholdValid(const Threshold& threshold) const;
   uint8_t _computeCrcNibble(uint8_t exponent, uint32_t mantissa, uint8_t counter) const;
@@ -421,6 +450,8 @@ private:
   uint32_t _lastSampleTimestampMs = 0;
   Sample _lastSample{};
   Mode _pendingMode = Mode::POWER_DOWN;
+  bool _lastFreshCounterValid = false;
+  uint8_t _lastFreshCounter = 0;
   uint8_t _lastCounter = 0;
   uint32_t _lastAdcCodes = 0;
   float _lastLux = 0.0f;
