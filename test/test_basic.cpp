@@ -3,6 +3,7 @@
 
 #include <unity.h>
 
+#include <cmath>
 #include <limits>
 #include <cstring>
 #include <type_traits>
@@ -209,25 +210,63 @@ Config makeConfig(FakeBus& bus) {
   return cfg;
 }
 
-uint8_t computeCrc(uint8_t exponent, uint32_t mantissa, uint8_t counter) {
-  OPT4001::OPT4001 helper;
-  return helper._computeCrcNibble(exponent, mantissa, counter);
+uint8_t bitValue(uint32_t value, uint8_t bit) {
+  return static_cast<uint8_t>((value >> bit) & 0x1U);
+}
+
+uint8_t xorBitList(uint32_t value, const uint8_t* bits, size_t count) {
+  uint8_t parity = 0;
+  for (size_t i = 0; i < count; ++i) {
+    parity ^= bitValue(value, bits[i]);
+  }
+  return parity;
+}
+
+uint8_t datasheetCrc(uint8_t exponent, uint32_t mantissa, uint8_t counter) {
+  uint8_t x0 = 0;
+  for (uint8_t i = 0; i < 4; ++i) {
+    x0 ^= bitValue(exponent, i);
+    x0 ^= bitValue(counter, i);
+  }
+  for (uint8_t i = 0; i < 20; ++i) {
+    x0 ^= bitValue(mantissa, i);
+  }
+
+  const uint8_t c1Bits[] = {1, 3};
+  const uint8_t r1Bits[] = {1, 3, 5, 7, 9, 11, 13, 15, 17, 19};
+  const uint8_t e1Bits[] = {1, 3};
+  const uint8_t r2Bits[] = {3, 7, 11, 15, 19};
+  const uint8_t r3Bits[] = {3, 11, 19};
+  const uint8_t x1 = static_cast<uint8_t>(xorBitList(counter, c1Bits, 2) ^
+                                          xorBitList(mantissa, r1Bits, 10) ^
+                                          xorBitList(exponent, e1Bits, 2));
+  const uint8_t x2 = static_cast<uint8_t>(bitValue(counter, 3) ^
+                                          xorBitList(mantissa, r2Bits, 5) ^
+                                          bitValue(exponent, 3));
+  const uint8_t x3 = xorBitList(mantissa, r3Bits, 3);
+  return static_cast<uint8_t>((x3 << 3) | (x2 << 2) | (x1 << 1) | x0);
+}
+
+uint16_t sampleResultReg(uint8_t exponent, uint32_t mantissa) {
+  return static_cast<uint16_t>(((static_cast<uint16_t>(exponent) << 12) & 0xF000) |
+                               ((mantissa >> 8) & 0x0FFF));
+}
+
+uint16_t sampleLsbCrcReg(uint32_t mantissa, uint8_t counter, uint8_t crc) {
+  return static_cast<uint16_t>(((mantissa & 0xFFU) << 8) |
+                               ((counter & 0x0FU) << 4) |
+                               (crc & 0x0FU));
 }
 
 void seedSample(FakeBus& bus, uint8_t msbReg, uint8_t exponent,
                 uint32_t mantissa, uint8_t counter, bool goodCrc = true) {
-  const uint16_t msb = static_cast<uint16_t>(((static_cast<uint16_t>(exponent) << 12) & 0xF000) |
-                                             ((mantissa >> 8) & 0x0FFF));
-  uint8_t crc = computeCrc(exponent, mantissa, counter);
+  uint8_t crc = datasheetCrc(exponent, mantissa, counter);
   if (!goodCrc) {
     crc ^= 0x1U;
   }
-  const uint16_t lsb =
-      static_cast<uint16_t>(((mantissa & 0xFFU) << 8) |
-                            ((counter & 0x0FU) << 4) |
-                            (crc & 0x0FU));
-  bus.registers[msbReg] = msb;
-  bus.registers[static_cast<uint8_t>(msbReg + 1U)] = lsb;
+  bus.registers[msbReg] = sampleResultReg(exponent, mantissa);
+  bus.registers[static_cast<uint8_t>(msbReg + 1U)] =
+      sampleLsbCrcReg(mantissa, counter, crc);
 }
 
 void markConversionReady(FakeBus& bus) {
@@ -333,6 +372,62 @@ void test_begin_rejects_invalid_package_address_combo() {
   st = dev.begin(cfg);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_CONFIG),
                           static_cast<uint8_t>(st.code));
+}
+
+void test_package_address_matrix() {
+  struct AddressCase {
+    PackageVariant packageVariant;
+    uint8_t address;
+    bool valid;
+  };
+  const AddressCase cases[] = {
+    {PackageVariant::PICOSTAR, 0x44, false},
+    {PackageVariant::PICOSTAR, 0x45, true},
+    {PackageVariant::PICOSTAR, 0x46, false},
+    {PackageVariant::PICOSTAR, 0x47, false},
+    {PackageVariant::SOT_5X3, 0x43, false},
+    {PackageVariant::SOT_5X3, 0x44, true},
+    {PackageVariant::SOT_5X3, 0x45, true},
+    {PackageVariant::SOT_5X3, 0x46, true},
+    {PackageVariant::SOT_5X3, 0x47, false},
+  };
+
+  for (const AddressCase& c : cases) {
+    FakeBus bus;
+    OPT4001::OPT4001 dev;
+    Config cfg = makeConfig(bus);
+    cfg.packageVariant = c.packageVariant;
+    cfg.i2cAddress = c.address;
+    Status st = dev.begin(cfg);
+    if (c.valid) {
+      TEST_ASSERT_TRUE(st.ok());
+      TEST_ASSERT_TRUE(dev.isInitialized());
+      TEST_ASSERT_EQUAL_UINT32(1u, bus.readCalls);
+    } else {
+      TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_CONFIG),
+                              static_cast<uint8_t>(st.code));
+      TEST_ASSERT_FALSE(dev.isInitialized());
+      TEST_ASSERT_EQUAL_UINT32(0u, bus.readCalls);
+      TEST_ASSERT_EQUAL_UINT32(0u, bus.writeCalls);
+    }
+  }
+
+  const PackageVariant invalidPackages[] = {
+    static_cast<PackageVariant>(2),
+    static_cast<PackageVariant>(255),
+  };
+  for (PackageVariant packageVariant : invalidPackages) {
+    FakeBus bus;
+    OPT4001::OPT4001 dev;
+    Config cfg = makeConfig(bus);
+    cfg.packageVariant = packageVariant;
+    Status st = dev.begin(cfg);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_CONFIG),
+                            static_cast<uint8_t>(st.code));
+    TEST_ASSERT_FALSE(dev.isInitialized());
+    TEST_ASSERT_EQUAL_UINT32(0u, bus.readCalls);
+    TEST_ASSERT_EQUAL_UINT32(0u, bus.writeCalls);
+  }
 }
 
 void test_invalid_begin_after_success_resets_default_runtime() {
@@ -788,6 +883,170 @@ void test_read_sample_decodes_lux_and_crc() {
   TEST_ASSERT_EQUAL_UINT32(250u, dev.sampleAgeMs(bus.nowMs));
 }
 
+void test_raw_lux_vectors_use_64_bit_intermediates() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  struct RawVector {
+    uint8_t exponent;
+    uint32_t mantissa;
+    uint64_t adcCodes;
+    float sotLux;
+    float picoLux;
+  };
+  const RawVector vectors[] = {
+    {0, 0x00000, 0ULL, 0.0f, 0.0f},
+    {0, 0x00001, 1ULL, 0.0004375f, 0.0003125f},
+    {2, 0x34567, 857500ULL, 375.15625f, 267.96875f},
+    {8, 0x00001, 256ULL, 0.112f, 0.08f},
+    {8, 0xFFFFF, 268435200ULL, 117440.4f, 83886.0f},
+  };
+
+  for (const RawVector& v : vectors) {
+    uint64_t adcCodes = UINT64_MAX;
+    float lux = -1.0f;
+    const float tolerance = (v.adcCodes > 1000000ULL) ? 0.1f : 0.001f;
+    TEST_ASSERT_TRUE(dev.rawToAdcCodes(v.exponent, v.mantissa, adcCodes).ok());
+    TEST_ASSERT_EQUAL_UINT64(v.adcCodes, adcCodes);
+    TEST_ASSERT_TRUE(dev.rawToLux(v.exponent, v.mantissa, lux).ok());
+    TEST_ASSERT_FLOAT_WITHIN(tolerance, v.sotLux, lux);
+    TEST_ASSERT_FLOAT_WITHIN(tolerance, v.sotLux,
+                             dev.rawToLux(v.exponent, v.mantissa));
+
+    TEST_ASSERT_TRUE(dev.setPackageVariant(PackageVariant::PICOSTAR).ok());
+    TEST_ASSERT_TRUE(dev.rawToLux(v.exponent, v.mantissa, lux).ok());
+    TEST_ASSERT_FLOAT_WITHIN(tolerance, v.picoLux, lux);
+    TEST_ASSERT_TRUE(dev.setPackageVariant(PackageVariant::SOT_5X3).ok());
+  }
+}
+
+void test_raw_lux_rejects_invalid_result_fields_without_shift_ub() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  struct InvalidRaw {
+    uint8_t exponent;
+    uint32_t mantissa;
+  };
+  const InvalidRaw invalid[] = {
+    {9, 0x00001},
+    {15, 0x00001},
+    {31, 0x00001},
+    {32, 0x00001},
+    {0, 0x100000},
+  };
+
+  for (const InvalidRaw& v : invalid) {
+    uint64_t adcCodes = UINT64_MAX;
+    float lux = 1.0f;
+    Status st = dev.rawToAdcCodes(v.exponent, v.mantissa, adcCodes);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM),
+                            static_cast<uint8_t>(st.code));
+    TEST_ASSERT_EQUAL_UINT64(0ULL, adcCodes);
+
+    st = dev.rawToLux(v.exponent, v.mantissa, lux);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM),
+                            static_cast<uint8_t>(st.code));
+    TEST_ASSERT_TRUE(std::isnan(lux));
+    TEST_ASSERT_TRUE(std::isnan(dev.rawToLux(v.exponent, v.mantissa)));
+  }
+}
+
+void test_decode_rejects_invalid_result_exponent_without_cache_update() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  seedSample(bus, cmd::REG_RESULT, 1, 0x12345, 1, true);
+  bus.nowMs += 150;
+  dev.tick(bus.nowMs);
+  Sample valid;
+  TEST_ASSERT_TRUE(dev.readSample(valid).ok());
+  TEST_ASSERT_TRUE(dev.hasSample());
+  TEST_ASSERT_EQUAL_UINT32(0x12345u, valid.mantissa);
+
+  seedSample(bus, cmd::REG_RESULT, 9, 0x00001, 2, true);
+  markConversionReady(bus);
+  Sample invalid;
+  Status st = dev.readSample(invalid);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_TRUE(std::isnan(invalid.lux));
+
+  Sample cached;
+  TEST_ASSERT_TRUE(dev.getLastSample(cached).ok());
+  TEST_ASSERT_EQUAL_UINT8(valid.exponent, cached.exponent);
+  TEST_ASSERT_EQUAL_UINT32(valid.mantissa, cached.mantissa);
+  TEST_ASSERT_EQUAL_UINT32(valid.adcCodes, cached.adcCodes);
+}
+
+void test_crc_vectors_use_datasheet_oracle() {
+  OPT4001::OPT4001 dev;
+
+  struct CrcVector {
+    uint8_t exponent;
+    uint32_t mantissa;
+    uint8_t counter;
+    uint8_t crc;
+    uint16_t resultReg;
+    uint16_t lsbCrcReg;
+  };
+  const CrcVector vectors[] = {
+    {0, 0x00000, 0, 0x0, 0x0000, 0x0000},
+    {0, 0x00001, 0, 0x1, 0x0000, 0x0101},
+    {1, 0x12345, 6, 0x2, 0x1123, 0x4562},
+    {2, 0x34567, 9, 0x7, 0x2345, 0x6797},
+    {3, 0x44444, 4, 0x2, 0x3444, 0x4442},
+    {8, 0xFFFFF, 15, 0xF, 0x8FFF, 0xFFFF},
+    {8, 0x80000, 1, 0x9, 0x8800, 0x0019},
+    {4, 0x00F0F, 10, 0x5, 0x400F, 0x0FA5},
+    {7, 0xABCDE, 5, 0xE, 0x7ABC, 0xDE5E},
+  };
+
+  for (const CrcVector& v : vectors) {
+    TEST_ASSERT_EQUAL_HEX8(v.crc, datasheetCrc(v.exponent, v.mantissa, v.counter));
+    TEST_ASSERT_EQUAL_HEX16(v.resultReg, sampleResultReg(v.exponent, v.mantissa));
+    TEST_ASSERT_EQUAL_HEX16(v.lsbCrcReg, sampleLsbCrcReg(v.mantissa, v.counter, v.crc));
+
+    Sample sample;
+    Status st = dev._decodeSampleRegisters(v.resultReg, v.lsbCrcReg, sample);
+    TEST_ASSERT_TRUE(st.ok());
+    TEST_ASSERT_TRUE(sample.crcValid);
+    TEST_ASSERT_EQUAL_UINT8(v.exponent, sample.exponent);
+    TEST_ASSERT_EQUAL_UINT32(v.mantissa, sample.mantissa);
+    TEST_ASSERT_EQUAL_UINT8(v.counter, sample.counter);
+    TEST_ASSERT_EQUAL_HEX8(v.crc, sample.crc);
+  }
+}
+
+void test_crc_mismatch_preserves_received_crc_and_decode_fields() {
+  OPT4001::OPT4001 dev;
+  const uint8_t expectedCrc = datasheetCrc(0, 0x23456, 3);
+  const uint8_t receivedCrc = static_cast<uint8_t>(expectedCrc ^ 0x1U);
+  const uint16_t resultReg = sampleResultReg(0, 0x23456);
+  const uint16_t lsbCrcReg = sampleLsbCrcReg(0x23456, 3, receivedCrc);
+
+  Sample sample;
+  Status st = dev._decodeSampleRegisters(resultReg, lsbCrcReg, sample);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::CRC_ERROR),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_FALSE(sample.crcValid);
+  TEST_ASSERT_EQUAL_UINT8(receivedCrc, sample.crc);
+  TEST_ASSERT_EQUAL_UINT8(0u, sample.exponent);
+  TEST_ASSERT_EQUAL_UINT32(0x23456u, sample.mantissa);
+  TEST_ASSERT_EQUAL_UINT8(3u, sample.counter);
+
+  dev._config.verifyCrc = false;
+  st = dev._decodeSampleRegisters(resultReg, lsbCrcReg, sample);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_FALSE(sample.crcValid);
+  TEST_ASSERT_EQUAL_UINT8(receivedCrc, sample.crc);
+}
+
 void test_zero_timestamp_sample_age_uses_valid_flag() {
   OPT4001::OPT4001 dev;
   TEST_ASSERT_EQUAL_UINT32(0u, dev.sampleAgeMs(123u));
@@ -947,6 +1206,75 @@ void test_threshold_lux_helpers_roundtrip() {
   TEST_ASSERT_TRUE(dev.getThresholds(low, high).ok());
   TEST_ASSERT_FLOAT_WITHIN(0.5f, dev.thresholdToLux(low), lowLux);
   TEST_ASSERT_FLOAT_WITHIN(5.0f, dev.thresholdToLux(high), highLux);
+}
+
+void test_threshold_adc_vectors_use_64_bit_and_legacy_saturates() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  struct ThresholdVector {
+    Threshold threshold;
+    uint64_t adcCodes;
+    uint32_t legacyCodes;
+    float sotLux;
+  };
+  const ThresholdVector vectors[] = {
+    {{0, 0x000}, 0ULL, 0U, 0.0f},
+    {{0, 0x001}, 256ULL, 256U, 0.112f},
+    {{0, 0x0FFF}, 1048320ULL, 1048320U, 458.64f},
+    {{1, 0x0800}, 1048576ULL, 1048576U, 458.752f},
+    {{11, 0x0FFF}, 2146959360ULL, 2146959360U, 939294.72f},
+    {{12, 0x0FFF}, 4293918720ULL, 4293918720U, 1878589.44f},
+    {{15, 0x0FFF}, 34351349760ULL, UINT32_MAX, 15028715.52f},
+  };
+
+  for (const ThresholdVector& v : vectors) {
+    uint64_t adcCodes = UINT64_MAX;
+    TEST_ASSERT_TRUE(dev.thresholdToAdcCodes(v.threshold, adcCodes).ok());
+    TEST_ASSERT_EQUAL_UINT64(v.adcCodes, adcCodes);
+    TEST_ASSERT_EQUAL_UINT32(v.legacyCodes, dev.thresholdToAdcCodes(v.threshold));
+    TEST_ASSERT_FLOAT_WITHIN(4.0f, v.sotLux, dev.thresholdToLux(v.threshold));
+  }
+
+  Threshold invalidExp{16, 0x0001};
+  uint64_t adcCodes = UINT64_MAX;
+  Status st = dev.thresholdToAdcCodes(invalidExp, adcCodes);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT64(0ULL, adcCodes);
+  TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, dev.thresholdToAdcCodes(invalidExp));
+  TEST_ASSERT_TRUE(std::isnan(dev.thresholdToLux(invalidExp)));
+
+  Threshold invalidResult{0, 0x1000};
+  st = dev.thresholdToAdcCodes(invalidResult, adcCodes);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+}
+
+void test_threshold_interrupt_ordering_uses_64_bit_codes() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  Threshold highMagnitudeLow{13, 0x0800};
+  Threshold lowerMagnitudeHigh{12, 0x0FFF};
+  Status st = dev.enableThresholdInterrupt(highMagnitudeLow, lowerMagnitudeHigh);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+
+  Threshold low{12, 0x0FFF};
+  Threshold high{13, 0x0800};
+  st = dev.enableThresholdInterrupt(low, high);
+  TEST_ASSERT_TRUE(st.ok());
+
+  Threshold readLow;
+  Threshold readHigh;
+  TEST_ASSERT_TRUE(dev.getThresholds(readLow, readHigh).ok());
+  TEST_ASSERT_EQUAL_UINT8(low.exponent, readLow.exponent);
+  TEST_ASSERT_EQUAL_UINT16(low.result, readLow.result);
+  TEST_ASSERT_EQUAL_UINT8(high.exponent, readHigh.exponent);
+  TEST_ASSERT_EQUAL_UINT16(high.result, readHigh.result);
 }
 
 void test_read_flags_parses_and_clears_ready_flag() {
@@ -1550,6 +1878,105 @@ void test_scale_and_counter_helpers() {
   TEST_ASSERT_FLOAT_WITHIN(0.01f, 328.0f, dev.getRangeFullScaleLux(Range::RANGE_0));
 }
 
+void test_all_conversion_time_vectors_and_invalid_values() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  const ConversionTime times[] = {
+    ConversionTime::US_600,
+    ConversionTime::MS_1,
+    ConversionTime::MS_1_8,
+    ConversionTime::MS_3_4,
+    ConversionTime::MS_6_5,
+    ConversionTime::MS_12_7,
+    ConversionTime::MS_25,
+    ConversionTime::MS_50,
+    ConversionTime::MS_100,
+    ConversionTime::MS_200,
+    ConversionTime::MS_400,
+    ConversionTime::MS_800,
+  };
+  const uint32_t expectedUs[] = {
+    600U, 1000U, 1800U, 3400U, 6500U, 12700U,
+    25000U, 50000U, 100000U, 200000U, 400000U, 800000U,
+  };
+  const uint32_t expectedMs[] = {
+    1U, 1U, 2U, 4U, 7U, 13U, 25U, 50U, 100U, 200U, 400U, 800U,
+  };
+  const uint8_t expectedBits[] = {
+    9U, 10U, 11U, 12U, 13U, 14U, 15U, 16U, 17U, 18U, 19U, 20U,
+  };
+
+  for (size_t i = 0; i < 12; ++i) {
+    TEST_ASSERT_TRUE(dev.setConversionTime(times[i]).ok());
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(times[i]),
+                            static_cast<uint8_t>(dev.getConversionTime()));
+    TEST_ASSERT_EQUAL_UINT32(expectedUs[i], dev.getConversionTimeUs());
+    TEST_ASSERT_EQUAL_UINT32(expectedMs[i], dev.getConversionTimeMs());
+    TEST_ASSERT_EQUAL_UINT8(expectedBits[i], dev.getEffectiveBits());
+    TEST_ASSERT_EQUAL_UINT8(expectedBits[i], dev.getEffectiveBits(times[i]));
+  }
+
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ConversionTime::MS_800),
+                          static_cast<uint8_t>(dev.getConversionTime()));
+  Status st = dev.setConversionTime(static_cast<ConversionTime>(12));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+  st = dev.setConversionTime(static_cast<ConversionTime>(255));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ConversionTime::MS_800),
+                          static_cast<uint8_t>(dev.getConversionTime()));
+}
+
+void test_range_vectors_and_invalid_values() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  const Range validRanges[] = {
+    Range::RANGE_0,
+    Range::RANGE_1,
+    Range::RANGE_2,
+    Range::RANGE_3,
+    Range::RANGE_4,
+    Range::RANGE_5,
+    Range::RANGE_6,
+    Range::RANGE_7,
+    Range::RANGE_8,
+    Range::AUTO,
+  };
+
+  for (Range range : validRanges) {
+    TEST_ASSERT_TRUE(dev.setRange(range).ok());
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(range), static_cast<uint8_t>(dev.getRange()));
+    TEST_ASSERT_TRUE(dev.getCurrentFullScaleLux() > 0.0f);
+    TEST_ASSERT_TRUE(dev.getCurrentResolutionLux() > 0.0f);
+  }
+
+  const uint8_t invalidRanges[] = {9U, 10U, 11U, 13U, 255U};
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Range::AUTO), static_cast<uint8_t>(dev.getRange()));
+  for (uint8_t value : invalidRanges) {
+    Status st = dev.setRange(static_cast<Range>(value));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM),
+                            static_cast<uint8_t>(st.code));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Range::AUTO), static_cast<uint8_t>(dev.getRange()));
+  }
+
+  Status st = dev.configureMeasurement(static_cast<Range>(9),
+                                       ConversionTime::MS_100,
+                                       Mode::CONTINUOUS);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+  st = dev.configureMeasurement(Range::RANGE_2,
+                                static_cast<ConversionTime>(12),
+                                Mode::CONTINUOUS);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Range::AUTO), static_cast<uint8_t>(dev.getRange()));
+}
+
 void test_configuration_and_interrupt_convenience_helpers() {
   FakeBus bus;
   OPT4001::OPT4001 dev;
@@ -1843,8 +2270,64 @@ void test_lux_to_threshold_rejects_non_finite_inputs() {
   st = dev.luxToThreshold(std::numeric_limits<float>::infinity(), threshold);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM), static_cast<uint8_t>(st.code));
 
+  st = dev.luxToThreshold(-0.001f, threshold);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM), static_cast<uint8_t>(st.code));
+
+  const Threshold maxThreshold{15, 0x0FFF};
+  st = dev.luxToThreshold(dev.thresholdToLux(maxThreshold) + 1000.0f, threshold);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM), static_cast<uint8_t>(st.code));
+
   st = dev.setThresholdsLux(1.0f, std::numeric_limits<float>::infinity());
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM), static_cast<uint8_t>(st.code));
+}
+
+void test_lux_to_threshold_rounding_and_out_of_range_policy() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  Threshold threshold;
+  Status st = dev.luxToThreshold(10.0f, threshold);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT8(0u, threshold.exponent);
+  TEST_ASSERT_EQUAL_HEX16(0x0059, threshold.result);
+  TEST_ASSERT_FLOAT_WITHIN(0.001f, 9.968f, dev.thresholdToLux(threshold));
+
+  st = dev.luxToThreshold(100.0f, threshold);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT8(0u, threshold.exponent);
+  TEST_ASSERT_EQUAL_HEX16(0x037C, threshold.result);
+  TEST_ASSERT_FLOAT_WITHIN(0.001f, 99.904f, dev.thresholdToLux(threshold));
+
+  TEST_ASSERT_TRUE(dev.setPackageVariant(PackageVariant::PICOSTAR).ok());
+  st = dev.luxToThreshold(10.0f, threshold);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT8(0u, threshold.exponent);
+  TEST_ASSERT_EQUAL_HEX16(0x007D, threshold.result);
+  TEST_ASSERT_FLOAT_WITHIN(0.001f, 10.0f, dev.thresholdToLux(threshold));
+
+  st = dev.luxToThreshold(100.0f, threshold);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT8(0u, threshold.exponent);
+  TEST_ASSERT_EQUAL_HEX16(0x04E2, threshold.result);
+  TEST_ASSERT_FLOAT_WITHIN(0.001f, 100.0f, dev.thresholdToLux(threshold));
+
+  TEST_ASSERT_TRUE(dev.setPackageVariant(PackageVariant::SOT_5X3).ok());
+  const Threshold maxThreshold{15, cmd::THRESHOLD_RESULT_MAX};
+  const float maxLux = dev.thresholdToLux(maxThreshold);
+  st = dev.luxToThreshold(maxLux - 16.0f, threshold);
+  TEST_ASSERT_TRUE(st.ok());
+  uint64_t adcCodes = 0;
+  TEST_ASSERT_TRUE(dev.thresholdToAdcCodes(threshold, adcCodes).ok());
+  TEST_ASSERT_TRUE(adcCodes <= 34351349760ULL);
+
+  st = dev.luxToThreshold(maxLux + 16.0f, threshold);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+
+  st = dev.luxToThreshold(-0.001f, threshold);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
 }
 
 void test_soft_reset_moves_driver_to_uninit() {
@@ -1924,6 +2407,7 @@ int main() {
   RUN_TEST(test_begin_rejects_missing_callbacks);
   RUN_TEST(test_begin_rejects_one_shot_startup_mode);
   RUN_TEST(test_begin_rejects_invalid_package_address_combo);
+  RUN_TEST(test_package_address_matrix);
   RUN_TEST(test_invalid_begin_after_success_resets_default_runtime);
   RUN_TEST(test_begin_normalizes_offline_threshold_on_stored_copy);
   RUN_TEST(test_begin_success_sets_ready_without_health_counts);
@@ -1942,6 +2426,11 @@ int main() {
   RUN_TEST(test_start_conversion_wraparound_reaches_ready);
   RUN_TEST(test_read_blocking_times_out_with_stalled_clock);
   RUN_TEST(test_read_sample_decodes_lux_and_crc);
+  RUN_TEST(test_raw_lux_vectors_use_64_bit_intermediates);
+  RUN_TEST(test_raw_lux_rejects_invalid_result_fields_without_shift_ub);
+  RUN_TEST(test_decode_rejects_invalid_result_exponent_without_cache_update);
+  RUN_TEST(test_crc_vectors_use_datasheet_oracle);
+  RUN_TEST(test_crc_mismatch_preserves_received_crc_and_decode_fields);
   RUN_TEST(test_zero_timestamp_sample_age_uses_valid_flag);
   RUN_TEST(test_crc_mismatch_returns_error_when_enabled);
   RUN_TEST(test_crc_mismatch_allowed_when_verification_disabled);
@@ -1950,6 +2439,8 @@ int main() {
   RUN_TEST(test_read_burst_nonburst_path_decodes_fifo);
   RUN_TEST(test_set_thresholds_lux_updates_threshold_registers);
   RUN_TEST(test_threshold_lux_helpers_roundtrip);
+  RUN_TEST(test_threshold_adc_vectors_use_64_bit_and_legacy_saturates);
+  RUN_TEST(test_threshold_interrupt_ordering_uses_64_bit_codes);
   RUN_TEST(test_read_flags_parses_and_clears_ready_flag);
   RUN_TEST(test_clear_conversion_ready_flag_preserves_window_flags);
   RUN_TEST(test_clear_flags_uses_clear_on_read_semantics);
@@ -1976,6 +2467,8 @@ int main() {
   RUN_TEST(test_offline_blocks_normal_operation_without_bus_io);
   RUN_TEST(test_failed_recover_from_offline_reasserts_latch_after_apply_failure);
   RUN_TEST(test_scale_and_counter_helpers);
+  RUN_TEST(test_all_conversion_time_vectors_and_invalid_values);
+  RUN_TEST(test_range_vectors_and_invalid_values);
   RUN_TEST(test_configuration_and_interrupt_convenience_helpers);
   RUN_TEST(test_cached_configuration_rolls_back_after_i2c_failure);
   RUN_TEST(test_raw_register_access_rejects_invalid_bounds_without_bus_io);
@@ -1985,6 +2478,7 @@ int main() {
   RUN_TEST(test_raw_register_access_offline_matches_normal_operation_without_bus_io);
   RUN_TEST(test_probe_without_begin_uses_raw_transport_when_cached_config_present);
   RUN_TEST(test_lux_to_threshold_rejects_non_finite_inputs);
+  RUN_TEST(test_lux_to_threshold_rounding_and_out_of_range_policy);
   RUN_TEST(test_soft_reset_moves_driver_to_uninit);
   RUN_TEST(test_reset_and_reapply_restores_ready_and_config);
   RUN_TEST(test_raw_transport_rejects_invalid_buffers);

@@ -176,6 +176,40 @@ Remaining limitation:
 - Hardware timing, INT pulse behavior, and pure ESP-IDF runtime validation remain
   pending for Prompt 9.
 
+## Prompt 6 Status Update
+
+M1/M2/M8 numeric-vector status: complete for source-level numeric conversion
+safety and independent native vectors.
+
+Evidence:
+
+- Raw result conversions now validate exponent `0..8` and 20-bit mantissa
+  bounds before shifting, use `uint64_t` intermediates, and return
+  `INVALID_PARAM` through status-returning helpers. Legacy float helpers return
+  quiet NaN for invalid raw input instead of invoking undefined shifts.
+- Sample decode rejects impossible result exponents before caching scaled lux.
+- Threshold ADC-code conversion now has a lossless `uint64_t` overload; the
+  legacy `uint32_t` helper saturates at `UINT32_MAX` instead of wrapping.
+- Threshold lux packing rejects negative, non-finite, and out-of-range lux
+  values and uses nearest-code rounding before register quantization.
+- Threshold interrupt ordering uses 64-bit ADC-code comparison, so high-exponent
+  reversed windows are rejected.
+- Native tests include independent lux/result vectors for PicoStar and SOT-5X3,
+  invalid raw exponent/mantissa vectors, invalid decoded exponent/no-cache
+  behavior, 64-bit threshold vectors, high-exponent threshold ordering,
+  datasheet-side CRC vectors that do not call `_computeCrcNibble()`, every
+  conversion-time table entry, full package/address matrix checks, and valid /
+  invalid range/config vectors.
+- README and public Doxygen document lux units, package scaling, result and
+  threshold bounds, threshold rounding/range policy, CRC mismatch behavior,
+  conversion-time table, package/address matrix, and VDD/I/O voltage warning.
+
+Remaining limitation:
+
+- FIFO per-slot CRC/ordering visibility, INT behavior, and partial-state
+  consistency remain assigned to Prompt 7. Hardware and pure ESP-IDF target
+  validation remain assigned to Prompt 9.
+
 ## Prompt 2 Scope
 
 Prompt 2 should fix H1 only: make `Version.h` or an equivalent version source reproducible for clean manual/native/CMake and ESP-IDF consumers. It should not address lifecycle, probe, sample readiness, numeric, FIFO, docs honesty, metadata, or hardware validation unless directly required by the reproducibility fix.

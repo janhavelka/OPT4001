@@ -37,6 +37,9 @@ using NowMsFn = uint32_t (*)(void* user);
 using YieldFn = void (*)(void* user);
 
 /// Package variant. This controls lux scaling and address validation.
+/// Electrical note: power OPT4001 from the datasheet VDD range (1.6 V to
+/// 3.6 V). Digital I/O pins are 5.5 V tolerant, but the device is not a
+/// 5 V powered part.
 enum class PackageVariant : uint8_t {
   PICOSTAR = 0,  ///< 4-pin PicoStar package, fixed address 0x45.
   SOT_5X3  = 1   ///< 8-pin SOT-5X3 package, address-selectable, exposes INT.
@@ -116,8 +119,11 @@ enum class IntConfig : uint8_t {
 
 /// Threshold register representation.
 struct Threshold {
-  uint8_t exponent = 0;  ///< Register bits [15:12].
-  uint16_t result = 0;   ///< Register bits [11:0].
+  /// Register bits [15:12], valid range 0..15.
+  uint8_t exponent = 0;
+  /// Register bits [11:0], valid range 0..0x0FFF.
+  /// Exact linear threshold ADC codes are `result << (8 + exponent)`.
+  uint16_t result = 0;
 
   constexpr Threshold() = default;
   constexpr Threshold(uint8_t exponentIn, uint16_t resultIn)

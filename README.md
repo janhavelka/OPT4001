@@ -270,6 +270,62 @@ void loop() {
 - Raw register access is bounded to documented public registers; blocks that span
   reserved gaps are rejected before touching the bus.
 
+### Numeric And Electrical Contract
+
+Package selection controls both lux scaling and valid I2C addresses:
+
+| Package variant | Valid addresses | Lux LSB | INT |
+| --- | --- | --- | --- |
+| PicoStar | `0x45` only | `312.5e-6 lux/code` | Not available |
+| SOT-5X3 | `0x44`, `0x45`, `0x46` | `437.5e-6 lux/code` | Optional application-owned GPIO |
+
+Power the device from the datasheet VDD range, 1.6 V to 3.6 V. The digital I/O
+pins are 5.5 V tolerant, but that tolerance is not permission to power the
+device from a 5 V rail.
+
+Result samples use a 4-bit exponent and 20-bit mantissa from `RESULT` /
+`RESULT_LSB_CRC`. Public raw conversion helpers accept only exponent `0..8` and
+mantissa `0x00000..0xFFFFF`; invalid fields return `INVALID_PARAM` in the
+status-returning helpers. Compatibility float helpers return quiet NaN for
+invalid raw or threshold inputs. Valid result ADC codes are computed with
+64-bit intermediates as `mantissa << exponent` before scaling to lux.
+
+Threshold registers use 4-bit exponent and 12-bit result fields. The exact
+linear threshold code is `result << (8 + exponent)` and can exceed `uint32_t`,
+so `thresholdToAdcCodes(threshold, uint64_t&)` is the lossless API. The legacy
+`thresholdToAdcCodes(threshold)` helper saturates at `UINT32_MAX` instead of
+wrapping. `luxToThreshold()` rounds the requested lux to the nearest ADC code,
+then quantizes to the register format; it rejects negative, non-finite, and
+out-of-range lux values. Packed thresholds are therefore lower-resolution than
+raw sample results at small exponents.
+
+CRC verification uses the datasheet XOR equations over `EXPONENT`, 20-bit
+`MANTISSA`, and 4-bit `COUNTER`. When verification is enabled, a mismatch
+returns `CRC_ERROR` while preserving decoded sample fields and the received CRC
+nibble. When verification is disabled, the sample status is `OK` and
+`Sample::crcValid` is false.
+
+| Conversion setting | Time us | Ceil ms | Effective bits |
+| --- | ---: | ---: | ---: |
+| `US_600` | 600 | 1 | 9 |
+| `MS_1` | 1000 | 1 | 10 |
+| `MS_1_8` | 1800 | 2 | 11 |
+| `MS_3_4` | 3400 | 4 | 12 |
+| `MS_6_5` | 6500 | 7 | 13 |
+| `MS_12_7` | 12700 | 13 | 14 |
+| `MS_25` | 25000 | 25 | 15 |
+| `MS_50` | 50000 | 50 | 16 |
+| `MS_100` | 100000 | 100 | 17 |
+| `MS_200` | 200000 | 200 | 18 |
+| `MS_400` | 400000 | 400 | 19 |
+| `MS_800` | 800000 | 800 | 20 |
+
+Prompt 6 numeric/vector verification uses:
+
+```bash
+python -m platformio test -e native
+```
+
 ### Sample Freshness
 
 | Term / API | Meaning |
@@ -363,6 +419,7 @@ driver/bus state errors to `I2C_BUS` while preserving the raw `esp_err_t` in
 ### Decode And Scaling Helpers
 
 - `decodeDeviceId()`, `decodeConfiguration()`, `decodeIntConfiguration()`
+- `adcCodesToLux()`, `rawToAdcCodes()`, `rawToLux()`
 - `thresholdToLux()`, `thresholdToAdcCodes()`
 - `getRangeFullScaleLux()`, `getCurrentFullScaleLux()`, `getSampleFullScaleLux()`
 - `getEffectiveBits()`

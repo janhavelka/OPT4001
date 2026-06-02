@@ -24,15 +24,21 @@ enum class DriverState : uint8_t {
 struct Sample {
   uint16_t resultReg = 0;
   uint16_t resultLsbCrcReg = 0;
+  /// Result exponent from `RESULT[15:12]`. Valid decoded samples use 0..8.
   uint8_t exponent = 0;
+  /// 20-bit result mantissa assembled from `RESULT[11:0]` and `RESULT_LSB[15:8]`.
   uint32_t mantissa = 0;
+  /// Linear ADC codes (`mantissa << exponent`) after bounds validation.
   uint32_t adcCodes = 0;
   /// 4-bit hardware sample counter; wraps modulo 16. A changed counter is
   /// freshness evidence, while a duplicate counter means duplicate data or an
   /// unobserved full wrap.
   uint8_t counter = 0;
+  /// Received 4-bit CRC nibble from `RESULT_LSB_CRC[3:0]`.
   uint8_t crc = 0;
+  /// True when the received CRC matches the datasheet XOR equations.
   bool crcValid = false;
+  /// Lux scaled by package variant from validated ADC codes.
   float lux = 0.0f;
 };
 
@@ -362,8 +368,20 @@ public:
   void decodeDeviceId(uint16_t raw, DeviceIdInfo& out) const;
   void decodeConfiguration(uint16_t raw, ConfigurationInfo& out) const;
   void decodeIntConfiguration(uint16_t raw, IntConfigurationInfo& out) const;
+  /// Convert linear ADC codes to lux using the configured package scale.
+  /// PicoStar uses 312.5e-6 lux/code; SOT-5X3 uses 437.5e-6 lux/code.
   float adcCodesToLux(uint32_t adcCodes) const;
+  /// Decode result exponent/mantissa to linear ADC codes.
+  /// Valid result exponents are 0..8 and mantissa is 20 bits
+  /// (`0x00000..0xFFFFF`). Invalid inputs return `INVALID_PARAM`.
+  Status rawToAdcCodes(uint8_t exponent, uint32_t mantissa, uint64_t& adcCodes) const;
+  /// Status-returning raw result-to-lux conversion. On invalid input, writes
+  /// quiet NaN to `lux` and returns `INVALID_PARAM`.
+  Status rawToLux(uint8_t exponent, uint32_t mantissa, float& lux) const;
+  /// Compatibility raw result-to-lux helper. Returns NaN for invalid input.
   float rawToLux(uint8_t exponent, uint32_t mantissa) const;
+  /// Convert a threshold register to lux. Uses 64-bit ADC-code intermediates and
+  /// returns NaN for invalid thresholds.
   float thresholdToLux(const Threshold& threshold) const;
   float getLuxLsb() const;
   float getRangeFullScaleLux(Range range) const;
@@ -378,7 +396,13 @@ public:
   uint32_t getConversionTimeMs() const;
   uint32_t getOneShotBudgetUs(Mode mode) const;
   uint32_t getOneShotBudgetMs(Mode mode) const;
+  /// Pack a lux threshold using nearest-code rounding before register
+  /// quantization. Rejects negative, non-finite, and out-of-range lux values.
   Status luxToThreshold(float lux, Threshold& out) const;
+  /// Decode a threshold register to exact linear ADC codes in a 64-bit container.
+  /// Formula: `result << (8 + exponent)`.
+  Status thresholdToAdcCodes(const Threshold& threshold, uint64_t& adcCodes) const;
+  /// Compatibility threshold decode. Saturates at UINT32_MAX instead of wrapping.
   uint32_t thresholdToAdcCodes(const Threshold& threshold) const;
   uint8_t sampleCounterDelta(uint8_t previousCounter, uint8_t currentCounter) const;
 

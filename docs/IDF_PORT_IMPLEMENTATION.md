@@ -16,3 +16,9 @@ The command contract is enforced by `tools/check_idf_example_contract.py`. The
 version-header contract is enforced by `tools/check_version_header_contract.py`.
 When adding a CLI command to the Arduino bring-up example, add the matching
 native IDF command or explicitly document why parity is not applicable.
+
+Prompt 6 local validation on 2026-06-02 passed the static IDF contract check,
+but pure ESP-IDF target builds were not run because `idf.py` was not available
+on `PATH` in the validation shell. The attempted commands were
+`idf.py --version`, `idf.py -C examples/esp_idf/basic set-target esp32s3 build`,
+and `idf.py -C examples/esp_idf/basic set-target esp32s2 build`.

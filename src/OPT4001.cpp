@@ -5,6 +5,7 @@
 
 #include <climits>
 #include <cmath>
+#include <limits>
 
 namespace OPT4001 {
 namespace {
@@ -90,6 +91,24 @@ bool isValidPublicRegisterBlock(uint8_t startReg, size_t len) {
     }
   }
   return true;
+}
+
+static constexpr uint8_t RESULT_EXPONENT_MAX = 8U;
+static constexpr uint32_t RESULT_MANTISSA_MAX = 0x000FFFFFU;
+static constexpr uint8_t THRESHOLD_SHIFT_BASE = 8U;
+static constexpr uint64_t THRESHOLD_ADC_CODES_MAX =
+    static_cast<uint64_t>(cmd::THRESHOLD_RESULT_MAX)
+    << (THRESHOLD_SHIFT_BASE + cmd::THRESHOLD_EXPONENT_MAX);
+// Allows thresholdToLux(max) float round-trip while still rejecting clearly high inputs.
+static constexpr double THRESHOLD_ADC_FLOAT_GUARD_CODES = 4096.0;
+
+float invalidLuxValue() {
+  return std::numeric_limits<float>::quiet_NaN();
+}
+
+float adcCodesToLux64(uint64_t adcCodes, float luxLsb) {
+  return static_cast<float>(static_cast<double>(adcCodes) *
+                            static_cast<double>(luxLsb));
 }
 
 uint32_t ceilUsToMs(uint32_t microseconds) {
@@ -1163,7 +1182,17 @@ Status OPT4001::enableThresholdInterrupt(const Threshold& low, const Threshold& 
   if (!_thresholdValid(low) || !_thresholdValid(high)) {
     return Status::Error(Err::INVALID_PARAM, "Invalid threshold");
   }
-  if (thresholdToAdcCodes(low) > thresholdToAdcCodes(high)) {
+  uint64_t lowCodes = 0;
+  uint64_t highCodes = 0;
+  Status st = thresholdToAdcCodes(low, lowCodes);
+  if (!st.ok()) {
+    return st;
+  }
+  st = thresholdToAdcCodes(high, highCodes);
+  if (!st.ok()) {
+    return st;
+  }
+  if (lowCodes > highCodes) {
     return Status::Error(Err::INVALID_PARAM, "Low threshold must be <= high threshold");
   }
 
@@ -1172,7 +1201,7 @@ Status OPT4001::enableThresholdInterrupt(const Threshold& low, const Threshold& 
   _config.highThreshold = high;
   _config.intDirection = IntDirection::PIN_OUTPUT;
   _config.intConfig = IntConfig::THRESHOLD;
-  Status st = _applyConfig();
+  st = _applyConfig();
   if (!st.ok()) {
     _config = oldConfig;
   }
@@ -1591,15 +1620,53 @@ void OPT4001::decodeIntConfiguration(uint16_t raw, IntConfigurationInfo& out) co
 }
 
 float OPT4001::adcCodesToLux(uint32_t adcCodes) const {
-  return static_cast<float>(adcCodes) * getLuxLsb();
+  return adcCodesToLux64(adcCodes, getLuxLsb());
+}
+
+Status OPT4001::rawToAdcCodes(uint8_t exponent, uint32_t mantissa,
+                              uint64_t& adcCodes) const {
+  adcCodes = 0;
+  if (exponent > RESULT_EXPONENT_MAX) {
+    return Status::Error(Err::INVALID_PARAM, "Result exponent out of range", exponent);
+  }
+  if (mantissa > RESULT_MANTISSA_MAX) {
+    const int32_t detail =
+        (mantissa > static_cast<uint32_t>(INT32_MAX))
+            ? INT32_MAX
+            : static_cast<int32_t>(mantissa);
+    return Status::Error(Err::INVALID_PARAM, "Result mantissa exceeds 20 bits",
+                         detail);
+  }
+
+  adcCodes = static_cast<uint64_t>(mantissa) << exponent;
+  return Status::Ok();
+}
+
+Status OPT4001::rawToLux(uint8_t exponent, uint32_t mantissa, float& lux) const {
+  uint64_t adcCodes = 0;
+  Status st = rawToAdcCodes(exponent, mantissa, adcCodes);
+  if (!st.ok()) {
+    lux = invalidLuxValue();
+    return st;
+  }
+
+  lux = adcCodesToLux64(adcCodes, getLuxLsb());
+  return Status::Ok();
 }
 
 float OPT4001::rawToLux(uint8_t exponent, uint32_t mantissa) const {
-  return adcCodesToLux(static_cast<uint32_t>(mantissa << exponent));
+  float lux = invalidLuxValue();
+  (void)rawToLux(exponent, mantissa, lux);
+  return lux;
 }
 
 float OPT4001::thresholdToLux(const Threshold& threshold) const {
-  return adcCodesToLux(thresholdToAdcCodes(threshold));
+  uint64_t adcCodes = 0;
+  Status st = thresholdToAdcCodes(threshold, adcCodes);
+  if (!st.ok()) {
+    return invalidLuxValue();
+  }
+  return adcCodesToLux64(adcCodes, getLuxLsb());
 }
 
 float OPT4001::getLuxLsb() const {
@@ -1658,8 +1725,8 @@ float OPT4001::getRangeResolutionLux(Range range, ConversionTime time) const {
   }
 
   const uint8_t paddedBits = static_cast<uint8_t>(20U - effectiveBits);
-  const uint32_t adcStep = 1UL << (paddedBits + exponent);
-  return adcCodesToLux(adcStep);
+  const uint64_t adcStep = 1ULL << (paddedBits + exponent);
+  return adcCodesToLux64(adcStep, getLuxLsb());
 }
 
 float OPT4001::getCurrentResolutionLux() const {
@@ -1704,17 +1771,22 @@ Status OPT4001::luxToThreshold(float lux, Threshold& out) const {
   }
 
   const float lsb = getLuxLsb();
-  uint32_t adcCodes = 0;
+  uint64_t adcCodes = 0;
   if (lsb > 0.0f) {
-    const double scaled = (static_cast<double>(lux) / static_cast<double>(lsb)) + 0.5;
-    adcCodes = (scaled >= static_cast<double>(UINT32_MAX))
-                   ? UINT32_MAX
-                   : static_cast<uint32_t>(scaled);
+    const double scaled = static_cast<double>(lux) / static_cast<double>(lsb);
+    if (scaled > static_cast<double>(THRESHOLD_ADC_CODES_MAX) +
+                     THRESHOLD_ADC_FLOAT_GUARD_CODES) {
+      return Status::Error(Err::INVALID_PARAM, "Lux threshold exceeds register range");
+    }
+    adcCodes = static_cast<uint64_t>(scaled + 0.5);
+    if (adcCodes > THRESHOLD_ADC_CODES_MAX) {
+      adcCodes = THRESHOLD_ADC_CODES_MAX;
+    }
   }
 
   uint8_t exponent = 0;
   while (exponent < cmd::THRESHOLD_EXPONENT_MAX) {
-    const uint32_t result = adcCodes >> (8U + exponent);
+    const uint64_t result = adcCodes >> (THRESHOLD_SHIFT_BASE + exponent);
     if (result <= cmd::THRESHOLD_RESULT_MAX) {
       out.exponent = exponent;
       out.result = static_cast<uint16_t>(result);
@@ -1728,8 +1800,25 @@ Status OPT4001::luxToThreshold(float lux, Threshold& out) const {
   return Status::Ok();
 }
 
+Status OPT4001::thresholdToAdcCodes(const Threshold& threshold,
+                                    uint64_t& adcCodes) const {
+  adcCodes = 0;
+  if (!_thresholdValid(threshold)) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid threshold");
+  }
+
+  adcCodes = static_cast<uint64_t>(threshold.result) <<
+             (THRESHOLD_SHIFT_BASE + threshold.exponent);
+  return Status::Ok();
+}
+
 uint32_t OPT4001::thresholdToAdcCodes(const Threshold& threshold) const {
-  return static_cast<uint32_t>(threshold.result) << (8U + threshold.exponent);
+  uint64_t adcCodes = 0;
+  Status st = thresholdToAdcCodes(threshold, adcCodes);
+  if (!st.ok() || adcCodes > static_cast<uint64_t>(UINT32_MAX)) {
+    return UINT32_MAX;
+  }
+  return static_cast<uint32_t>(adcCodes);
 }
 
 uint8_t OPT4001::sampleCounterDelta(uint8_t previousCounter, uint8_t currentCounter) const {
@@ -1838,11 +1927,21 @@ Status OPT4001::_decodeSampleRegisters(uint16_t resultReg, uint16_t lsbCrcReg,
   out.exponent = static_cast<uint8_t>((resultReg & cmd::MASK_EXPONENT) >> cmd::BIT_EXPONENT);
   out.mantissa = (static_cast<uint32_t>(resultReg & cmd::MASK_RESULT_MSB) << 8) |
                  static_cast<uint32_t>((lsbCrcReg & cmd::MASK_RESULT_LSB) >> cmd::BIT_RESULT_LSB);
-  out.adcCodes = static_cast<uint32_t>(out.mantissa << out.exponent);
   out.counter = static_cast<uint8_t>((lsbCrcReg & cmd::MASK_COUNTER) >> cmd::BIT_COUNTER);
   out.crc = static_cast<uint8_t>(lsbCrcReg & cmd::MASK_CRC);
   out.crcValid = (_computeCrcNibble(out.exponent, out.mantissa, out.counter) == out.crc);
-  out.lux = adcCodesToLux(out.adcCodes);
+
+  uint64_t adcCodes = 0;
+  Status numericStatus = rawToAdcCodes(out.exponent, out.mantissa, adcCodes);
+  if (!numericStatus.ok() || adcCodes > static_cast<uint64_t>(UINT32_MAX)) {
+    out.adcCodes = 0;
+    out.lux = invalidLuxValue();
+    return numericStatus.ok()
+               ? Status::Error(Err::INVALID_PARAM, "Result ADC codes out of range")
+               : numericStatus;
+  }
+  out.adcCodes = static_cast<uint32_t>(adcCodes);
+  out.lux = adcCodesToLux64(adcCodes, getLuxLsb());
 
   if (_config.verifyCrc && !out.crcValid) {
     return Status::Error(Err::CRC_ERROR, "Sample CRC mismatch", out.crc);
