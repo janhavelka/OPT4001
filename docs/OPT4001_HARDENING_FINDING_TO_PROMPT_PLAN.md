@@ -7,6 +7,12 @@ Source audit report: `docs/OPT4001_INDUSTRY_READINESS_EXPLORATION_REPORT.md`
 Prompt/status scope: baseline plan plus status through Prompt 8; Prompt 9 final
 report and validation status are added at completion.
 
+Historical status: this file is retained as a planning and traceability record.
+Current release readiness, validation limits, and tag guidance are maintained in
+`docs/OPT4001_HARDENING_FINAL_REPORT.md`,
+`docs/OPT4001_RELEASE_CHECKLIST.md`, and
+`docs/OPT4001_HARDWARE_VALIDATION_PROCEDURE.md`.
+
 Prompt 1 implemented no functional fixes. The only intended changes are this planning document and an `AGENTS.md` rules update for future hardening prompts.
 
 ## Baseline Identity

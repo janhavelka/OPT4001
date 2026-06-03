@@ -1,6 +1,6 @@
 # OPT4001 Release Checklist
 
-Date: 2026-06-02
+Date: 2026-06-03
 
 Branch: `hardening/opt4001-industry-readiness`
 
@@ -30,7 +30,7 @@ OPT4001 v1.0.0 is a production-oriented, industry-readiness-hardened, framework-
 | --- | --- |
 | `git status --short` | Clean before release-prep edits. |
 | `git branch --show-current` | `hardening/opt4001-industry-readiness`. |
-| `git log --oneline -10` | Headed by `3bb77a4 test: capture OPT4001 hardware validation evidence`. |
+| `git log --oneline -10` | Release-prep validation was run on the hardening branch; verify completed branch/PR CI on the final merge commit before tagging. |
 | `python tools/check_core_timing_guard.py` | Passed. |
 | `python tools/check_cli_contract.py` | Passed. |
 | `python tools/check_idf_example_contract.py` | Passed. |
@@ -38,6 +38,7 @@ OPT4001 v1.0.0 is a production-oriented, industry-readiness-hardened, framework-
 | `python tools/check_readiness_claims.py` | Passed. |
 | `python tools/check_public_api_docs.py` | Passed. |
 | `python scripts/generate_version.py check` | Passed; `Version.h` up to date. |
+| `doxygen Doxyfile` | Passed without warnings after narrowing public documentation inputs. |
 | `python -m platformio test -e native` | Passed; 96/96 tests in `00:00:00.886`. |
 | `python -m platformio run -e esp32s3dev` | Passed; `esp32s3dev SUCCESS` in `00:00:04.803`. |
 | `python -m platformio run -e esp32s2dev` | Passed; `esp32s2dev SUCCESS` in `00:00:04.385`. |
@@ -77,6 +78,7 @@ Before merging or tagging, verify a completed CI run for the final branch/PR:
 | Readiness wording | Conservative; current evidence and pending validation are separated. |
 | Public API docs guard | Passed locally. |
 | Readiness claims guard | Passed locally. |
+| Doxygen generation | Passed locally without warnings. |
 | Changelog | Finalized with Added, Changed, Fixed, Validation, and Known Limitations. |
 
 ## Hardware Validation Status
@@ -102,7 +104,7 @@ merge should wait for a completed branch/PR CI run with the checklist above.
 
 ## Tag Suggestions
 
-Do not tag from this branch during this prompt.
+Do not tag from an unmerged branch.
 
 After merge and completed CI on the release commit:
 

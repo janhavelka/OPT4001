@@ -4,7 +4,7 @@
 
 Status: not run; hardware validation remains pending.
 
-Reason: Follow-up Prompt 2 requires a connected OPT4001 board and operator
+Reason: hardware validation requires a connected OPT4001 board and operator
 metadata before any device, optical, INT, FIFO, address, or fault validation is
 run. No board/package/operator/serial metadata was provided in this session, so
 no hardware commands were executed and no results are claimed.

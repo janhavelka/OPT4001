@@ -20,9 +20,10 @@ pattern used by the other device libraries in this workspace:
 ## Current Readiness
 
 Classification: source-level hardened and diagnostic-build tested. The core is
-designed for production use, but this repository does not currently claim full
-hardware, optical, INT, FIFO timing/order, address-pin, fault/recovery, or pure
-ESP-IDF target validation.
+designed for production integration, but this repository does not currently
+claim real-device hardware validation, optical accuracy validation,
+INT/FIFO/address-pin/fault-recovery validation, or completed pure ESP-IDF
+target-build evidence.
 
 ### Validation Evidence
 
@@ -41,7 +42,7 @@ ESP-IDF target validation.
 
 | Area | Current status |
 | --- | --- |
-| Hardware bring-up on real OPT4001 | Pending Prompt 9 validation log. |
+| Hardware bring-up on real OPT4001 | Pending hardware-validation log with board, package, wiring, firmware, and measurement evidence. |
 | Optical accuracy / cover-glass correction | Pending application-specific validation. |
 | SOT-5X3 address-pin combinations | Pending hardware matrix. |
 | INT threshold, every-conversion, and FIFO-full pulses | Pending logic-analyzer or board-captured evidence. |
@@ -103,7 +104,14 @@ Add to `platformio.ini`:
 
 ```ini
 lib_deps =
-  OPT4001
+  https://github.com/janhavelka/OPT4001.git#v1.0.0
+```
+
+After registry publication, the equivalent registry form is:
+
+```ini
+lib_deps =
+  OPT4001@^1.0.0
 ```
 
 ### Manual
@@ -115,14 +123,20 @@ pre-generation step.
 
 ### ESP-IDF
 
-The repository root is an ESP-IDF component. Add it through `EXTRA_COMPONENT_DIRS`
-or component manager metadata, then provide `Config::i2cWrite`,
-`Config::i2cWriteRead`, `Config::nowMs`, optional `Config::cooperativeYield`,
-and optional `Config::gpioRead` from your application-owned adapter. The
-`examples/esp_idf/basic` project is a diagnostic bring-up CLI with comparable
-command coverage to the Arduino example. It owns its example I2C bus, uses
-ESP-IDF-native GPIO, timer, VFS console, and new I2C master-driver glue, and
-does not demonstrate production shared-bus locking.
+The repository root is an ESP-IDF component. A local project can add it through
+`EXTRA_COMPONENT_DIRS`:
+
+```cmake
+set(EXTRA_COMPONENT_DIRS
+    "${CMAKE_CURRENT_LIST_DIR}/../OPT4001")
+```
+
+Then provide `Config::i2cWrite`, `Config::i2cWriteRead`, `Config::nowMs`,
+optional `Config::cooperativeYield`, and optional `Config::gpioRead` from your
+application-owned adapter. The `examples/esp_idf/basic` project is a diagnostic
+bring-up CLI with comparable command coverage to the Arduino example. It owns
+its example I2C bus, uses ESP-IDF-native GPIO, timer, VFS console, and new I2C
+master-driver glue, and does not demonstrate production shared-bus locking.
 
 ### Version Header
 
@@ -399,7 +413,7 @@ nibble. When verification is disabled, the sample status is `OK` and
 | `MS_400` | 400000 | 400 | 19 |
 | `MS_800` | 800000 | 800 | 20 |
 
-Prompt 6 numeric/vector verification uses:
+Numeric and CRC vector verification uses:
 
 ```bash
 python -m platformio test -e native
@@ -577,7 +591,9 @@ driver/bus state errors to `I2C_BUS` while preserving the raw `esp_err_t` in
 - `docs/AN_picostar_package.md` - PicoStar-specific package differences
 - `docs/IDF_PORT.md` - ESP-IDF portability guidance
 - `docs/IDF_PORT_IMPLEMENTATION.md` - ESP-IDF implementation notes and validation limitations
-- `docs/OPT4001_HARDWARE_VALIDATION_PROCEDURE.md` - procedure for Prompt 9 hardware evidence capture
+- `docs/README.md` - documentation index and evidence map
+- `docs/OPT4001_RELEASE_CHECKLIST.md` - merge and release checklist
+- `docs/OPT4001_HARDWARE_VALIDATION_PROCEDURE.md` - hardware evidence capture procedure
 - `include/OPT4001/CommandTable.h` - public register constants and masks
 - `ASSUMPTIONS.md` - implementation choices made where the device notes needed interpretation
 
@@ -626,8 +642,8 @@ idf.py -C examples/esp_idf/basic set-target esp32s2 build
 ```
 
 The static IDF contract check does not replace a real `idf.py` build. Local
-Prompt 8 validation attempted `idf.py --version`, but ESP-IDF was not available
-on `PATH`, so local pure ESP-IDF builds were not run.
+release-preparation validation attempted pure ESP-IDF builds, but ESP-IDF was
+not available on `PATH`, so local pure ESP-IDF builds were not run.
 
 ### Optional Hardware-In-Loop Runner
 

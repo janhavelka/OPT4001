@@ -282,9 +282,9 @@ When I2C_BURST (register 0x0B, bit 0) is set to 1 (default), the register pointe
 ### Registers 0x02–0x07 — FIFO (3 Shadow Register Pairs)
 
 Same layout as registers 0x00/0x01, containing the previous 3 measurements:
-- 0x02/0x03: FIFO 0 (oldest of the three shadows)
-- 0x04/0x05: FIFO 1
-- 0x06/0x07: FIFO 2
+- 0x02/0x03: FIFO 0 (previous measurement, n-1)
+- 0x04/0x05: FIFO 1 (n-2)
+- 0x06/0x07: FIFO 2 (oldest shadow, n-3)
 
 ### Register 0x08 — THRESHOLD_L
 
@@ -698,7 +698,7 @@ Read register 0x11:
 
 ### PicoStar™ Variant — Effective Resolution (lux)
 
-Full-scale lux per EXPONENT: 328 | 655 | 1310 | 2621 | 5243 | 10486 | 20972 | 41943 | 83886
+Full-scale lux per EXPONENT: 328 | 655 | 1311 | 2621 | 5243 | 10486 | 20972 | 41943 | 83886
 
 | CT Reg | Conv Time | Eff. Bits | EXP 0 | EXP 1 | EXP 2 | EXP 3 | EXP 4 | EXP 5 | EXP 6 | EXP 7 | EXP 8 |
 |---|---|---|---|---|---|---|---|---|---|---|---|

@@ -28,9 +28,9 @@ and `esp32s2` with Espressif's ESP-IDF CI action. Treat that as configured CI
 coverage, not local hardware evidence; review the completed workflow logs before
 claiming a target build has passed.
 
-Prompt 8 local validation on 2026-06-02 passed the static IDF contract check,
-but pure ESP-IDF target builds were not run because `idf.py` was not available
-on `PATH` in the validation shell. The attempted commands were
+Local validation on 2026-06-02 passed the static IDF contract check, but pure
+ESP-IDF target builds were not run because `idf.py` was not available on `PATH`
+in the validation shell. The attempted commands were
 `idf.py --version`, `idf.py -C examples/esp_idf/basic set-target esp32s3 build`,
 and `idf.py -C examples/esp_idf/basic set-target esp32s2 build`.
 

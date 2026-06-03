@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- No changes after the `1.0.0` release-preparation entry.
+- No changes since `1.0.0`.
 
-## [1.0.0] - 2026-06-02
+## [1.0.0] - 2026-06-03
 
 ### Added
 
@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and public API documentation.
 - Hardware-validation procedure, pending hardware-validation log, and optional
   bounded serial HIL runner for future board evidence capture.
+- Documentation index for release-facing docs, validation evidence, reference
+  material, and historical hardening reports.
 
 ### Changed
 
@@ -54,6 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated README, metadata, SECURITY, assumptions, and reports to distinguish
   local source/build evidence from pending real-device and pure ESP-IDF build
   evidence.
+- Narrowed Doxygen inputs to maintained API and reference documents so
+  generated docs do not promote historical audit reports as primary API pages.
 
 ### Fixed
 
@@ -95,11 +99,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - No completed real-device smoke, optical reference, address-pin matrix, INT
   capture, FIFO physical timing/order, or fault/recovery logs are included.
-- Prompt 2 hardware/HIL validation was explicitly deferred because board,
-  package, serial, wiring, optical, INT capture, and operator approval metadata
-  were not provided.
-- Pure ESP-IDF builds are configured in CI, but local `idf.py` was not available
-  on PATH during release preparation and no completed branch CI run was captured.
+- Hardware/HIL validation was explicitly deferred because board, package,
+  serial, wiring, optical, INT capture, and operator approval metadata were not
+  provided.
+- Pure ESP-IDF builds are configured in CI, but no completed local or CI
+  ESP-IDF build log was captured for `1.0.0`.
 - General-call reset is bus-wide; applications and HIL fixtures must explicitly
   approve that path before running reset/fault validation.
 - Optical compensation remains application-specific and should be characterized
