@@ -14,9 +14,10 @@ CLAIM_SURFACES = [
     "idf_component.yml",
     "SECURITY.md",
     "CHANGELOG.md",
-    "docs/IDF_PORT.md",
-    "docs/IDF_PORT_IMPLEMENTATION.md",
-    "docs/OPT4001_datasheet.md",
+    "docs/integration/esp-idf.md",
+    "docs/integration/driver-contracts.md",
+    "docs/reference/OPT4001_datasheet.md",
+    "docs/validation/validation-status.md",
 ]
 
 BANNED_PHRASES = [
@@ -35,7 +36,7 @@ README_REQUIRED = [
     "### Validation Evidence",
     "### Pending Validation Matrix",
     "### Package, Address, And Electrical Matrix",
-    "Hardware validation procedure: `docs/OPT4001_HARDWARE_VALIDATION_PROCEDURE.md`.",
+    "Hardware validation procedure: `docs/validation/hardware-validation-procedure.md`.",
     "Pure ESP-IDF builds | CI job configured",
     "5.5 V tolerant",
     "readLatestSample()",

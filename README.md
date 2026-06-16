@@ -51,7 +51,7 @@ target-build evidence.
 | Fault/recovery paths | Pending controlled hardware/HIL validation for NACK, timeout, unplug/replug, brownout, stuck bus, OFFLINE latch, and manual `recover()`. |
 | Pure ESP-IDF `idf.py` builds | CI configured; local and captured workflow evidence pending. |
 
-Hardware validation procedure: `docs/OPT4001_HARDWARE_VALIDATION_PROCEDURE.md`.
+Hardware validation procedure: `docs/validation/hardware-validation-procedure.md`.
 
 ### Package, Address, And Electrical Matrix
 
@@ -605,15 +605,21 @@ driver/bus state errors to `I2C_BUS` while preserving the raw `esp_err_t` in
 
 ## Documentation
 
-- `docs/OPT4001_datasheet.md` - register map, timing notes, formulas, and behavior summary
-- `docs/AN_light_detection.md` - application notes relevant to threshold use
-- `docs/AN_high_speed_resolution.md` - high-speed / resolution trade-offs
-- `docs/AN_picostar_package.md` - PicoStar-specific package differences
-- `docs/IDF_PORT.md` - ESP-IDF portability guidance
-- `docs/IDF_PORT_IMPLEMENTATION.md` - ESP-IDF implementation notes and validation limitations
-- `docs/README.md` - documentation index and evidence map
-- `docs/OPT4001_RELEASE_CHECKLIST.md` - merge and release checklist
-- `docs/OPT4001_HARDWARE_VALIDATION_PROCEDURE.md` - hardware evidence capture procedure
+- `docs/README.md` - compact documentation index.
+- `docs/integration/esp-idf.md` - ESP-IDF component and example boundary.
+- `docs/integration/driver-contracts.md` - lifecycle, health, freshness,
+  poll-job, dirty-state, numeric, and CRC contracts.
+- `docs/reference/OPT4001_datasheet.md` - register map, timing notes, formulas,
+  and behavior summary.
+- `docs/reference/AN_light_detection.md` - threshold and light-detection notes.
+- `docs/reference/AN_high_speed_resolution.md` - high-speed and resolution
+  trade-offs.
+- `docs/reference/AN_picostar_package.md` - PicoStar package differences.
+- `docs/validation/validation-status.md` - current evidence and pending
+  validation.
+- `docs/validation/hardware-validation-procedure.md` - hardware evidence
+  capture procedure.
+- `docs/validation/release-checklist.md` - merge and release checklist.
 - `include/OPT4001/CommandTable.h` - public register constants and masks
 - `ASSUMPTIONS.md` - implementation choices made where the device notes needed interpretation
 
