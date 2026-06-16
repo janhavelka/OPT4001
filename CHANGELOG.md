@@ -7,7 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- No changes since `1.0.0`.
+### Added
+
+- Poll-chunked job API: `poll(nowMs, maxInstructions)`, `pollBusy()`,
+  `lastPollStatus()`, `startReadSample()`, `startReadBurst()`,
+  `getLastBurst()`, `startConfigureMeasurement()`, and
+  `startResetAndReapply()`.
+- Native tests for shared status+burst read budgets, delay gates, chunked
+  config apply budgets, and failure-stop status reporting.
+
+### Changed
+
+- `readBurst()` now shares the tracked RESULT/FIFO burst block decoder used by
+  poll-chunked sample jobs and caches the most recently completed burst frame.
+- `tryReadSample()` is documented as a synchronous diagnostic/convenience path,
+  not an instruction-budgeted poll job.
 
 ## [1.0.0] - 2026-06-03
 

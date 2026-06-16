@@ -74,6 +74,9 @@ jobs:
       - name: Enforce version header contract
         run: python tools/check_version_header_contract.py
 
+      - name: Build clean package consumer
+        run: python tools/check_clean_consumer_package.py
+
       - name: Check generated version header
         run: python scripts/generate_version.py check
 
@@ -107,6 +110,9 @@ jobs:
 
       - name: Enforce version header contract
         run: python tools/check_version_header_contract.py
+
+      - name: Build clean package consumer
+        run: python tools/check_clean_consumer_package.py
 
       - name: Enforce readiness claims
         run: python tools/check_readiness_claims.py

@@ -163,7 +163,7 @@ struct SettingsSnapshot {
 /// Public methods that can perform I2C require a successful `begin()` unless
 /// explicitly documented otherwise. They return `Err::NOT_INITIALIZED` without
 /// touching the bus when the driver is `UNINIT`. When health state is `OFFLINE`,
-/// normal public I2C APIs return `Err::BUSY` without bus access; `recover()`,
+/// normal public I2C APIs return `Err::OFFLINE` without bus access; `recover()`,
 /// `softReset()`, and `resetAndReapply()` are the explicit recovery/reset
 /// exceptions.
 class OPT4001 {
@@ -257,6 +257,33 @@ public:
   // === Measurement API ===
   Status startConversion();
   Status startConversion(Mode mode);
+  /// Run the active poll-chunked job for at most `maxInstructions` I2C
+  /// instructions. One register read/write or one burst RESULT/FIFO block read
+  /// counts as one instruction; CPU-only CRC/lux decode and delay gates do not.
+  /// Returns `IN_PROGRESS` while the job is waiting, out of budget, or not yet
+  /// ready. Use `pollBusy()` to distinguish an active job from idle state.
+  Status poll(uint32_t nowMs, uint8_t maxInstructions = 1);
+  /// @return true while a poll-chunked sample/config/reset job is active.
+  bool pollBusy() const;
+  /// Last status produced by `poll()` or a `start*()` poll job method.
+  Status lastPollStatus() const { return _lastPollStatus; }
+  /// Start a poll-chunked fresh newest-sample read. The job uses the burst
+  /// RESULT/FIFO block path and caches `newest`; retrieve it with
+  /// `getLastSample()`. Requires `Config::burstMode`.
+  Status startReadSample();
+  /// Start a poll-chunked fresh RESULT/FIFO burst read. Requires
+  /// `Config::burstMode`; retrieve the completed frame with `getLastBurst()`.
+  Status startReadBurst();
+  /// Return the most recently completed poll-chunked burst frame.
+  Status getLastBurst(BurstFrame& out) const;
+  /// Start a poll-chunked coherent measurement configuration write. The job
+  /// applies the same four-register sequence as the synchronous configuration
+  /// path but stops when `maxInstructions` is exhausted or a write fails.
+  Status startConfigureMeasurement(Range range, ConversionTime time, Mode mode,
+                                   bool quickWake = false);
+  /// Start a poll-chunked general-call reset plus cached-configuration reapply.
+  /// The reset remains bus-wide; each reset/apply write is one instruction.
+  Status startResetAndReapply();
   /// Status-returning fresh-readiness check.
   /// @param[out] ready Set true when a fresh sample can be read
   /// @return Status::Ok() with ready=false when no sample is ready; transport errors are returned
@@ -322,7 +349,8 @@ public:
   Status readBlockingLux(float& lux, Mode mode, uint32_t timeoutMs);
   /// Poll-friendly fresh helper: returns OK with didRead=false if no fresh sample
   /// is ready yet. If a sample was read successfully, or read with CRC warning,
-  /// didRead is set true.
+  /// didRead is set true. Compatibility helper: this is a synchronous
+  /// diagnostic/convenience path, not an instruction-budgeted `poll()` job.
   Status tryReadSample(Sample& out, bool& didRead);
   Status tryReadFreshSample(Sample& out, bool& didRead);
   /// Poll-friendly helper returning lux directly without treating "not ready" as an error.
@@ -432,16 +460,16 @@ public:
   // === Raw Register Access ===
   /// Read a contiguous byte window from public 16-bit registers.
   /// Requires `begin()`. Blocks spanning reserved register gaps are rejected
-  /// before I2C. Returns `BUSY` without I2C while `OFFLINE`. Blocks including
+  /// before I2C. Returns `OFFLINE` without I2C while `OFFLINE`. Blocks including
   /// FLAGS register 0x0C clear that register's latched view.
   Status readRegisters(uint8_t startReg, uint8_t* buf, size_t len);
   /// Read one public 16-bit register. Requires `begin()`; returns
   /// `NOT_INITIALIZED` without I2C while `UNINIT`. Reserved addresses are
-  /// rejected before I2C. Returns `BUSY` without I2C while `OFFLINE`.
+  /// rejected before I2C. Returns `OFFLINE` without I2C while `OFFLINE`.
   Status readRegister16(uint8_t reg, uint16_t& value);
   /// Write one public 16-bit register. Requires `begin()`; returns
   /// `NOT_INITIALIZED` without I2C while `UNINIT`. Reserved addresses are
-  /// rejected before I2C. Returns `BUSY` without I2C while `OFFLINE`. Raw
+  /// rejected before I2C. Returns `OFFLINE` without I2C while `OFFLINE`. Raw
   /// writes can make cached settings dirty; use typed setters or recover after
   /// diagnostic writes that change configuration, INT, threshold, or FLAGS state.
   Status writeRegister16(uint8_t reg, uint16_t value);
@@ -497,6 +525,27 @@ public:
   uint8_t sampleCounterDelta(uint8_t previousCounter, uint8_t currentCounter) const;
 
 private:
+  enum class PollJob : uint8_t {
+    NONE,
+    READ_SAMPLE,
+    READ_BURST,
+    CONFIGURE_MEASUREMENT,
+    RESET_AND_REAPPLY
+  };
+
+  enum class PollStep : uint8_t {
+    IDLE,
+    WAIT_READY,
+    READ_FLAGS,
+    READ_COUNTER,
+    READ_BURST_BLOCK,
+    WRITE_RESET,
+    WRITE_THRESHOLD_L,
+    WRITE_THRESHOLD_H,
+    WRITE_INT_CONFIG,
+    WRITE_CONFIG
+  };
+
   // === Transport Wrappers ===
   Status _i2cWriteReadRaw(const uint8_t* txBuf, size_t txLen,
                           uint8_t* rxBuf, size_t rxLen);
@@ -513,6 +562,7 @@ private:
   Status _readRegister16Raw(uint8_t reg, uint16_t& value);
   Status _readSampleAt(uint8_t msbReg, Sample& out);
   Status _decodeSampleRegisters(uint16_t resultReg, uint16_t lsbCrcReg, Sample& out) const;
+  Status _readBurstBlockTracked(BurstFrame& out);
 
   // === Health Tracking ===
   Status _updateHealth(const Status& st);
@@ -521,13 +571,26 @@ private:
 
   // === Internal Helpers ===
   Status _applyConfig();
+  Status _pollReadJob(uint32_t nowMs, uint8_t& remainingInstructions);
+  Status _pollConfigJob(uint32_t nowMs, uint8_t& remainingInstructions);
+  Status _pollResetAndReapplyJob(uint32_t nowMs, uint8_t& remainingInstructions);
+  Status _finishPollJob(const Status& st);
+  Status _pollInProgressStatus(const char* message) const;
+  bool _pollReadGateElapsed(uint32_t nowMs) const;
+  uint32_t _pollContinuousGateMs() const;
+  bool _shouldProbeCounterForFreshness(uint32_t nowMs) const;
+  void _finishApplyConfig(uint32_t nowMs);
   void _markHardwareConfigDirty(const Status& st);
   void _clearHardwareConfigDirty();
   void _clearRuntimeState();
+  void _cacheSampleAt(const Sample& sample, uint32_t nowMs);
   void _cacheSample(const Sample& sample);
+  void _markFreshSampleConsumedAt(const Sample& sample, uint32_t nowMs);
   Status _markConversionReadyByRegisterPoll();
   uint16_t _buildConfigurationRegister(Mode mode) const;
+  uint16_t _buildConfigurationRegister(const Config& config, Mode mode) const;
   uint16_t _buildIntConfigurationRegister() const;
+  uint16_t _buildIntConfigurationRegister(const Config& config) const;
   Status _validateDeviceId(uint16_t raw) const;
   Status _pollConversionReadyFlag(bool& ready);
   Status _refreshReadinessEvidence(bool& ready);
@@ -567,12 +630,24 @@ private:
   uint32_t _conversionStartMs = 0;
   uint32_t _lastSampleTimestampMs = 0;
   Sample _lastSample{};
+  BurstFrame _lastBurst{};
+  bool _lastBurstValid = false;
   Mode _pendingMode = Mode::POWER_DOWN;
   bool _lastFreshCounterValid = false;
   uint8_t _lastFreshCounter = 0;
   uint8_t _lastCounter = 0;
   uint32_t _lastAdcCodes = 0;
   float _lastLux = 0.0f;
+
+  // === Poll-chunked Job State ===
+  PollJob _pollJob = PollJob::NONE;
+  PollStep _pollStep = PollStep::IDLE;
+  Status _lastPollStatus = Status::Ok();
+  Config _pollTargetConfig{};
+  uint8_t _pollWritesApplied = 0;
+  bool _pollResetApplied = false;
+  bool _pollExecuting = false;
+  BurstFrame _pollBurst{};
 };
 
 }  // namespace OPT4001

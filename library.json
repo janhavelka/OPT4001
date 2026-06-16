@@ -44,5 +44,22 @@
   "build": {
     "includeDir": "include",
     "srcDir": "src"
+  },
+  "export": {
+    "exclude": [
+      ".github",
+      ".pio",
+      ".vscode",
+      ".idea",
+      "docs/doxygen",
+      "docs/extracted-md",
+      "docs/pdf-extracted-md",
+      "docs/prompts",
+      "hil_logs",
+      "prompts",
+      "test",
+      "tools",
+      "*.tar.gz"
+    ]
   }
 }

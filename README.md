@@ -299,6 +299,17 @@ void loop() {
 - `readSampleSlot(0..3)` provides direct access to the newest sample plus the
   three FIFO shadow samples without forcing a full burst decode. Slot 0 consumes
   freshness like `readSample()`; slots 1-3 are direct history reads.
+- For TunnelMonitor-style shared `I2cTask` integration, prefer `readBurst()` as
+  the low-level sample primitive. It exposes newest plus FIFO history in one
+  fixed RESULT/FIFO transfer when burst mode is enabled and preserves raw
+  exponent, mantissa, ADC code, counter, CRC, and lux fields for owner-side
+  policy.
+- Poll-chunked jobs are available through `startReadBurst()`,
+  `startReadSample()`, `startConfigureMeasurement()`, and
+  `startResetAndReapply()`, then `poll(nowMs, maxInstructions)`. One register
+  read/write or one burst RESULT/FIFO block read is one instruction; CRC decode,
+  lux conversion, cache updates, and delay gates do not count. `FLAGS` reads
+  are explicit instructions because the register is clear-on-read.
 - `getLastSample()` / `sampleTimestampMs()` / `sampleAgeMs()` provide RAM-only
   access to the last successfully decoded sample.
 - `tryReadSample()` / `tryReadFreshSample()` / `tryReadLux()` are intended for
@@ -307,7 +318,7 @@ void loop() {
   `MEASUREMENT_NOT_READY` as control flow. I2C or register-poll failures are
   still returned as errors.
 - `OFFLINE` is latched. After the health threshold is reached, normal public I2C
-  operations return `BUSY` with `"Driver is offline; call recover()"` without
+  operations return `OFFLINE` with `"Driver is offline; call recover()"` without
   touching the bus. Use `recover()` to probe and re-apply cached configuration,
   or use the explicit reset / reset-and-reapply diagnostics when a bus-wide
   reset is acceptable.
@@ -429,6 +440,7 @@ python -m platformio test -e native
 | Not ready | No fresh evidence is available; direct fresh reads return `MEASUREMENT_NOT_READY`, try APIs return `OK` with `didRead=false`, and readiness checks return `ready=false`. |
 | `readLatestSample()` | Reads current output registers without freshness proof. |
 | `readSample()`, `readBurst()`, `tryReadSample()`, `tryReadFreshSample()`, `readFreshBlocking()` | Fresh-sample APIs that consume readiness on `OK` or `CRC_ERROR`. |
+| `readBurst()` | Preferred low-level shared-task sample primitive because it returns raw/integer newest and FIFO history in one fixed burst transfer when burst mode is enabled. |
 
 `tick()` and `conversionReady()` may use elapsed conversion time as a poll gate,
 but elapsed time alone is not reported as completion. This matters in auto-range:
@@ -465,6 +477,7 @@ driver/bus state errors to `I2C_BUS` while preserving the raw `esp_err_t` in
 - `recover()`
 - `softReset()`
 - `resetAndReapply()`
+- `startResetAndReapply()`
 - `readDeviceId(uint16_t&)`
 - `readDeviceId(DeviceIdInfo&)`
 - `getSettings(SettingsSnapshot&)`
@@ -473,6 +486,12 @@ driver/bus state errors to `I2C_BUS` while preserving the raw `esp_err_t` in
 
 - `startConversion()`
 - `startConversion(Mode mode)`
+- `poll(nowMs, maxInstructions)`
+- `pollBusy()`
+- `lastPollStatus()`
+- `startReadSample()`
+- `startReadBurst()`
+- `getLastBurst(BurstFrame&)`
 - `conversionReady()`
 - `conversionReady(bool&)`
 - `hasSample()`
@@ -497,6 +516,7 @@ driver/bus state errors to `I2C_BUS` while preserving the raw `esp_err_t` in
 
 - `setRange()`, `setConversionTime()`, `setMode()`, `setQuickWake()`, `setVerifyCrc()`
 - `configureMeasurement(range, time, mode, quickWake)`
+- `startConfigureMeasurement(range, time, mode, quickWake)`
 - `setInterruptLatch()`, `setInterruptPolarity()`, `setFaultCount()`
 - `setIntDirection()`, `setIntConfig()`, `setBurstMode()`
 - `setThresholds()`, `getThresholds()`, `setThresholdsLux()`

@@ -48,6 +48,7 @@ CI_REQUIRED = [
     "python tools/check_cli_contract.py",
     "python tools/check_idf_example_contract.py",
     "python tools/check_version_header_contract.py",
+    "python tools/check_clean_consumer_package.py",
     "python tools/check_readiness_claims.py",
     "python tools/check_public_api_docs.py",
     "python scripts/generate_version.py check",
