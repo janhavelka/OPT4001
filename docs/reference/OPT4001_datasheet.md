@@ -792,6 +792,19 @@ POWER_DOWN → write OPERATING_MODE=1 or 2 → CONVERTING
 
 ## 18. Implementation Notes
 
+### Source Caveats Preserved From Extracted Notes
+
+- The SOT-5X3 `ADDR=SCL` row in the checked-in datasheet PDF prints
+  `1000101b` (`0x45`), duplicating the `ADDR=VDD` row. Treat `0x44`, `0x45`,
+  and `0x46` as the supported selectable SOT-5X3 addresses until hardware
+  evidence proves otherwise.
+- The checked-in OPT4001 PDFs do not document an SMBus PEC byte or PEC enable
+  register.
+- The result-register CRC is documented through XOR/syndrome equations. The
+  checked-in datasheet text does not name a standard CRC polynomial.
+- PicoStar/YMN has no INT pin in the datasheet pin table. INT behavior is
+  SOT-5X3/DTS-only for this driver.
+
 ### 32-bit Data Types Required
 
 The lux calculation involves:
