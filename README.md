@@ -312,6 +312,8 @@ void loop() {
   are explicit instructions because the register is clear-on-read.
 - `getLastSample()` / `sampleTimestampMs()` / `sampleAgeMs()` provide RAM-only
   access to the last successfully decoded sample.
+- `getSettings(SettingsSnapshot&)` is also RAM/cache-only. It does not probe,
+  read registers, or hide live I2C behind a settings snapshot.
 - `tryReadSample()` / `tryReadFreshSample()` / `tryReadLux()` are intended for
   cooperative polling loops: they return `OK` with `didRead=false` when no fresh
   sample is ready yet, so the application does not have to treat
@@ -644,6 +646,7 @@ driver/bus state errors to `I2C_BUS` while preserving the raw `esp_err_t` in
 ```bash
 python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
+python tools/test_hil_opt4001_runner_parser.py
 python tools/check_idf_example_contract.py
 python tools/check_version_header_contract.py
 python tools/check_readiness_claims.py
@@ -678,6 +681,13 @@ over a serial port and write bounded Markdown/JSON transcripts under
 `hil_logs/`. It does not manipulate power, GPIO fixtures, or stuck-bus hardware.
 INT and reset/recovery groups are disabled unless explicitly requested by the
 operator.
+
+The runner keeps its OPT4001-specific filename because it drives the repo's two
+diagnostic CLI dialects directly. Its smoke plan covers the shared I2C HIL
+minimum as OPT4001 commands: `version`, `scan`, `probe`, `id`, settings via
+`cfg`, and health via Arduino `state` or ESP-IDF `drv`. `scan` is ACK evidence
+only; OPT4001 identity requires the `probe`/`id` DEVICE_ID path. `--dry-run`
+lists commands only and does not claim hardware PASS.
 
 Examples:
 

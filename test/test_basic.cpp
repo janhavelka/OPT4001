@@ -592,6 +592,34 @@ void test_begin_normalizes_offline_threshold_on_stored_copy() {
   TEST_ASSERT_EQUAL_UINT8(1u, snap.offlineThreshold);
 }
 
+void test_get_settings_is_cache_only_without_bus_io() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.quickWake = true;
+  cfg.verifyCrc = false;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  const uint32_t readsBefore = bus.readCalls;
+  const uint32_t writesBefore = bus.writeCalls;
+  bus.readStatus = Status::Error(Err::I2C_TIMEOUT, "blocked read", -50);
+  bus.writeStatus = Status::Error(Err::I2C_BUS, "blocked write", -51);
+
+  SettingsSnapshot snap;
+  Status st = dev.getSettings(snap);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
+  TEST_ASSERT_TRUE(snap.initialized);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::READY),
+                          static_cast<uint8_t>(snap.state));
+  TEST_ASSERT_EQUAL_HEX8(cmd::I2C_ADDR_DEFAULT, snap.i2cAddress);
+  TEST_ASSERT_TRUE(snap.quickWake);
+  TEST_ASSERT_FALSE(snap.verifyCrc);
+  TEST_ASSERT_FALSE(snap.hardwareConfigDirty);
+  TEST_ASSERT_TRUE(snap.hardwareConfigDirtyError.ok());
+}
+
 void test_begin_success_sets_ready_without_health_counts() {
   FakeBus bus;
   OPT4001::OPT4001 dev;
@@ -3103,6 +3131,7 @@ int main() {
   RUN_TEST(test_package_address_matrix);
   RUN_TEST(test_invalid_begin_after_success_resets_default_runtime);
   RUN_TEST(test_begin_normalizes_offline_threshold_on_stored_copy);
+  RUN_TEST(test_get_settings_is_cache_only_without_bus_io);
   RUN_TEST(test_begin_success_sets_ready_without_health_counts);
   RUN_TEST(test_update_health_ignores_in_progress);
   RUN_TEST(test_probe_accepts_valid_full_device_id);

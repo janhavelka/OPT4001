@@ -37,6 +37,7 @@ Run and record:
 ```bash
 python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
+python tools/test_hil_opt4001_runner_parser.py
 python tools/check_idf_example_contract.py
 python tools/check_version_header_contract.py
 python tools/check_readiness_claims.py
@@ -72,7 +73,8 @@ Use the command names above in logs so the procedure is reproducible.
 ## Safe Smoke
 
 Run after flashing and opening the serial CLI. Expected result: no command hangs,
-`probe`/`id` identify OPT4001, and `read`/`lux` return `OK` or a documented
+`scan` reports only ACK/bus presence, `probe`/`id` identify OPT4001 by reading
+the DEVICE_ID register pattern, and `read`/`lux` return `OK` or a documented
 `CRC_ERROR` warning with decoded output.
 
 Arduino CLI:

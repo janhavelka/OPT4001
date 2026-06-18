@@ -75,6 +75,12 @@ tracks dirty hardware/cache state when a failure occurs after a partial write.
 Dirty state survives unrelated reads and is cleared only after successful
 `recover()` or `resetAndReapply()`.
 
+`getSettings(SettingsSnapshot&)` is cache-only and must not perform I2C. The
+snapshot exposes `hardwareConfigDirty` and `hardwareConfigDirtyError`, matching
+the direct diagnostics `hardwareConfigDirty()` and
+`hardwareConfigDirtyError()`, so callers can see the root status that first made
+configuration uncertain.
+
 Raw register writes can also make cached settings dirty. Use typed setters for
 normal operation and read back configuration, INT configuration, and thresholds
 after diagnostics that intentionally change registers.
@@ -88,4 +94,3 @@ after diagnostics that intentionally change registers.
   fields.
 - Burst reads decode all four slots after transfer success and preserve per-slot
   CRC fields while returning aggregate CRC status.
-

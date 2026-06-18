@@ -49,10 +49,23 @@ Framework-boundary rules:
 
 ## Core Engineering Rules (Mandatory)
 
+- Prefer simplicity, clarity, correctness, robustness, safety, and readability over clever abstractions or speculative flexibility.
+- Before coding, inspect whether existing code can be simplified, reused, or deleted.
+- Prefer deleting unnecessary code over adding new code.
+- Prefer extending existing owners/modules/contracts over creating parallel abstractions.
+- Before adding a new service, class, file, interface, or abstraction, verify there is a concrete current need and a clear caller or test.
+- Do not add placeholder classes, future stubs, empty managers, broad frameworks, plugin systems, service registries, or speculative extension points.
+- Keep changes tightly scoped to the user's request.
 - Deterministic: no unbounded loops/waits; all timeouts via deadlines, never `delay()` in library code.
+- No unbounded waits, retries, loops, allocations, queues, or buffers in steady paths.
 - Non-blocking lifecycle: `Status begin(const Config&)`, `void tick(uint32_t nowMs)`, `void end()`.
 - Any I/O that can exceed about 1-2 ms must be split into state-machine steps driven by `tick()` or exposed as a clearly bounded blocking helper.
+- Every hardware operation that can block must have a timeout and an observable failure path.
+- Recovery logic must be bounded, deterministic, and testable.
+- Prefer explicit state, explicit ownership, and small local helpers over hidden global state.
+- Do not hide hardware failures behind silent retries or fake success.
 - No heap allocation in steady state; no `String`, `std::vector`, or `new` in normal operations.
+- Avoid dynamic allocation in steady embedded paths unless it is already an accepted local pattern and the bound is clear.
 - No logging in library code; examples may log.
 - No macros for constants; use `static constexpr`. Macros only for conditional compile or logging helpers.
 
@@ -61,11 +74,17 @@ Framework-boundary rules:
 ## I2C Manager + Transport (Required)
 
 - The library MUST NOT own I2C. It never touches `Wire` directly.
+- The I2C bus must have one clear owner.
+- Device drivers must not directly own or reconfigure a shared bus unless this repository's architecture explicitly says so.
 - `Config` MUST accept transport callbacks (`i2cWrite`, `i2cWriteRead`) and optional timing/GPIO hooks.
+- I2C transactions must be timeout-bounded and report errors clearly.
 - Transport errors MUST map to `Status`; do not leak `Wire`, `esp_err_t`, or platform-specific errors through the public API.
 - The library MUST NOT configure bus timeouts or pins.
 - Optional INT-pin behavior must go through `Config::gpioRead`; do not call Arduino GPIO APIs directly from the driver.
 - Blocking helpers must use `Config::nowMs` / caller time where available and `Config::cooperativeYield` only as a cooperative hook.
+- Do not implement chip protocols manually if an existing hardened project library already provides the needed timeout, recovery, and testability behavior.
+- Keep chip-level protocol code inside the driver/wrapper. Keep application policy outside the chip driver.
+- Do not add fake devices, simulated buses, or test doubles to production paths.
 
 ---
 
@@ -217,4 +236,5 @@ Release steps:
 - Multi-register configuration paths must either avoid partial hardware/cache divergence or expose a dirty/resync-required state.
 - The current Arduino and ESP-IDF CLIs are diagnostic/bring-up examples unless they clearly demonstrate production bus management.
 - Do not claim hardware validation, optical validation, interrupt validation, address-pin validation, FIFO validation, or pure ESP-IDF validation without captured evidence.
+- Preserve dirty user changes. Never revert unrelated work unless the user explicitly asks.
 - After each hardening prompt: run checks, update a report, commit, push/sync if possible, and stop.
