@@ -93,6 +93,14 @@ bool isValidPublicRegisterBlock(uint8_t startReg, size_t len) {
   return true;
 }
 
+bool rawWriteCanDirtyCachedSettings(uint8_t reg) {
+  return reg == cmd::REG_CONFIGURATION ||
+         reg == cmd::REG_INT_CONFIGURATION ||
+         reg == cmd::REG_THRESHOLD_L ||
+         reg == cmd::REG_THRESHOLD_H ||
+         reg == cmd::REG_FLAGS;
+}
+
 static constexpr uint8_t RESULT_EXPONENT_MAX = 8U;
 static constexpr uint32_t RESULT_MANTISSA_MAX = 0x000FFFFFU;
 static constexpr uint8_t THRESHOLD_SHIFT_BASE = 8U;
@@ -1620,7 +1628,21 @@ Status OPT4001::writeRegister16(uint8_t reg, uint16_t value) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
-  return _writeRegister16Tracked(reg, value);
+  Status st = _writeRegister16Tracked(reg, value);
+  if (rawWriteCanDirtyCachedSettings(reg) &&
+      st.code != Err::INVALID_PARAM &&
+      st.code != Err::OFFLINE &&
+      st.code != Err::BUSY) {
+    if (st.ok()) {
+      if (!_hardwareConfigDirty) {
+        _hardwareConfigDirty = true;
+        _hardwareConfigDirtyError = Status::Ok();
+      }
+    } else {
+      _markHardwareConfigDirty(st);
+    }
+  }
+  return st;
 }
 
 Status OPT4001::_readRegister16Tracked(uint8_t reg, uint16_t& value) {
@@ -1690,15 +1712,7 @@ Status OPT4001::_refreshReadinessEvidence(bool& ready) {
   }
 
   bool evidence = _intFreshEvidenceAsserted();
-  bool flagReady = false;
   Status st = Status::Ok();
-  if (!evidence) {
-    st = _pollConversionReadyFlag(flagReady);
-    if (!st.ok()) {
-      return st;
-    }
-    evidence = flagReady;
-  }
 
   if (!evidence && _shouldProbeCounterForFreshness()) {
     uint16_t lsbCrc = 0;
@@ -1709,6 +1723,15 @@ Status OPT4001::_refreshReadinessEvidence(bool& ready) {
     const uint8_t counter =
         static_cast<uint8_t>((lsbCrc & cmd::MASK_COUNTER) >> cmd::BIT_COUNTER);
     evidence = _sampleCounterIsFresh(counter);
+  }
+
+  if (!evidence) {
+    bool flagReady = false;
+    st = _pollConversionReadyFlag(flagReady);
+    if (!st.ok()) {
+      return st;
+    }
+    evidence = flagReady;
   }
 
   if (evidence) {

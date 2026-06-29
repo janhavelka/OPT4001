@@ -79,7 +79,8 @@ Dirty state survives unrelated reads and is cleared only after successful
 snapshot exposes `hardwareConfigDirty` and `hardwareConfigDirtyError`, matching
 the direct diagnostics `hardwareConfigDirty()` and
 `hardwareConfigDirtyError()`, so callers can see the root status that first made
-configuration uncertain.
+configuration uncertain. `hardwareConfigDirtyError == OK` means an intentional
+successful raw register write made the hardware/cache relationship uncertain.
 
 Raw register writes can also make cached settings dirty. Use typed setters for
 normal operation and read back configuration, INT configuration, and thresholds

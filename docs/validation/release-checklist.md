@@ -19,6 +19,7 @@ Run and record:
 ```bash
 python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
+python tools/hil_opt4001_runner.py --parser-self-test
 python tools/test_hil_opt4001_runner_parser.py
 python tools/check_idf_example_contract.py
 python tools/check_version_header_contract.py

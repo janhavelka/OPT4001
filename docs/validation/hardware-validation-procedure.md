@@ -37,6 +37,7 @@ Run and record:
 ```bash
 python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
+python tools/hil_opt4001_runner.py --parser-self-test
 python tools/test_hil_opt4001_runner_parser.py
 python tools/check_idf_example_contract.py
 python tools/check_version_header_contract.py
@@ -52,6 +53,18 @@ idf.py -C examples/esp_idf/basic set-target esp32s2 build
 ```
 
 Remove `OPT4001-*.tar.gz` after package validation.
+
+Before live HIL, run the runner self-test and dry-run the selected command plan:
+
+```bash
+python tools/hil_opt4001_runner.py --parser-self-test
+python tools/hil_opt4001_runner.py --cli arduino --group all-safe --dry-run
+```
+
+For live evidence, prefer `--strict-expected` so known commands that return
+non-empty but unrecognized output are classified as `UNKNOWN`, not `PASS`. Use
+`--verbose` only when the console transcript is useful; Markdown/JSON logs
+always capture command output and boot text.
 
 ## CLI Command Notes
 
@@ -88,7 +101,6 @@ cfg
 state
 read
 lux
-flags
 selftest
 ```
 
@@ -103,9 +115,12 @@ cfg
 drv
 read
 lux
-flags
 selftest
 ```
+
+`FLAGS` reads are clear-on-read. Run them as an explicit status/diagnostic step
+when the session is ready to consume sticky flag evidence, not as part of the
+default smoke sequence.
 
 ## Conversion-Time Sweep
 

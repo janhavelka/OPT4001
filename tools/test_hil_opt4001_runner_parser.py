@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import tempfile
 import unittest
 
 import hil_opt4001_runner as hil
@@ -60,8 +61,15 @@ class HilOpt4001RunnerParserTest(unittest.TestCase):
         self.assertIn("scan", lines)
         self.assertIn("probe", lines)
         self.assertIn("cfg", lines)
+        self.assertNotIn("flags", lines)
         self.assertNotIn("PASS", output)
         self.assertNotIn("FAIL", output)
+
+    def test_parser_self_test_mode_runs_without_serial(self) -> None:
+        code, output = self.run_main(["--parser-self-test"])
+
+        self.assertEqual(0, code)
+        self.assertIn("Parser self-test PASSED", output)
 
     def test_missing_port_is_rejected_before_serial_import(self) -> None:
         code, output = self.run_main([])
@@ -82,6 +90,7 @@ class HilOpt4001RunnerParserTest(unittest.TestCase):
             "Status: NOT_INITIALIZED",
             "Status: INVALID_CONFIG",
             "Status: INVALID_PARAM",
+            "Status: OFFLINE",
             "Status: BUSY",
             "selftest failed=1",
             "Stress complete failures: 2",
@@ -106,11 +115,19 @@ class HilOpt4001RunnerParserTest(unittest.TestCase):
                 self.assertEqual("PASS", status)
 
     def test_warning_tokens_are_warnings(self) -> None:
-        for sample in ("Status: CRC_ERROR", "Status: MEASUREMENT_NOT_READY"):
+        for sample in ("Status: CRC_ERROR", "Status: MEASUREMENT_NOT_READY", "Status: CONVERSION_NOT_READY"):
             with self.subTest(sample=sample):
                 status, reason = hil.classify_output(sample)
                 self.assertEqual("WARN", status)
                 self.assertIn("ERROR" if "CRC" in sample else "READY", reason)
+
+    def test_strict_data_commands_treat_not_ready_as_unknown(self) -> None:
+        status, reason = hil.classify_output(
+            "Status: MEASUREMENT_NOT_READY", "burst", strict_expected=True
+        )
+
+        self.assertEqual("UNKNOWN", status)
+        self.assertEqual("MEASUREMENT_NOT_READY", reason)
 
     def test_expected_address_and_device_id_output_can_pass_when_no_error_token(self) -> None:
         text = (
@@ -123,6 +140,30 @@ class HilOpt4001RunnerParserTest(unittest.TestCase):
         status, reason = hil.classify_output(text)
         self.assertEqual("PASS", status)
         self.assertEqual("response captured", reason)
+
+    def test_strict_expected_tokens_can_return_unknown(self) -> None:
+        status, reason = hil.classify_output("prompt only", "probe", strict_expected=True)
+
+        self.assertEqual("UNKNOWN", status)
+        self.assertEqual("missing expected response token", reason)
+
+    def test_benchmark_group_repeats_configured_command(self) -> None:
+        args = hil.parse_args([
+            "--dry-run",
+            "--group", "benchmark",
+            "--benchmark-command", "lux",
+            "--benchmark-count", "3",
+        ])
+
+        self.assertEqual(["lux", "lux", "lux"], hil.selected_commands(args))
+
+    def test_invalid_numeric_args_are_rejected(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit):
+                hil.parse_args(["--stress-count", "0"])
+            with self.assertRaises(SystemExit):
+                hil.parse_args(["--command-timeout", "-1"])
 
     def test_no_serial_response_is_failure(self) -> None:
         serial = EmptySerial()
@@ -139,6 +180,22 @@ class HilOpt4001RunnerParserTest(unittest.TestCase):
         status, reason = hil.classify_output(clean)
         self.assertEqual("FAIL", status)
         self.assertEqual("I2C_TIMEOUT", reason)
+
+    def test_log_contains_boot_transcript_and_unknown_count(self) -> None:
+        args = hil.parse_args(["--dry-run"])
+        results = [
+            hil.CommandResult("probe", "prompt only", "UNKNOWN",
+                              "missing expected response token", 0.125)
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = hil.pathlib.Path(tmp) / "hil.md"
+            hil.write_log(path, args, results, boot_output="boot banner")
+            text = path.read_text(encoding="utf-8")
+
+        self.assertIn("## Boot Transcript", text)
+        self.assertIn("boot banner", text)
+        self.assertIn("| 0 | 0 | 0 | 1 | 0 |", text)
 
 
 if __name__ == "__main__":

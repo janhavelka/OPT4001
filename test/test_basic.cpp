@@ -2058,6 +2058,34 @@ void test_int_fresh_evidence_does_not_clear_flags() {
   TEST_ASSERT_TRUE((bus.registers[cmd::REG_FLAGS] & cmd::MASK_FLAG_L) != 0U);
 }
 
+void test_counter_fresh_evidence_does_not_clear_flags() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  seedSample(bus, cmd::REG_RESULT, 0, 0x12345, 4, true);
+  markConversionReady(bus);
+  Sample sample;
+  Status st = dev.readSample(sample);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT8(4u, sample.counter);
+
+  seedSample(bus, cmd::REG_RESULT, 0, 0x23456, 5, true);
+  bus.nowMs += dev.getConversionTimeMs();
+  bus.registers[cmd::REG_FLAGS] =
+      static_cast<uint16_t>(cmd::MASK_FLAG_H | cmd::MASK_FLAG_L);
+
+  st = dev.readSample(sample);
+
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT8(5u, sample.counter);
+  TEST_ASSERT_EQUAL_UINT32(0x23456u, sample.mantissa);
+  TEST_ASSERT_TRUE((bus.registers[cmd::REG_FLAGS] & cmd::MASK_FLAG_H) != 0U);
+  TEST_ASSERT_TRUE((bus.registers[cmd::REG_FLAGS] & cmd::MASK_FLAG_L) != 0U);
+}
+
 void test_try_read_helpers_report_not_ready_without_error() {
   FakeBus bus;
   OPT4001::OPT4001 dev;
@@ -2819,6 +2847,31 @@ void test_cached_configuration_rolls_back_after_i2c_failure() {
   TEST_ASSERT_FALSE(dev.getQuickWake());
 }
 
+void test_successful_raw_config_write_marks_hardware_config_dirty() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+  assertHardwareConfigDirty(dev, false);
+
+  Status st = dev.writeRegister16(cmd::REG_RESULT, 0x1234);
+  TEST_ASSERT_TRUE(st.ok());
+  assertHardwareConfigDirty(dev, false);
+
+  st = dev.writeRegister16(cmd::REG_CONFIGURATION, cmd::CONFIGURATION_RESET);
+  TEST_ASSERT_TRUE(st.ok());
+  assertHardwareConfigDirty(dev, true);
+  TEST_ASSERT_TRUE(dev.hardwareConfigDirtyError().ok());
+
+  SettingsSnapshot snap;
+  TEST_ASSERT_TRUE(dev.getSettings(snap).ok());
+  TEST_ASSERT_TRUE(snap.hardwareConfigDirty);
+  TEST_ASSERT_TRUE(snap.hardwareConfigDirtyError.ok());
+
+  st = dev.recover();
+  TEST_ASSERT_TRUE(st.ok());
+  assertHardwareConfigDirty(dev, false);
+}
+
 void test_raw_register_access_rejects_invalid_bounds_without_bus_io() {
   FakeBus bus;
   OPT4001::OPT4001 dev;
@@ -3191,6 +3244,7 @@ int main() {
   RUN_TEST(test_read_register_block_and_sample_slot_helpers);
   RUN_TEST(test_fifo_shadow_slots_do_not_require_fresh_evidence);
   RUN_TEST(test_int_fresh_evidence_does_not_clear_flags);
+  RUN_TEST(test_counter_fresh_evidence_does_not_clear_flags);
   RUN_TEST(test_try_read_helpers_report_not_ready_without_error);
   RUN_TEST(test_fresh_continuous_first_sample_is_fresh);
   RUN_TEST(test_fresh_repeated_same_counter_is_not_fresh);
@@ -3219,6 +3273,7 @@ int main() {
   RUN_TEST(test_range_vectors_and_invalid_values);
   RUN_TEST(test_configuration_and_interrupt_convenience_helpers);
   RUN_TEST(test_cached_configuration_rolls_back_after_i2c_failure);
+  RUN_TEST(test_successful_raw_config_write_marks_hardware_config_dirty);
   RUN_TEST(test_raw_register_access_rejects_invalid_bounds_without_bus_io);
   RUN_TEST(test_raw_register_access_before_begin_is_guarded_without_bus_io);
   RUN_TEST(test_raw_register_access_after_failed_begin_is_guarded_without_bus_io);

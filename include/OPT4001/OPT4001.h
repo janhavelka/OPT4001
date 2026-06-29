@@ -149,7 +149,9 @@ struct SettingsSnapshot {
   /// full config re-apply through recover(), resetAndReapply(), or a full
   /// configuration write path.
   bool hardwareConfigDirty = false;
-  /// Original status that first marked `hardwareConfigDirty`.
+  /// Original status that first marked `hardwareConfigDirty`; `OK` means an
+  /// intentional successful raw register write made the cache relationship
+  /// uncertain.
   Status hardwareConfigDirtyError = Status::Ok();
 };
 
@@ -178,9 +180,9 @@ public:
   /// Initialize the driver, verify Device ID, and apply the supplied config.
   /// Config application writes multiple registers. If a later write fails after
   /// earlier writes reached hardware, `hardwareConfigDirty()` may be set even
-  /// though the driver remains `UNINIT`; use `recover()` or `resetAndReapply()`
-  /// after the bus is healthy. Normal public I2C APIs stay guarded and return
-  /// `NOT_INITIALIZED` until `begin()` succeeds.
+  /// though the driver remains `UNINIT`; retry `begin()` with the cached or
+  /// corrected config after the bus is healthy. Normal public I2C APIs stay
+  /// guarded and return `NOT_INITIALIZED` until `begin()` succeeds.
   Status begin(const Config& config);
   /// Advance conversion timing/poll state. Elapsed time is only a poll gate;
   /// readiness is reported only after hardware evidence is observed. After the
@@ -229,7 +231,8 @@ public:
   /// hardware before failing. The flag persists across ordinary reads and
   /// clears only after a successful full config re-apply.
   bool hardwareConfigDirty() const { return _hardwareConfigDirty; }
-  /// First failure that marked `hardwareConfigDirty()`.
+  /// First status that marked `hardwareConfigDirty()`; `OK` means an intentional
+  /// successful raw register write made the cache relationship uncertain.
   Status hardwareConfigDirtyError() const { return _hardwareConfigDirtyError; }
 
   // === Driver State ===

@@ -646,6 +646,7 @@ driver/bus state errors to `I2C_BUS` while preserving the raw `esp_err_t` in
 ```bash
 python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
+python tools/hil_opt4001_runner.py --parser-self-test
 python tools/test_hil_opt4001_runner_parser.py
 python tools/check_idf_example_contract.py
 python tools/check_version_header_contract.py
@@ -686,15 +687,26 @@ The runner keeps its OPT4001-specific filename because it drives the repo's two
 diagnostic CLI dialects directly. Its smoke plan covers the shared I2C HIL
 minimum as OPT4001 commands: `version`, `scan`, `probe`, `id`, settings via
 `cfg`, and health via Arduino `state` or ESP-IDF `drv`. `scan` is ACK evidence
-only; OPT4001 identity requires the `probe`/`id` DEVICE_ID path. `--dry-run`
-lists commands only and does not claim hardware PASS.
+only; OPT4001 identity requires the `probe`/`id` DEVICE_ID path.
+
+Use `--parser-self-test` and `tools/test_hil_opt4001_runner_parser.py` before
+live hardware. `--dry-run` lists commands only and does not claim hardware PASS.
+Live runs can use `--strict-expected` to classify known commands with missing
+evidence tokens as `UNKNOWN`, `--verbose` to echo captured transcripts, bounded
+`--reconnect-attempts`, and `--group benchmark --benchmark-command <cmd>
+--benchmark-count <n>` for simple repeated-command timing.
+The default smoke/all-safe plans avoid `FLAGS` because that register is
+clear-on-read; use `--group status` only when the session is ready to consume
+sticky flag evidence.
 
 Examples:
 
 ```bash
+python tools/hil_opt4001_runner.py --parser-self-test
 python tools/hil_opt4001_runner.py --port COM6 --cli arduino --group smoke
-python tools/hil_opt4001_runner.py --port COM6 --cli arduino --group all-safe
+python tools/hil_opt4001_runner.py --port COM6 --cli arduino --group all-safe --strict-expected
 python tools/hil_opt4001_runner.py --port /dev/ttyUSB0 --cli idf --group smoke --group fifo
+python tools/hil_opt4001_runner.py --port COM6 --cli arduino --group benchmark --benchmark-command read --benchmark-count 50
 python tools/hil_opt4001_runner.py --cli arduino --group all-safe --dry-run
 ```
 

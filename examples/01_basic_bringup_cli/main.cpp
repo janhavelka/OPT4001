@@ -34,6 +34,7 @@ struct WatchState {
   int32_t remaining = 0;
   uint32_t startMs = 0;
   uint32_t lastStepMs = 0;
+  uint32_t conversionDeadlineMs = 0;
   uint32_t okCount = 0;
   uint32_t warnCount = 0;
   uint32_t failCount = 0;
@@ -79,6 +80,7 @@ const char* errToStr(OPT4001::Err err) {
     case Err::I2C_NACK_DATA: return "I2C_NACK_DATA";
     case Err::I2C_TIMEOUT: return "I2C_TIMEOUT";
     case Err::I2C_BUS: return "I2C_BUS";
+    case Err::OFFLINE: return "OFFLINE";
     default: return "UNKNOWN";
   }
 }
@@ -744,6 +746,10 @@ void handleWatch() {
       } else {
         watchState.waitingConversion = true;
         watchState.lastStepMs = now;
+        const OPT4001::Mode mode =
+            watchState.forceAuto ? OPT4001::Mode::ONE_SHOT_FORCED_AUTO : OPT4001::Mode::ONE_SHOT;
+        watchState.conversionDeadlineMs =
+            now + device.getOneShotBudgetMs(mode) + BLOCKING_READ_TIMEOUT_MS;
       }
     } else {
       OPT4001::Sample sample;
@@ -765,6 +771,13 @@ void handleWatch() {
         if (sampleStatusWarn(st)) {
           printStatus(st);
         }
+        watchState.waitingConversion = false;
+        watchState.lastStepMs = now;
+        watchState.remaining--;
+      } else if (static_cast<int32_t>(now - watchState.conversionDeadlineMs) >= 0) {
+        st = OPT4001::Status::Error(OPT4001::Err::TIMEOUT, "Watch conversion timeout");
+        recordWatchStatus(st);
+        printStatus(st);
         watchState.waitingConversion = false;
         watchState.lastStepMs = now;
         watchState.remaining--;

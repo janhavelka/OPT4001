@@ -85,6 +85,7 @@ const char* errToStr(OPT4001::Err err) {
     case OPT4001::Err::I2C_NACK_DATA: return "I2C_NACK_DATA";
     case OPT4001::Err::I2C_TIMEOUT: return "I2C_TIMEOUT";
     case OPT4001::Err::I2C_BUS: return "I2C_BUS";
+    case OPT4001::Err::OFFLINE: return "OFFLINE";
     default: return "UNKNOWN";
   }
 }
@@ -97,6 +98,10 @@ const char* stateToStr(OPT4001::DriverState state) {
     case OPT4001::DriverState::OFFLINE: return "OFFLINE";
     default: return "UNKNOWN";
   }
+}
+
+bool sampleStatusHasData(const OPT4001::Status& st) {
+  return st.ok() || st.code == OPT4001::Err::CRC_ERROR;
 }
 
 void printStatus(OPT4001::Status st) {
@@ -266,16 +271,18 @@ void processCommand(char* line) {
   } else if (strcmp(cmd, "read") == 0 || strcmp(cmd, "lux") == 0) {
     float lux = 0.0f;
     const auto st = device.readBlockingLux(lux, 1000);
-    if (st.ok()) printf("Lux: %.6f\n", lux);
+    if (sampleStatusHasData(st)) printf("Lux: %.6f\n", lux);
     printStatus(st);
   } else if (strcmp(cmd, "mlux") == 0) {
     uint32_t value = 0;
     const auto st = device.readMilliLux(value);
-    st.ok() ? printf("Milli-lux: %lu\n", static_cast<unsigned long>(value)) : printStatus(st);
+    if (sampleStatusHasData(st)) printf("Milli-lux: %lu\n", static_cast<unsigned long>(value));
+    printStatus(st);
   } else if (strcmp(cmd, "ulux") == 0) {
     uint64_t value = 0;
     const auto st = device.readMicroLux(value);
-    st.ok() ? printf("Micro-lux: %llu\n", static_cast<unsigned long long>(value)) : printStatus(st);
+    if (sampleStatusHasData(st)) printf("Micro-lux: %llu\n", static_cast<unsigned long long>(value));
+    printStatus(st);
   } else if (strcmp(cmd, "sample") == 0) {
     OPT4001::Sample sample;
     const auto st = device.getLastSample(sample);
@@ -305,8 +312,13 @@ void processCommand(char* line) {
   } else if (strcmp(cmd, "burst") == 0 || strcmp(cmd, "fifo") == 0) {
     OPT4001::BurstFrame frame;
     const auto st = device.readBurst(frame);
-    if (st.ok()) { printSample(frame.newest); printSample(frame.fifo0); printSample(frame.fifo1); printSample(frame.fifo2); }
-    else printStatus(st);
+    if (sampleStatusHasData(st)) {
+      printSample(frame.newest);
+      printSample(frame.fifo0);
+      printSample(frame.fifo1);
+      printSample(frame.fifo2);
+    }
+    printStatus(st);
   } else if (strcmp(cmd, "cfg") == 0 || strcmp(cmd, "settings") == 0 || strcmp(cmd, "snapshot") == 0) {
     printSettings();
   } else if (strcmp(cmd, "range") == 0 || strcmp(cmd, "ctime") == 0 || strcmp(cmd, "mode") == 0) {
