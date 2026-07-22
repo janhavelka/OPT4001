@@ -368,7 +368,7 @@ OPT4001::Config makeDefaultConfig() {
   cfg.i2cWrite = transport::wireWrite;
   cfg.i2cWriteRead = transport::wireWriteRead;
   cfg.i2cUser = &Wire;
-  cfg.nowMs = [](void*) { return millis(); };
+  cfg.nowMs = [](void*) -> uint32_t { return static_cast<uint32_t>(millis()); };
   cfg.cooperativeYield = [](void*) { yield(); };
   cfg.i2cAddress = OPT4001::cmd::I2C_ADDR_DEFAULT;
   cfg.i2cTimeoutMs = board::I2C_TIMEOUT_MS;
