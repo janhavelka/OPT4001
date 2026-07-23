@@ -113,6 +113,13 @@ FORBIDDEN_PATTERNS = [
     r"esp_driver_uart",
 ]
 
+FORBIDDEN_SIDE_EFFECT_PATTERNS = [
+    (
+        r"\?\s*(?:std::)?printf\s*\([^;]*\)\s*:\s*printStatus\s*\([^;]*\)\s*;",
+        "conditional expression mixes printf result with void printStatus",
+    ),
+]
+
 
 def fail(msg: str) -> None:
     print(f"IDF example contract FAILED: {msg}")
@@ -155,6 +162,10 @@ def main() -> int:
     for pattern in FORBIDDEN_PATTERNS:
         if re.search(pattern, combined):
             fail(f"forbidden Arduino/legacy token present: {pattern}")
+
+    for pattern, message in FORBIDDEN_SIDE_EFFECT_PATTERNS:
+        if re.search(pattern, main_text, flags=re.DOTALL):
+            fail(message)
 
     for stale in ("Arduino.h", "Wire.h", "Opt4001IdfArduinoShim.cpp"):
         if (IDF_MAIN / stale).exists():
