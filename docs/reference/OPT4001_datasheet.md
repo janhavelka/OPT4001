@@ -1,7 +1,7 @@
 # OPT4001 — High Speed, High Precision Digital Ambient Light Sensor — Implementation Manual
 
 > **Source:** Texas Instruments OPT4001 Datasheet (SBOS993A, Rev. December 2022)  
-> **Relevance:** Complete register-level, timing, electrical, and algorithmic reference for building a production-grade OPT4001 driver.
+> **Relevance:** Complete register-level, timing, electrical, and algorithmic reference for implementing and reviewing the OPT4001 driver.
 
 ---
 
@@ -282,9 +282,9 @@ When I2C_BURST (register 0x0B, bit 0) is set to 1 (default), the register pointe
 ### Registers 0x02–0x07 — FIFO (3 Shadow Register Pairs)
 
 Same layout as registers 0x00/0x01, containing the previous 3 measurements:
-- 0x02/0x03: FIFO 0 (oldest of the three shadows)
-- 0x04/0x05: FIFO 1
-- 0x06/0x07: FIFO 2
+- 0x02/0x03: FIFO 0 (previous measurement, n-1)
+- 0x04/0x05: FIFO 1 (n-2)
+- 0x06/0x07: FIFO 2 (oldest shadow, n-3)
 
 ### Register 0x08 — THRESHOLD_L
 
@@ -698,7 +698,7 @@ Read register 0x11:
 
 ### PicoStar™ Variant — Effective Resolution (lux)
 
-Full-scale lux per EXPONENT: 328 | 655 | 1310 | 2621 | 5243 | 10486 | 20972 | 41943 | 83886
+Full-scale lux per EXPONENT: 328 | 655 | 1311 | 2621 | 5243 | 10486 | 20972 | 41943 | 83886
 
 | CT Reg | Conv Time | Eff. Bits | EXP 0 | EXP 1 | EXP 2 | EXP 3 | EXP 4 | EXP 5 | EXP 6 | EXP 7 | EXP 8 |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -791,6 +791,19 @@ POWER_DOWN → write OPERATING_MODE=1 or 2 → CONVERTING
 ---
 
 ## 18. Implementation Notes
+
+### Source Caveats Preserved From Extracted Notes
+
+- The SOT-5X3 `ADDR=SCL` row in the checked-in datasheet PDF prints
+  `1000101b` (`0x45`), duplicating the `ADDR=VDD` row. Treat `0x44`, `0x45`,
+  and `0x46` as the supported selectable SOT-5X3 addresses until hardware
+  evidence proves otherwise.
+- The checked-in OPT4001 PDFs do not document an SMBus PEC byte or PEC enable
+  register.
+- The result-register CRC is documented through XOR/syndrome equations. The
+  checked-in datasheet text does not name a standard CRC polynomial.
+- PicoStar/YMN has no INT pin in the datasheet pin table. INT behavior is
+  SOT-5X3/DTS-only for this driver.
 
 ### 32-bit Data Types Required
 

@@ -3,7 +3,7 @@
 
 PROJECT_NAME           = "OPT4001"
 PROJECT_NUMBER         = "1.0.0"
-PROJECT_BRIEF          = "OPT4001 embedded library API documentation"
+PROJECT_BRIEF          = "Framework-neutral OPT4001 driver API documentation"
 OUTPUT_DIRECTORY       = docs/doxygen
 CREATE_SUBDIRS         = NO
 ALLOW_UNICODE_NAMES    = NO
@@ -31,16 +31,32 @@ REFERENCED_BY_RELATION = YES
 REFERENCES_RELATION    = YES
 STRIP_CODE_COMMENTS    = NO
 
-INPUT                  = README.md CHANGELOG.md AGENTS.md CONTRIBUTING.md include docs
+INPUT                  = README.md \
+                         CHANGELOG.md \
+                         CONTRIBUTING.md \
+                         include/OPT4001 \
+                         docs/README.md \
+                         docs/integration/esp-idf.md \
+                         docs/integration/driver-contracts.md \
+                         docs/validation/hardware-validation-procedure.md \
+                         docs/validation/release-checklist.md \
+                         docs/validation/validation-status.md \
+                         docs/reference/OPT4001_datasheet.md \
+                         docs/reference/AN_light_detection.md \
+                         docs/reference/AN_high_speed_resolution.md \
+                         docs/reference/AN_picostar_package.md
 FILE_PATTERNS          = *.h *.md
 RECURSIVE              = YES
-EXCLUDE_PATTERNS       = */.pio/* */.git/* */test/* */docs/doxygen/* */docs/extracted-md/* */docs/pdf-extracted-md/* */docs/_pdf_extracts/*
+EXCLUDE_PATTERNS       = */.pio/* \
+                         */.git/* \
+                         */test/* \
+                         */docs/doxygen/*
 EXAMPLE_PATH           = examples/01_basic_bringup_cli
 
 USE_MDFILE_AS_MAINPAGE = README.md
 FULL_PATH_NAMES        = NO
-SORT_MEMBER_DOCS       = YES
-SORT_BRIEF_DOCS        = YES
+SORT_MEMBER_DOCS       = NO
+SORT_BRIEF_DOCS        = NO
 SORT_MEMBERS_CTORS_1ST = YES
 
 GENERATE_HTML          = YES

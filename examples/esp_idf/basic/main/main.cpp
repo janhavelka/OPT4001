@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "OPT4001/OPT4001.h"
 #include "Opt4001IdfI2cTransport.h"
@@ -83,6 +85,7 @@ const char* errToStr(OPT4001::Err err) {
     case OPT4001::Err::I2C_NACK_DATA: return "I2C_NACK_DATA";
     case OPT4001::Err::I2C_TIMEOUT: return "I2C_TIMEOUT";
     case OPT4001::Err::I2C_BUS: return "I2C_BUS";
+    case OPT4001::Err::OFFLINE: return "OFFLINE";
     default: return "UNKNOWN";
   }
 }
@@ -95,6 +98,10 @@ const char* stateToStr(OPT4001::DriverState state) {
     case OPT4001::DriverState::OFFLINE: return "OFFLINE";
     default: return "UNKNOWN";
   }
+}
+
+bool sampleStatusHasData(const OPT4001::Status& st) {
+  return st.ok() || st.code == OPT4001::Err::CRC_ERROR;
 }
 
 void printStatus(OPT4001::Status st) {
@@ -264,16 +271,18 @@ void processCommand(char* line) {
   } else if (strcmp(cmd, "read") == 0 || strcmp(cmd, "lux") == 0) {
     float lux = 0.0f;
     const auto st = device.readBlockingLux(lux, 1000);
-    if (st.ok()) printf("Lux: %.6f\n", lux);
+    if (sampleStatusHasData(st)) printf("Lux: %.6f\n", lux);
     printStatus(st);
   } else if (strcmp(cmd, "mlux") == 0) {
     uint32_t value = 0;
     const auto st = device.readMilliLux(value);
-    st.ok() ? printf("Milli-lux: %lu\n", static_cast<unsigned long>(value)) : printStatus(st);
+    if (sampleStatusHasData(st)) printf("Milli-lux: %lu\n", static_cast<unsigned long>(value));
+    printStatus(st);
   } else if (strcmp(cmd, "ulux") == 0) {
     uint64_t value = 0;
     const auto st = device.readMicroLux(value);
-    st.ok() ? printf("Micro-lux: %llu\n", static_cast<unsigned long long>(value)) : printStatus(st);
+    if (sampleStatusHasData(st)) printf("Micro-lux: %llu\n", static_cast<unsigned long long>(value));
+    printStatus(st);
   } else if (strcmp(cmd, "sample") == 0) {
     OPT4001::Sample sample;
     const auto st = device.getLastSample(sample);
@@ -303,8 +312,13 @@ void processCommand(char* line) {
   } else if (strcmp(cmd, "burst") == 0 || strcmp(cmd, "fifo") == 0) {
     OPT4001::BurstFrame frame;
     const auto st = device.readBurst(frame);
-    if (st.ok()) { printSample(frame.newest); printSample(frame.fifo0); printSample(frame.fifo1); printSample(frame.fifo2); }
-    else printStatus(st);
+    if (sampleStatusHasData(st)) {
+      printSample(frame.newest);
+      printSample(frame.fifo0);
+      printSample(frame.fifo1);
+      printSample(frame.fifo2);
+    }
+    printStatus(st);
   } else if (strcmp(cmd, "cfg") == 0 || strcmp(cmd, "settings") == 0 || strcmp(cmd, "snapshot") == 0) {
     printSettings();
   } else if (strcmp(cmd, "range") == 0 || strcmp(cmd, "ctime") == 0 || strcmp(cmd, "mode") == 0) {
@@ -358,7 +372,10 @@ void processCommand(char* line) {
   } else if (strcmp(cmd, "id") == 0) {
     OPT4001::DeviceIdInfo info;
     const auto st = device.readDeviceId(info);
-    st.ok() ? printf("DEVICE_ID raw=0x%04X didh=0x%03X didl=%u match=%s\n", info.raw, info.didh, info.didl, info.matchesExpected ? "yes" : "no") : printStatus(st);
+    st.ok() ? printf("DEVICE_ID raw=0x%04X didh=0x%03X didl=%u reserved_clear=%s match=%s\n",
+                     info.raw, info.didh, info.didl,
+                     info.reservedBitsClear ? "yes" : "no",
+                     info.matchesExpected ? "yes" : "no") : printStatus(st);
   } else if (strcmp(cmd, "config") == 0 || strcmp(cmd, "intcfg") == 0) {
     uint16_t raw = 0;
     const auto st = strcmp(cmd, "config") == 0 ? device.readConfiguration(raw) : device.readIntConfiguration(raw);
@@ -427,6 +444,22 @@ void configureI2c() {
   ESP_ERROR_CHECK(i2c_master_bus_add_device(i2c.bus, &generalCallConfig, &i2c.generalCallDev));
 }
 
+bool configureConsole() {
+  setvbuf(stdin, nullptr, _IONBF, 0);
+  setvbuf(stdout, nullptr, _IONBF, 0);
+
+  const int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+  if (flags < 0) {
+    puts("stdin flags unavailable; refusing to start blocking diagnostic CLI.");
+    return false;
+  }
+  if (fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK) < 0) {
+    puts("stdin nonblocking mode failed; refusing to start blocking diagnostic CLI.");
+    return false;
+  }
+  return true;
+}
+
 void cliLoop() {
   static char input[INPUT_MAX];
   size_t len = 0;
@@ -464,9 +497,9 @@ void cliLoop() {
 }  // namespace
 
 extern "C" void app_main(void) {
-  setvbuf(stdin, nullptr, _IONBF, 0);
-  setvbuf(stdout, nullptr, _IONBF, 0);
-
+  if (!configureConsole()) {
+    return;
+  }
   puts("=== OPT4001 native ESP-IDF bringup ===");
   configureI2c();
   scanI2c();

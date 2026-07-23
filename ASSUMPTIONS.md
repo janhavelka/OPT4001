@@ -27,10 +27,12 @@ that stays consistent with the other I2C driver repositories in this workspace.
    `0x400`. In the full 16-bit register image that field occupies bits `[15:5]`,
    which corresponds to raw register value `0x8000`.
 
-5. Sample readiness in the driver core uses time-bounded register polling.
-   The config struct carries optional INT pin hooks for board integration, but the
-   driver does not rely on catching the device's very short conversion-ready pulse.
-   This avoids baking board-specific GPIO interrupt behavior into the core library.
+5. Fresh-sample readiness requires hardware evidence.
+   Elapsed conversion time is only a gate for bounded register polling. Fresh
+   reads require the conversion-ready flag, a configured SOT-5X3 INT assertion,
+   or a sample-counter advance from the previous accepted fresh sample. The
+   driver still avoids baking board-specific GPIO interrupt behavior into the
+   core library.
 
 6. High-speed I2C entry and SMBus alert response are not wrapped as dedicated
    driver APIs.

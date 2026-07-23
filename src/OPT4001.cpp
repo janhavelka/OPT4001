@@ -5,6 +5,7 @@
 
 #include <climits>
 #include <cmath>
+#include <limits>
 
 namespace OPT4001 {
 namespace {
@@ -92,6 +93,32 @@ bool isValidPublicRegisterBlock(uint8_t startReg, size_t len) {
   return true;
 }
 
+bool rawWriteCanDirtyCachedSettings(uint8_t reg) {
+  return reg == cmd::REG_CONFIGURATION ||
+         reg == cmd::REG_INT_CONFIGURATION ||
+         reg == cmd::REG_THRESHOLD_L ||
+         reg == cmd::REG_THRESHOLD_H ||
+         reg == cmd::REG_FLAGS;
+}
+
+static constexpr uint8_t RESULT_EXPONENT_MAX = 8U;
+static constexpr uint32_t RESULT_MANTISSA_MAX = 0x000FFFFFU;
+static constexpr uint8_t THRESHOLD_SHIFT_BASE = 8U;
+static constexpr uint64_t THRESHOLD_ADC_CODES_MAX =
+    static_cast<uint64_t>(cmd::THRESHOLD_RESULT_MAX)
+    << (THRESHOLD_SHIFT_BASE + cmd::THRESHOLD_EXPONENT_MAX);
+// Allows thresholdToLux(max) float round-trip while still rejecting clearly high inputs.
+static constexpr double THRESHOLD_ADC_FLOAT_GUARD_CODES = 4096.0;
+
+float invalidLuxValue() {
+  return std::numeric_limits<float>::quiet_NaN();
+}
+
+float adcCodesToLux64(uint64_t adcCodes, float luxLsb) {
+  return static_cast<float>(static_cast<double>(adcCodes) *
+                            static_cast<double>(luxLsb));
+}
+
 uint32_t ceilUsToMs(uint32_t microseconds) {
   return (microseconds + 999U) / 1000U;
 }
@@ -105,8 +132,24 @@ uint32_t blockingPollLimit(uint32_t timeoutMs, uint32_t extraMs = 0) {
   return static_cast<uint32_t>(polls);
 }
 
-Status offlineBusyStatus() {
-  return Status::Error(Err::BUSY, "Driver is offline; call recover()");
+Status offlineStatus() {
+  return Status::Error(Err::OFFLINE, "Driver is offline; call recover()");
+}
+
+bool mergeSampleDecodeStatus(Status& aggregate, const Status& slotStatus) {
+  if (slotStatus.ok()) {
+    return true;
+  }
+  if (slotStatus.code == Err::CRC_ERROR) {
+    if (aggregate.ok()) {
+      aggregate = slotStatus;
+    }
+    return true;
+  }
+  if (aggregate.ok() || aggregate.code == Err::CRC_ERROR) {
+    aggregate = slotStatus;
+  }
+  return false;
 }
 
 class ScopedOfflineI2cAllowance {
@@ -138,6 +181,14 @@ Status OPT4001::begin(const Config& config) {
   _initialized = false;
   _driverState = DriverState::UNINIT;
   _allowOfflineI2c = false;
+  _pollJob = PollJob::NONE;
+  _pollStep = PollStep::IDLE;
+  _lastPollStatus = Status::Ok();
+  _pollWritesApplied = 0;
+  _pollResetApplied = false;
+  _pollExecuting = false;
+  _lastBurstValid = false;
+  _clearHardwareConfigDirty();
   _clearRuntimeState();
 
   _lastOkMs = 0;
@@ -207,13 +258,14 @@ void OPT4001::tick(uint32_t nowMs) {
   if (_driverState == DriverState::OFFLINE) {
     return;
   }
+  if (_pollJob != PollJob::NONE) {
+    return;
+  }
 
   if (_config.mode == Mode::CONTINUOUS) {
-    if (!_conversionReady &&
-        (nowMs - _conversionStartMs) >= getConversionTimeMs()) {
-      _conversionStarted = false;
-      _conversionReady = true;
-      _sampleAvailable = true;
+    if (!_conversionReady && (nowMs - _conversionStartMs) >= getConversionTimeMs()) {
+      bool ready = false;
+      (void)_refreshReadinessEvidence(ready);
     }
     return;
   }
@@ -226,7 +278,8 @@ void OPT4001::tick(uint32_t nowMs) {
     return;
   }
 
-  (void)_markConversionReadyByRegisterPoll();
+  bool ready = false;
+  (void)_refreshReadinessEvidence(ready);
 }
 
 void OPT4001::end() {
@@ -243,6 +296,12 @@ void OPT4001::end() {
   _initialized = false;
   _driverState = DriverState::UNINIT;
   _allowOfflineI2c = false;
+  _pollJob = PollJob::NONE;
+  _pollStep = PollStep::IDLE;
+  _lastPollStatus = Status::Ok();
+  _pollWritesApplied = 0;
+  _pollResetApplied = false;
+  _pollExecuting = false;
   _clearRuntimeState();
 }
 
@@ -254,15 +313,9 @@ Status OPT4001::probe() {
   uint16_t deviceId = 0;
   Status st = _readRegister16Raw(cmd::REG_DEVICE_ID, deviceId);
   if (!st.ok()) {
-    if (st.code == Err::INVALID_CONFIG || st.code == Err::INVALID_PARAM) {
-      return st;
-    }
-    return Status::Error(Err::DEVICE_NOT_FOUND, "OPT4001 not responding", st.detail);
+    return st;
   }
-  if ((deviceId & cmd::MASK_DIDH) != cmd::DIDH_EXPECTED) {
-    return Status::Error(Err::DEVICE_ID_MISMATCH, "Unexpected device ID", deviceId);
-  }
-  return Status::Ok();
+  return _validateDeviceId(deviceId);
 }
 
 Status OPT4001::recover() {
@@ -281,9 +334,9 @@ Status OPT4001::recover() {
     }
     return st;
   }
-  if ((deviceId & cmd::MASK_DIDH) != cmd::DIDH_EXPECTED) {
-    st = _recordFailure(Status::Error(Err::DEVICE_ID_MISMATCH,
-                                      "Unexpected device ID", deviceId));
+  st = _validateDeviceId(deviceId);
+  if (!st.ok()) {
+    st = _recordFailure(st);
     if (startedOffline) {
       _reassertOfflineLatch();
     }
@@ -334,6 +387,7 @@ Status OPT4001::resetAndReapply() {
 
   st = _applyConfig();
   if (!st.ok()) {
+    _markHardwareConfigDirty(st);
     _initialized = false;
     _driverState = DriverState::UNINIT;
     return st;
@@ -349,7 +403,7 @@ Status OPT4001::readDeviceId(uint16_t& value) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
-  return readRegister16(cmd::REG_DEVICE_ID, value);
+  return _readRegister16Tracked(cmd::REG_DEVICE_ID, value);
 }
 
 Status OPT4001::readDeviceId(DeviceIdInfo& out) {
@@ -397,6 +451,8 @@ Status OPT4001::getSettings(SettingsSnapshot& out) const {
   out.lastCounter = _lastCounter;
   out.lastAdcCodes = _lastAdcCodes;
   out.lastLux = _lastLux;
+  out.hardwareConfigDirty = _hardwareConfigDirty;
+  out.hardwareConfigDirtyError = _hardwareConfigDirtyError;
   return Status::Ok();
 }
 
@@ -422,7 +478,7 @@ Status OPT4001::startConversion(Mode mode) {
     return Status::Error(Err::BUSY, "Conversion already in progress");
   }
 
-  Status st = writeRegister16(cmd::REG_CONFIGURATION, _buildConfigurationRegister(mode));
+  Status st = _writeRegister16Tracked(cmd::REG_CONFIGURATION, _buildConfigurationRegister(mode));
   if (!st.ok()) {
     return st;
   }
@@ -435,49 +491,165 @@ Status OPT4001::startConversion(Mode mode) {
   return Status{Err::IN_PROGRESS, 0, "Conversion started"};
 }
 
+Status OPT4001::poll(uint32_t nowMs, uint8_t maxInstructions) {
+  if (_pollJob == PollJob::NONE) {
+    return _lastPollStatus;
+  }
+
+  uint8_t remaining = maxInstructions;
+  Status st = _pollInProgressStatus("Poll job in progress");
+
+  while (_pollJob != PollJob::NONE) {
+    const uint8_t before = remaining;
+    const bool wasPollExecuting = _pollExecuting;
+    _pollExecuting = true;
+    switch (_pollJob) {
+      case PollJob::READ_SAMPLE:
+      case PollJob::READ_BURST:
+        st = _pollReadJob(nowMs, remaining);
+        break;
+      case PollJob::CONFIGURE_MEASUREMENT:
+        st = _pollConfigJob(nowMs, remaining);
+        break;
+      case PollJob::RESET_AND_REAPPLY:
+        st = _pollResetAndReapplyJob(nowMs, remaining);
+        break;
+      case PollJob::NONE:
+        st = Status::Ok();
+        break;
+    }
+    _pollExecuting = wasPollExecuting;
+
+    _lastPollStatus = st;
+    if (_pollJob == PollJob::NONE || !st.inProgress()) {
+      return st;
+    }
+    if (remaining == 0U || remaining == before) {
+      return st;
+    }
+  }
+
+  _lastPollStatus = st;
+  return st;
+}
+
+bool OPT4001::pollBusy() const {
+  return _pollJob != PollJob::NONE;
+}
+
+Status OPT4001::startReadSample() {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+  if (_driverState == DriverState::OFFLINE) {
+    return offlineStatus();
+  }
+  if (_pollJob != PollJob::NONE) {
+    return Status::Error(Err::BUSY, "Poll job already active");
+  }
+  if (!_config.burstMode) {
+    return Status::Error(Err::INVALID_CONFIG, "Poll sample requires I2C burst mode");
+  }
+
+  _pollJob = PollJob::READ_SAMPLE;
+  _pollStep = PollStep::WAIT_READY;
+  _lastBurstValid = false;
+  _lastPollStatus = _pollInProgressStatus("Read sample job started");
+  return _lastPollStatus;
+}
+
+Status OPT4001::startReadBurst() {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+  if (_driverState == DriverState::OFFLINE) {
+    return offlineStatus();
+  }
+  if (_pollJob != PollJob::NONE) {
+    return Status::Error(Err::BUSY, "Poll job already active");
+  }
+  if (!_config.burstMode) {
+    return Status::Error(Err::INVALID_CONFIG, "Poll burst requires I2C burst mode");
+  }
+
+  _pollJob = PollJob::READ_BURST;
+  _pollStep = PollStep::WAIT_READY;
+  _lastBurstValid = false;
+  _lastPollStatus = _pollInProgressStatus("Read burst job started");
+  return _lastPollStatus;
+}
+
+Status OPT4001::getLastBurst(BurstFrame& out) const {
+  if (!_lastBurstValid) {
+    return Status::Error(Err::MEASUREMENT_NOT_READY, "No cached burst frame");
+  }
+  out = _lastBurst;
+  return Status::Ok();
+}
+
+Status OPT4001::startConfigureMeasurement(Range range,
+                                          ConversionTime time,
+                                          Mode mode,
+                                          bool quickWake) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+  if (_driverState == DriverState::OFFLINE) {
+    return offlineStatus();
+  }
+  if (_pollJob != PollJob::NONE) {
+    return Status::Error(Err::BUSY, "Poll job already active");
+  }
+  if (!isValidRange(range)) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid range");
+  }
+  if (!isValidConversionTime(time)) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid conversion time");
+  }
+  if (!isStableMode(mode)) {
+    return Status::Error(Err::INVALID_PARAM, "Mode must be POWER_DOWN or CONTINUOUS");
+  }
+
+  _pollTargetConfig = _config;
+  _pollTargetConfig.range = range;
+  _pollTargetConfig.conversionTime = time;
+  _pollTargetConfig.mode = mode;
+  _pollTargetConfig.quickWake = quickWake;
+  _pollWritesApplied = 0;
+  _pollResetApplied = false;
+  _pollJob = PollJob::CONFIGURE_MEASUREMENT;
+  _pollStep = PollStep::WRITE_THRESHOLD_L;
+  _lastPollStatus = _pollInProgressStatus("Configure measurement job started");
+  return _lastPollStatus;
+}
+
+Status OPT4001::startResetAndReapply() {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+  if (_pollJob != PollJob::NONE) {
+    return Status::Error(Err::BUSY, "Poll job already active");
+  }
+
+  _pollTargetConfig = _config;
+  _pollWritesApplied = 0;
+  _pollResetApplied = false;
+  _pollJob = PollJob::RESET_AND_REAPPLY;
+  _pollStep = PollStep::WRITE_RESET;
+  _lastPollStatus = _pollInProgressStatus("Reset and reapply job started");
+  return _lastPollStatus;
+}
+
 Status OPT4001::conversionReady(bool& ready) {
   ready = false;
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
   if (_driverState == DriverState::OFFLINE) {
-    return offlineBusyStatus();
+    return offlineStatus();
   }
 
-  if (_config.mode == Mode::CONTINUOUS) {
-    if (_conversionReady) {
-      ready = true;
-      return Status::Ok();
-    }
-    if ((_nowMs() - _conversionStartMs) >= getConversionTimeMs()) {
-      _conversionStarted = false;
-      _conversionReady = true;
-      _sampleAvailable = true;
-    }
-    ready = _conversionReady;
-    return Status::Ok();
-  }
-
-  if (_conversionReady) {
-    ready = true;
-    return Status::Ok();
-  }
-  if (!_conversionStarted) {
-    return Status::Ok();
-  }
-  if ((_nowMs() - _conversionStartMs) < getOneShotBudgetMs(_pendingMode)) {
-    return Status::Ok();
-  }
-
-  Status st = _markConversionReadyByRegisterPoll();
-  if (st.ok()) {
-    ready = _conversionReady;
-    return Status::Ok();
-  }
-  if (st.code == Err::MEASUREMENT_NOT_READY) {
-    return Status::Ok();
-  }
-  return st;
+  return _refreshReadinessEvidence(ready);
 }
 
 bool OPT4001::conversionReady() {
@@ -491,31 +663,33 @@ Status OPT4001::readSample(Sample& out) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
 
-  if (_config.mode == Mode::CONTINUOUS) {
-    bool ready = _conversionReady;
-    if (!ready) {
-      Status readySt = conversionReady(ready);
-      if (!readySt.ok()) {
-        return readySt;
-      }
-    }
-    if (!ready) {
-      return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
-    }
-  } else {
-    if (_conversionStarted) {
-      bool ready = false;
-      Status readySt = conversionReady(ready);
-      if (!readySt.ok()) {
-        return readySt;
-      }
-      if (!ready) {
-        return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
-      }
-    }
-    if (!_sampleAvailable) {
-      return Status::Error(Err::MEASUREMENT_NOT_READY, "No sample available");
-    }
+  bool ready = false;
+  Status readySt = _refreshReadinessEvidence(ready);
+  if (!readySt.ok()) {
+    return readySt;
+  }
+  if (!ready) {
+    return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
+  }
+
+  Status st = _readSampleAt(cmd::REG_RESULT, out);
+  if (!st.ok() && st.code != Err::CRC_ERROR) {
+    return st;
+  }
+
+  if (!_sampleCounterIsFresh(out.counter)) {
+    _clearReadinessEvidence();
+    return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
+  }
+
+  _markFreshSampleConsumed(out);
+
+  return st;
+}
+
+Status OPT4001::readLatestSample(Sample& out) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
 
   Status st = _readSampleAt(cmd::REG_RESULT, out);
@@ -524,11 +698,6 @@ Status OPT4001::readSample(Sample& out) {
   }
 
   _cacheSample(out);
-
-  if (_config.mode == Mode::POWER_DOWN) {
-    _conversionReady = false;
-  }
-
   return st;
 }
 
@@ -537,70 +706,62 @@ Status OPT4001::readBurst(BurstFrame& out) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
 
-  if (_config.mode == Mode::CONTINUOUS) {
-    bool ready = _conversionReady;
-    if (!ready) {
-      Status readySt = conversionReady(ready);
-      if (!readySt.ok()) {
-        return readySt;
-      }
+  bool ready = false;
+  Status readySt = _refreshReadinessEvidence(ready);
+  if (!readySt.ok()) {
+    return readySt;
+  }
+  if (!ready) {
+    return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
+  }
+
+  if (_config.burstMode) {
+    Status status = _readBurstBlockTracked(out);
+    if (!status.ok() && status.code != Err::CRC_ERROR) {
+      return status;
     }
-    if (!ready) {
+
+    if (!_sampleCounterIsFresh(out.newest.counter)) {
+      _clearReadinessEvidence();
       return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
     }
-  } else {
-    if (_conversionStarted) {
-      bool ready = false;
-      Status readySt = conversionReady(ready);
-      if (!readySt.ok()) {
-        return readySt;
-      }
-      if (!ready) {
-        return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
-      }
-    }
-    if (!_sampleAvailable) {
-      return Status::Error(Err::MEASUREMENT_NOT_READY, "No sample available");
-    }
+
+    _lastBurst = out;
+    _lastBurstValid = true;
+    _markFreshSampleConsumed(out.newest);
+    return status;
   }
 
   Status status = Status::Ok();
-  if (_config.burstMode) {
-    const uint8_t reg = cmd::REG_RESULT;
-    uint8_t buffer[16] = {};
-    Status st = _i2cWriteReadTracked(&reg, 1, buffer, sizeof(buffer));
-    if (!st.ok()) {
-      return st;
-    }
-
-    const uint16_t regs[8] = {
-      static_cast<uint16_t>((buffer[0] << 8) | buffer[1]),
-      static_cast<uint16_t>((buffer[2] << 8) | buffer[3]),
-      static_cast<uint16_t>((buffer[4] << 8) | buffer[5]),
-      static_cast<uint16_t>((buffer[6] << 8) | buffer[7]),
-      static_cast<uint16_t>((buffer[8] << 8) | buffer[9]),
-      static_cast<uint16_t>((buffer[10] << 8) | buffer[11]),
-      static_cast<uint16_t>((buffer[12] << 8) | buffer[13]),
-      static_cast<uint16_t>((buffer[14] << 8) | buffer[15]),
-    };
-
-    status = _decodeSampleRegisters(regs[0], regs[1], out.newest);
-    if (status.ok()) status = _decodeSampleRegisters(regs[2], regs[3], out.fifo0);
-    if (status.ok()) status = _decodeSampleRegisters(regs[4], regs[5], out.fifo1);
-    if (status.ok()) status = _decodeSampleRegisters(regs[6], regs[7], out.fifo2);
-  } else {
-    status = _readSampleAt(cmd::REG_RESULT, out.newest);
-    if (status.ok()) status = _readSampleAt(cmd::REG_FIFO0_MSB, out.fifo0);
-    if (status.ok()) status = _readSampleAt(cmd::REG_FIFO1_MSB, out.fifo1);
-    if (status.ok()) status = _readSampleAt(cmd::REG_FIFO2_MSB, out.fifo2);
+  Status slotStatus = _readSampleAt(cmd::REG_RESULT, out.newest);
+  if (!mergeSampleDecodeStatus(status, slotStatus)) {
+    return status;
+  }
+  slotStatus = _readSampleAt(cmd::REG_FIFO0_MSB, out.fifo0);
+  if (!mergeSampleDecodeStatus(status, slotStatus)) {
+    return status;
+  }
+  slotStatus = _readSampleAt(cmd::REG_FIFO1_MSB, out.fifo1);
+  if (!mergeSampleDecodeStatus(status, slotStatus)) {
+    return status;
+  }
+  slotStatus = _readSampleAt(cmd::REG_FIFO2_MSB, out.fifo2);
+  if (!mergeSampleDecodeStatus(status, slotStatus)) {
+    return status;
   }
 
-  _cacheSample(out.newest);
-
-  if (_config.mode == Mode::POWER_DOWN) {
-    _conversionReady = false;
+  if (!status.ok() && status.code != Err::CRC_ERROR) {
+    return status;
   }
 
+  if (!_sampleCounterIsFresh(out.newest.counter)) {
+    _clearReadinessEvidence();
+    return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
+  }
+
+  _lastBurst = out;
+  _lastBurstValid = true;
+  _markFreshSampleConsumed(out.newest);
   return status;
 }
 
@@ -612,30 +773,14 @@ Status OPT4001::readSampleSlot(uint8_t slot, Sample& out) {
     return Status::Error(Err::INVALID_PARAM, "Sample slot must be 0..3");
   }
 
-  if (_config.mode == Mode::CONTINUOUS) {
-    bool ready = _conversionReady;
-    if (!ready) {
-      Status readySt = conversionReady(ready);
-      if (!readySt.ok()) {
-        return readySt;
-      }
+  if (slot == 0U) {
+    bool ready = false;
+    Status readySt = _refreshReadinessEvidence(ready);
+    if (!readySt.ok()) {
+      return readySt;
     }
     if (!ready) {
       return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
-    }
-  } else {
-    if (_conversionStarted) {
-      bool ready = false;
-      Status readySt = conversionReady(ready);
-      if (!readySt.ok()) {
-        return readySt;
-      }
-      if (!ready) {
-        return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
-      }
-    }
-    if (!_sampleAvailable) {
-      return Status::Error(Err::MEASUREMENT_NOT_READY, "No sample available");
     }
   }
 
@@ -646,10 +791,11 @@ Status OPT4001::readSampleSlot(uint8_t slot, Sample& out) {
   }
 
   if (slot == 0U) {
-    _cacheSample(out);
-    if (_config.mode == Mode::POWER_DOWN) {
-      _conversionReady = false;
+    if (!_sampleCounterIsFresh(out.counter)) {
+      _clearReadinessEvidence();
+      return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
     }
+    _markFreshSampleConsumed(out);
   }
 
   return st;
@@ -710,25 +856,36 @@ Status OPT4001::readMicroLux(uint64_t& microLux) {
 }
 
 Status OPT4001::readBlocking(Sample& out, uint32_t timeoutMs) {
-  return readBlocking(out, Mode::ONE_SHOT, timeoutMs);
+  return readFreshBlocking(out, Mode::ONE_SHOT, timeoutMs);
 }
 
 Status OPT4001::readBlocking(Sample& out, Mode mode, uint32_t timeoutMs) {
+  return readFreshBlocking(out, mode, timeoutMs);
+}
+
+Status OPT4001::readFreshBlocking(Sample& out, uint32_t timeoutMs) {
+  return readFreshBlocking(out, Mode::ONE_SHOT, timeoutMs);
+}
+
+Status OPT4001::readFreshBlocking(Sample& out, Mode mode, uint32_t timeoutMs) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+  if (_config.nowMs == nullptr) {
+    return Status::Error(Err::INVALID_CONFIG, "Blocking reads require Config::nowMs");
   }
   if (_config.mode == Mode::CONTINUOUS) {
     const uint32_t deadlineMs = _nowMs() + timeoutMs;
     uint32_t polls = 0;
     const uint32_t maxPolls = blockingPollLimit(timeoutMs);
     while (static_cast<int32_t>(_nowMs() - deadlineMs) < 0 && polls < maxPolls) {
-      bool ready = false;
-      Status readySt = conversionReady(ready);
-      if (!readySt.ok()) {
-        return readySt;
+      bool didRead = false;
+      Status st = tryReadFreshSample(out, didRead);
+      if (!st.ok() && st.code != Err::CRC_ERROR) {
+        return st;
       }
-      if (ready) {
-        return readSample(out);
+      if (didRead) {
+        return st;
       }
       ++polls;
       _cooperativeYield();
@@ -774,8 +931,7 @@ Status OPT4001::readBlocking(Sample& out, Mode mode, uint32_t timeoutMs) {
   }
 
   _conversionStarted = false;
-  _conversionReady = false;
-  _sampleAvailable = false;
+  _clearReadinessEvidence();
   _pendingMode = Mode::POWER_DOWN;
   return Status::Error(Err::TIMEOUT, "Conversion timeout");
 }
@@ -795,20 +951,17 @@ Status OPT4001::readBlockingLux(float& lux, Mode mode, uint32_t timeoutMs) {
 }
 
 Status OPT4001::tryReadSample(Sample& out, bool& didRead) {
+  return tryReadFreshSample(out, didRead);
+}
+
+Status OPT4001::tryReadFreshSample(Sample& out, bool& didRead) {
   didRead = false;
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
 
   bool ready = false;
-  Status readySt = Status::Ok();
-  if (_config.mode == Mode::CONTINUOUS) {
-    readySt = conversionReady(ready);
-  } else if (_conversionStarted) {
-    readySt = conversionReady(ready);
-  } else {
-    ready = _sampleAvailable;
-  }
+  Status readySt = _refreshReadinessEvidence(ready);
   if (!readySt.ok()) {
     return readySt;
   }
@@ -850,7 +1003,7 @@ Status OPT4001::readFlags(Flags& out) {
   }
 
   uint16_t raw = 0;
-  Status st = readRegister16(cmd::REG_FLAGS, raw);
+  Status st = _readRegister16Tracked(cmd::REG_FLAGS, raw);
   if (!st.ok()) {
     return st;
   }
@@ -875,7 +1028,11 @@ Status OPT4001::readFlagsRaw(uint16_t& value) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
-  return readRegister16(cmd::REG_FLAGS, value);
+  Status st = _readRegister16Tracked(cmd::REG_FLAGS, value);
+  if (st.ok()) {
+    _clearReadinessEvidence();
+  }
+  return st;
 }
 
 Status OPT4001::clearConversionReadyFlag() {
@@ -883,7 +1040,11 @@ Status OPT4001::clearConversionReadyFlag() {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
 
-  return writeRegister16(cmd::REG_FLAGS, 0x0001);
+  Status st = _writeRegister16Tracked(cmd::REG_FLAGS, 0x0001);
+  if (st.ok()) {
+    _clearReadinessEvidence();
+  }
+  return st;
 }
 
 Status OPT4001::clearFlags() {
@@ -892,7 +1053,11 @@ Status OPT4001::clearFlags() {
   }
 
   Flags flags;
-  return readFlags(flags);
+  Status st = readFlags(flags);
+  if (st.ok()) {
+    _clearReadinessEvidence();
+  }
+  return st;
 }
 
 Status OPT4001::readIntPinAsserted(bool& asserted) const {
@@ -1100,13 +1265,14 @@ Status OPT4001::setThresholds(const Threshold& low, const Threshold& high) {
   _config.lowThreshold = low;
   _config.highThreshold = high;
 
-  Status st = writeRegister16(cmd::REG_THRESHOLD_L, _packThreshold(low));
+  Status st = _writeRegister16Tracked(cmd::REG_THRESHOLD_L, _packThreshold(low));
   if (!st.ok()) {
     _config = oldConfig;
     return st;
   }
-  st = writeRegister16(cmd::REG_THRESHOLD_H, _packThreshold(high));
+  st = _writeRegister16Tracked(cmd::REG_THRESHOLD_H, _packThreshold(high));
   if (!st.ok()) {
+    _markHardwareConfigDirty(st);
     _config = oldConfig;
   }
   return st;
@@ -1119,11 +1285,11 @@ Status OPT4001::getThresholds(Threshold& low, Threshold& high) {
 
   uint16_t lowRaw = 0;
   uint16_t highRaw = 0;
-  Status st = readRegister16(cmd::REG_THRESHOLD_L, lowRaw);
+  Status st = _readRegister16Tracked(cmd::REG_THRESHOLD_L, lowRaw);
   if (!st.ok()) {
     return st;
   }
-  st = readRegister16(cmd::REG_THRESHOLD_H, highRaw);
+  st = _readRegister16Tracked(cmd::REG_THRESHOLD_H, highRaw);
   if (!st.ok()) {
     return st;
   }
@@ -1222,7 +1388,17 @@ Status OPT4001::enableThresholdInterrupt(const Threshold& low, const Threshold& 
   if (!_thresholdValid(low) || !_thresholdValid(high)) {
     return Status::Error(Err::INVALID_PARAM, "Invalid threshold");
   }
-  if (thresholdToAdcCodes(low) > thresholdToAdcCodes(high)) {
+  uint64_t lowCodes = 0;
+  uint64_t highCodes = 0;
+  Status st = thresholdToAdcCodes(low, lowCodes);
+  if (!st.ok()) {
+    return st;
+  }
+  st = thresholdToAdcCodes(high, highCodes);
+  if (!st.ok()) {
+    return st;
+  }
+  if (lowCodes > highCodes) {
     return Status::Error(Err::INVALID_PARAM, "Low threshold must be <= high threshold");
   }
 
@@ -1231,7 +1407,7 @@ Status OPT4001::enableThresholdInterrupt(const Threshold& low, const Threshold& 
   _config.highThreshold = high;
   _config.intDirection = IntDirection::PIN_OUTPUT;
   _config.intConfig = IntConfig::THRESHOLD;
-  Status st = _applyConfig();
+  st = _applyConfig();
   if (!st.ok()) {
     _config = oldConfig;
   }
@@ -1293,7 +1469,7 @@ Status OPT4001::readConfiguration(uint16_t& value) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
-  return readRegister16(cmd::REG_CONFIGURATION, value);
+  return _readRegister16Tracked(cmd::REG_CONFIGURATION, value);
 }
 
 Status OPT4001::readConfiguration(ConfigurationInfo& out) {
@@ -1337,7 +1513,7 @@ Status OPT4001::writeConfiguration(uint16_t value) {
     return Status::Error(Err::INVALID_PARAM, "Invalid configuration value");
   }
 
-  Status st = writeRegister16(cmd::REG_CONFIGURATION, value);
+  Status st = _writeRegister16Tracked(cmd::REG_CONFIGURATION, value);
   if (!st.ok()) {
     return st;
   }
@@ -1381,7 +1557,7 @@ Status OPT4001::readIntConfiguration(uint16_t& value) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
-  return readRegister16(cmd::REG_INT_CONFIGURATION, value);
+  return _readRegister16Tracked(cmd::REG_INT_CONFIGURATION, value);
 }
 
 Status OPT4001::readIntConfiguration(IntConfigurationInfo& out) {
@@ -1413,7 +1589,7 @@ Status OPT4001::writeIntConfiguration(uint16_t value) {
     return Status::Error(Err::INVALID_PARAM, "Invalid INT configuration value");
   }
 
-  Status st = writeRegister16(cmd::REG_INT_CONFIGURATION, value);
+  Status st = _writeRegister16Tracked(cmd::REG_INT_CONFIGURATION, value);
   if (!st.ok()) {
     return st;
   }
@@ -1442,6 +1618,34 @@ Status OPT4001::readRegisters(uint8_t startReg, uint8_t* buf, size_t len) {
 }
 
 Status OPT4001::readRegister16(uint8_t reg, uint16_t& value) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+  return _readRegister16Tracked(reg, value);
+}
+
+Status OPT4001::writeRegister16(uint8_t reg, uint16_t value) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+  Status st = _writeRegister16Tracked(reg, value);
+  if (rawWriteCanDirtyCachedSettings(reg) &&
+      st.code != Err::INVALID_PARAM &&
+      st.code != Err::OFFLINE &&
+      st.code != Err::BUSY) {
+    if (st.ok()) {
+      if (!_hardwareConfigDirty) {
+        _hardwareConfigDirty = true;
+        _hardwareConfigDirtyError = Status::Ok();
+      }
+    } else {
+      _markHardwareConfigDirty(st);
+    }
+  }
+  return st;
+}
+
+Status OPT4001::_readRegister16Tracked(uint8_t reg, uint16_t& value) {
   if (!isValidPublicRegisterAddress(reg)) {
     return Status::Error(Err::INVALID_PARAM, "Invalid register address");
   }
@@ -1454,7 +1658,7 @@ Status OPT4001::readRegister16(uint8_t reg, uint16_t& value) {
   return Status::Ok();
 }
 
-Status OPT4001::writeRegister16(uint8_t reg, uint16_t value) {
+Status OPT4001::_writeRegister16Tracked(uint8_t reg, uint16_t value) {
   if (!isValidPublicRegisterAddress(reg)) {
     return Status::Error(Err::INVALID_PARAM, "Invalid register address");
   }
@@ -1473,8 +1677,122 @@ Status OPT4001::writeRegister16(uint8_t reg, uint16_t value) {
 void OPT4001::decodeDeviceId(uint16_t raw, DeviceIdInfo& out) const {
   out.raw = raw;
   out.didh = static_cast<uint16_t>(raw & cmd::MASK_DIDH);
-  out.didl = static_cast<uint8_t>((raw & cmd::MASK_DIDL) >> 12U);
-  out.matchesExpected = (out.didh == cmd::DIDH_EXPECTED) && (out.didl == 0U);
+  out.didl = static_cast<uint8_t>((raw & cmd::MASK_DIDL) >> cmd::BIT_DIDL);
+  out.reservedBitsClear = (raw & cmd::MASK_DEVICE_ID_RESERVED) == 0U;
+  out.matchesExpected = out.reservedBitsClear &&
+                        (out.didh == cmd::DIDH_EXPECTED) &&
+                        (out.didl == cmd::DIDL_EXPECTED);
+}
+
+Status OPT4001::_validateDeviceId(uint16_t raw) const {
+  DeviceIdInfo info;
+  decodeDeviceId(raw, info);
+  if (!info.matchesExpected) {
+    return Status::Error(Err::DEVICE_ID_MISMATCH, "Unexpected device ID", raw);
+  }
+  return Status::Ok();
+}
+
+Status OPT4001::_pollConversionReadyFlag(bool& ready) {
+  ready = false;
+  Flags flags;
+  Status st = readFlags(flags);
+  if (!st.ok()) {
+    return st;
+  }
+  ready = flags.conversionReady;
+  return Status::Ok();
+}
+
+Status OPT4001::_refreshReadinessEvidence(bool& ready) {
+  ready = false;
+  if (_conversionReady || _sampleAvailable) {
+    ready = true;
+    return Status::Ok();
+  }
+
+  bool evidence = _intFreshEvidenceAsserted();
+  Status st = Status::Ok();
+
+  if (!evidence && _shouldProbeCounterForFreshness()) {
+    uint16_t lsbCrc = 0;
+    st = _readRegister16Tracked(cmd::REG_RESULT_LSB_CRC, lsbCrc);
+    if (!st.ok()) {
+      return st;
+    }
+    const uint8_t counter =
+        static_cast<uint8_t>((lsbCrc & cmd::MASK_COUNTER) >> cmd::BIT_COUNTER);
+    evidence = _sampleCounterIsFresh(counter);
+  }
+
+  if (!evidence) {
+    bool flagReady = false;
+    st = _pollConversionReadyFlag(flagReady);
+    if (!st.ok()) {
+      return st;
+    }
+    evidence = flagReady;
+  }
+
+  if (evidence) {
+    _sampleAvailable = true;
+    _conversionReady = true;
+    if (_config.mode != Mode::CONTINUOUS) {
+      _conversionStarted = false;
+      _pendingMode = Mode::POWER_DOWN;
+    }
+    ready = true;
+  }
+  return Status::Ok();
+}
+
+bool OPT4001::_intFreshEvidenceAsserted() const {
+  if (_config.packageVariant != PackageVariant::SOT_5X3 ||
+      _config.intPin < 0 ||
+      _config.gpioRead == nullptr ||
+      _config.intDirection != IntDirection::PIN_OUTPUT) {
+    return false;
+  }
+  if (_config.intConfig != IntConfig::EVERY_CONVERSION &&
+      _config.intConfig != IntConfig::FIFO_FULL) {
+    return false;
+  }
+
+  const bool levelHigh = _config.gpioRead(_config.intPin, _config.gpioUser);
+  return (_config.interruptPolarity == InterruptPolarity::ACTIVE_HIGH)
+             ? levelHigh
+             : !levelHigh;
+}
+
+bool OPT4001::_oneShotBudgetElapsed() const {
+  return _conversionStarted &&
+         (static_cast<uint32_t>(_nowMs() - _conversionStartMs) >=
+          getOneShotBudgetMs(_pendingMode));
+}
+
+bool OPT4001::_shouldProbeCounterForFreshness() const {
+  if (!_lastFreshCounterValid) {
+    return false;
+  }
+  if (_config.mode == Mode::CONTINUOUS) {
+    return static_cast<uint32_t>(_nowMs() - _conversionStartMs) >= getConversionTimeMs();
+  }
+  return _oneShotBudgetElapsed();
+}
+
+bool OPT4001::_sampleCounterIsFresh(uint8_t counter) const {
+  return !_lastFreshCounterValid ||
+         ((counter & (cmd::SAMPLE_COUNT_MODULO - 1U)) !=
+          (_lastFreshCounter & (cmd::SAMPLE_COUNT_MODULO - 1U)));
+}
+
+void OPT4001::_markFreshSampleConsumed(const Sample& sample) {
+  _markFreshSampleConsumedAt(sample, _nowMs());
+}
+
+void OPT4001::_clearReadinessEvidence() {
+  _sampleAvailable = false;
+  _conversionReady = false;
 }
 
 void OPT4001::decodeConfiguration(uint16_t raw, ConfigurationInfo& out) const {
@@ -1516,15 +1834,53 @@ void OPT4001::decodeIntConfiguration(uint16_t raw, IntConfigurationInfo& out) co
 }
 
 float OPT4001::adcCodesToLux(uint32_t adcCodes) const {
-  return static_cast<float>(adcCodes) * getLuxLsb();
+  return adcCodesToLux64(adcCodes, getLuxLsb());
+}
+
+Status OPT4001::rawToAdcCodes(uint8_t exponent, uint32_t mantissa,
+                              uint64_t& adcCodes) const {
+  adcCodes = 0;
+  if (exponent > RESULT_EXPONENT_MAX) {
+    return Status::Error(Err::INVALID_PARAM, "Result exponent out of range", exponent);
+  }
+  if (mantissa > RESULT_MANTISSA_MAX) {
+    const int32_t detail =
+        (mantissa > static_cast<uint32_t>(INT32_MAX))
+            ? INT32_MAX
+            : static_cast<int32_t>(mantissa);
+    return Status::Error(Err::INVALID_PARAM, "Result mantissa exceeds 20 bits",
+                         detail);
+  }
+
+  adcCodes = static_cast<uint64_t>(mantissa) << exponent;
+  return Status::Ok();
+}
+
+Status OPT4001::rawToLux(uint8_t exponent, uint32_t mantissa, float& lux) const {
+  uint64_t adcCodes = 0;
+  Status st = rawToAdcCodes(exponent, mantissa, adcCodes);
+  if (!st.ok()) {
+    lux = invalidLuxValue();
+    return st;
+  }
+
+  lux = adcCodesToLux64(adcCodes, getLuxLsb());
+  return Status::Ok();
 }
 
 float OPT4001::rawToLux(uint8_t exponent, uint32_t mantissa) const {
-  return adcCodesToLux(static_cast<uint32_t>(mantissa << exponent));
+  float lux = invalidLuxValue();
+  (void)rawToLux(exponent, mantissa, lux);
+  return lux;
 }
 
 float OPT4001::thresholdToLux(const Threshold& threshold) const {
-  return adcCodesToLux(thresholdToAdcCodes(threshold));
+  uint64_t adcCodes = 0;
+  Status st = thresholdToAdcCodes(threshold, adcCodes);
+  if (!st.ok()) {
+    return invalidLuxValue();
+  }
+  return adcCodesToLux64(adcCodes, getLuxLsb());
 }
 
 float OPT4001::getLuxLsb() const {
@@ -1583,8 +1939,8 @@ float OPT4001::getRangeResolutionLux(Range range, ConversionTime time) const {
   }
 
   const uint8_t paddedBits = static_cast<uint8_t>(20U - effectiveBits);
-  const uint32_t adcStep = 1UL << (paddedBits + exponent);
-  return adcCodesToLux(adcStep);
+  const uint64_t adcStep = 1ULL << (paddedBits + exponent);
+  return adcCodesToLux64(adcStep, getLuxLsb());
 }
 
 float OPT4001::getCurrentResolutionLux() const {
@@ -1629,17 +1985,22 @@ Status OPT4001::luxToThreshold(float lux, Threshold& out) const {
   }
 
   const float lsb = getLuxLsb();
-  uint32_t adcCodes = 0;
+  uint64_t adcCodes = 0;
   if (lsb > 0.0f) {
-    const double scaled = (static_cast<double>(lux) / static_cast<double>(lsb)) + 0.5;
-    adcCodes = (scaled >= static_cast<double>(UINT32_MAX))
-                   ? UINT32_MAX
-                   : static_cast<uint32_t>(scaled);
+    const double scaled = static_cast<double>(lux) / static_cast<double>(lsb);
+    if (scaled > static_cast<double>(THRESHOLD_ADC_CODES_MAX) +
+                     THRESHOLD_ADC_FLOAT_GUARD_CODES) {
+      return Status::Error(Err::INVALID_PARAM, "Lux threshold exceeds register range");
+    }
+    adcCodes = static_cast<uint64_t>(scaled + 0.5);
+    if (adcCodes > THRESHOLD_ADC_CODES_MAX) {
+      adcCodes = THRESHOLD_ADC_CODES_MAX;
+    }
   }
 
   uint8_t exponent = 0;
   while (exponent < cmd::THRESHOLD_EXPONENT_MAX) {
-    const uint32_t result = adcCodes >> (8U + exponent);
+    const uint64_t result = adcCodes >> (THRESHOLD_SHIFT_BASE + exponent);
     if (result <= cmd::THRESHOLD_RESULT_MAX) {
       out.exponent = exponent;
       out.result = static_cast<uint16_t>(result);
@@ -1653,8 +2014,25 @@ Status OPT4001::luxToThreshold(float lux, Threshold& out) const {
   return Status::Ok();
 }
 
+Status OPT4001::thresholdToAdcCodes(const Threshold& threshold,
+                                    uint64_t& adcCodes) const {
+  adcCodes = 0;
+  if (!_thresholdValid(threshold)) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid threshold");
+  }
+
+  adcCodes = static_cast<uint64_t>(threshold.result) <<
+             (THRESHOLD_SHIFT_BASE + threshold.exponent);
+  return Status::Ok();
+}
+
 uint32_t OPT4001::thresholdToAdcCodes(const Threshold& threshold) const {
-  return static_cast<uint32_t>(threshold.result) << (8U + threshold.exponent);
+  uint64_t adcCodes = 0;
+  Status st = thresholdToAdcCodes(threshold, adcCodes);
+  if (!st.ok() || adcCodes > static_cast<uint64_t>(UINT32_MAX)) {
+    return UINT32_MAX;
+  }
+  return static_cast<uint32_t>(adcCodes);
 }
 
 uint8_t OPT4001::sampleCounterDelta(uint8_t previousCounter, uint8_t currentCounter) const {
@@ -1697,7 +2075,10 @@ Status OPT4001::_i2cWriteRaw(const uint8_t* buf, size_t len) {
 Status OPT4001::_i2cWriteReadTracked(const uint8_t* txBuf, size_t txLen,
                                      uint8_t* rxBuf, size_t rxLen) {
   if (_initialized && _driverState == DriverState::OFFLINE && !_allowOfflineI2c) {
-    return offlineBusyStatus();
+    return offlineStatus();
+  }
+  if (_pollJob != PollJob::NONE && !_pollExecuting) {
+    return Status::Error(Err::BUSY, "Poll job already active");
   }
   Status st = _i2cWriteReadRaw(txBuf, txLen, rxBuf, rxLen);
   if (st.code == Err::INVALID_CONFIG || st.code == Err::INVALID_PARAM) {
@@ -1708,7 +2089,10 @@ Status OPT4001::_i2cWriteReadTracked(const uint8_t* txBuf, size_t txLen,
 
 Status OPT4001::_i2cWriteTracked(const uint8_t* buf, size_t len) {
   if (_initialized && _driverState == DriverState::OFFLINE && !_allowOfflineI2c) {
-    return offlineBusyStatus();
+    return offlineStatus();
+  }
+  if (_pollJob != PollJob::NONE && !_pollExecuting) {
+    return Status::Error(Err::BUSY, "Poll job already active");
   }
   Status st = _i2cWriteRaw(buf, len);
   if (st.code == Err::INVALID_CONFIG || st.code == Err::INVALID_PARAM) {
@@ -1719,7 +2103,10 @@ Status OPT4001::_i2cWriteTracked(const uint8_t* buf, size_t len) {
 
 Status OPT4001::_i2cWriteTrackedTo(uint8_t addr, const uint8_t* buf, size_t len) {
   if (_initialized && _driverState == DriverState::OFFLINE && !_allowOfflineI2c) {
-    return offlineBusyStatus();
+    return offlineStatus();
+  }
+  if (_pollJob != PollJob::NONE && !_pollExecuting) {
+    return Status::Error(Err::BUSY, "Poll job already active");
   }
   Status st = _i2cWriteRawTo(addr, buf, len);
   if (st.code == Err::INVALID_CONFIG || st.code == Err::INVALID_PARAM) {
@@ -1745,15 +2132,46 @@ Status OPT4001::_readRegister16Raw(uint8_t reg, uint16_t& value) {
 Status OPT4001::_readSampleAt(uint8_t msbReg, Sample& out) {
   uint16_t result = 0;
   uint16_t lsbCrc = 0;
-  Status st = readRegister16(msbReg, result);
+  Status st = _readRegister16Tracked(msbReg, result);
   if (!st.ok()) {
     return st;
   }
-  st = readRegister16(static_cast<uint8_t>(msbReg + 1U), lsbCrc);
+  st = _readRegister16Tracked(static_cast<uint8_t>(msbReg + 1U), lsbCrc);
   if (!st.ok()) {
     return st;
   }
   return _decodeSampleRegisters(result, lsbCrc, out);
+}
+
+Status OPT4001::_readBurstBlockTracked(BurstFrame& out) {
+  const uint8_t reg = cmd::REG_RESULT;
+  uint8_t buffer[16] = {};
+  Status st = _i2cWriteReadTracked(&reg, 1, buffer, sizeof(buffer));
+  if (!st.ok()) {
+    return st;
+  }
+
+  const uint16_t regs[8] = {
+    static_cast<uint16_t>((buffer[0] << 8) | buffer[1]),
+    static_cast<uint16_t>((buffer[2] << 8) | buffer[3]),
+    static_cast<uint16_t>((buffer[4] << 8) | buffer[5]),
+    static_cast<uint16_t>((buffer[6] << 8) | buffer[7]),
+    static_cast<uint16_t>((buffer[8] << 8) | buffer[9]),
+    static_cast<uint16_t>((buffer[10] << 8) | buffer[11]),
+    static_cast<uint16_t>((buffer[12] << 8) | buffer[13]),
+    static_cast<uint16_t>((buffer[14] << 8) | buffer[15]),
+  };
+
+  Status aggregate = Status::Ok();
+  Status slotStatus = _decodeSampleRegisters(regs[0], regs[1], out.newest);
+  (void)mergeSampleDecodeStatus(aggregate, slotStatus);
+  slotStatus = _decodeSampleRegisters(regs[2], regs[3], out.fifo0);
+  (void)mergeSampleDecodeStatus(aggregate, slotStatus);
+  slotStatus = _decodeSampleRegisters(regs[4], regs[5], out.fifo1);
+  (void)mergeSampleDecodeStatus(aggregate, slotStatus);
+  slotStatus = _decodeSampleRegisters(regs[6], regs[7], out.fifo2);
+  (void)mergeSampleDecodeStatus(aggregate, slotStatus);
+  return aggregate;
 }
 
 Status OPT4001::_decodeSampleRegisters(uint16_t resultReg, uint16_t lsbCrcReg,
@@ -1763,11 +2181,21 @@ Status OPT4001::_decodeSampleRegisters(uint16_t resultReg, uint16_t lsbCrcReg,
   out.exponent = static_cast<uint8_t>((resultReg & cmd::MASK_EXPONENT) >> cmd::BIT_EXPONENT);
   out.mantissa = (static_cast<uint32_t>(resultReg & cmd::MASK_RESULT_MSB) << 8) |
                  static_cast<uint32_t>((lsbCrcReg & cmd::MASK_RESULT_LSB) >> cmd::BIT_RESULT_LSB);
-  out.adcCodes = static_cast<uint32_t>(out.mantissa << out.exponent);
   out.counter = static_cast<uint8_t>((lsbCrcReg & cmd::MASK_COUNTER) >> cmd::BIT_COUNTER);
   out.crc = static_cast<uint8_t>(lsbCrcReg & cmd::MASK_CRC);
   out.crcValid = (_computeCrcNibble(out.exponent, out.mantissa, out.counter) == out.crc);
-  out.lux = adcCodesToLux(out.adcCodes);
+
+  uint64_t adcCodes = 0;
+  Status numericStatus = rawToAdcCodes(out.exponent, out.mantissa, adcCodes);
+  if (!numericStatus.ok() || adcCodes > static_cast<uint64_t>(UINT32_MAX)) {
+    out.adcCodes = 0;
+    out.lux = invalidLuxValue();
+    return numericStatus.ok()
+               ? Status::Error(Err::INVALID_PARAM, "Result ADC codes out of range")
+               : numericStatus;
+  }
+  out.adcCodes = static_cast<uint32_t>(adcCodes);
+  out.lux = adcCodesToLux64(adcCodes, getLuxLsb());
 
   if (_config.verifyCrc && !out.crcValid) {
     return Status::Error(Err::CRC_ERROR, "Sample CRC mismatch", out.crc);
@@ -1851,34 +2279,320 @@ void OPT4001::_reassertOfflineLatch() {
 // ============================================================================
 
 Status OPT4001::_applyConfig() {
-  Status st = writeRegister16(cmd::REG_THRESHOLD_L, _packThreshold(_config.lowThreshold));
+  uint8_t writesApplied = 0;
+  Status st = _writeRegister16Tracked(cmd::REG_THRESHOLD_L, _packThreshold(_config.lowThreshold));
   if (!st.ok()) {
     return st;
   }
-  st = writeRegister16(cmd::REG_THRESHOLD_H, _packThreshold(_config.highThreshold));
+  ++writesApplied;
+  st = _writeRegister16Tracked(cmd::REG_THRESHOLD_H, _packThreshold(_config.highThreshold));
   if (!st.ok()) {
+    if (writesApplied > 0U) {
+      _markHardwareConfigDirty(st);
+    }
     return st;
   }
-  st = writeRegister16(cmd::REG_INT_CONFIGURATION, _buildIntConfigurationRegister());
+  ++writesApplied;
+  st = _writeRegister16Tracked(cmd::REG_INT_CONFIGURATION, _buildIntConfigurationRegister());
   if (!st.ok()) {
+    if (writesApplied > 0U) {
+      _markHardwareConfigDirty(st);
+    }
     return st;
   }
-  st = writeRegister16(cmd::REG_CONFIGURATION, _buildConfigurationRegister(_config.mode));
+  ++writesApplied;
+  st = _writeRegister16Tracked(cmd::REG_CONFIGURATION, _buildConfigurationRegister(_config.mode));
   if (!st.ok()) {
+    if (writesApplied > 0U) {
+      _markHardwareConfigDirty(st);
+    }
+    return st;
+  }
+  ++writesApplied;
+
+  _finishApplyConfig(_nowMs());
+  return Status::Ok();
+}
+
+Status OPT4001::_pollReadJob(uint32_t nowMs, uint8_t& remainingInstructions) {
+  while (true) {
+    if (_pollStep == PollStep::WAIT_READY) {
+      if (_conversionReady || _sampleAvailable || _intFreshEvidenceAsserted()) {
+        _sampleAvailable = true;
+        _conversionReady = true;
+        if (_config.mode != Mode::CONTINUOUS) {
+          _conversionStarted = false;
+          _pendingMode = Mode::POWER_DOWN;
+        }
+        _pollStep = PollStep::READ_BURST_BLOCK;
+        continue;
+      }
+      if (!_pollReadGateElapsed(nowMs)) {
+        return _pollInProgressStatus("Waiting for conversion gate");
+      }
+      _pollStep = PollStep::READ_FLAGS;
+      continue;
+    }
+
+    if (_pollStep == PollStep::READ_FLAGS) {
+      if (remainingInstructions == 0U) {
+        return _pollInProgressStatus("Poll instruction budget exhausted");
+      }
+      Flags flags;
+      Status st = readFlags(flags);
+      --remainingInstructions;
+      if (!st.ok()) {
+        return _finishPollJob(st);
+      }
+      if (flags.conversionReady) {
+        _pollStep = PollStep::READ_BURST_BLOCK;
+        continue;
+      }
+      if (_shouldProbeCounterForFreshness(nowMs)) {
+        _pollStep = PollStep::READ_COUNTER;
+        continue;
+      }
+      return _pollInProgressStatus("Measurement not ready");
+    }
+
+    if (_pollStep == PollStep::READ_COUNTER) {
+      if (remainingInstructions == 0U) {
+        return _pollInProgressStatus("Poll instruction budget exhausted");
+      }
+      uint16_t lsbCrc = 0;
+      Status st = _readRegister16Tracked(cmd::REG_RESULT_LSB_CRC, lsbCrc);
+      --remainingInstructions;
+      if (!st.ok()) {
+        return _finishPollJob(st);
+      }
+      const uint8_t counter =
+          static_cast<uint8_t>((lsbCrc & cmd::MASK_COUNTER) >> cmd::BIT_COUNTER);
+      if (!_sampleCounterIsFresh(counter)) {
+        _pollStep = PollStep::READ_FLAGS;
+        return _pollInProgressStatus("Measurement not ready");
+      }
+      _sampleAvailable = true;
+      _conversionReady = true;
+      _pollStep = PollStep::READ_BURST_BLOCK;
+      continue;
+    }
+
+    if (_pollStep == PollStep::READ_BURST_BLOCK) {
+      if (remainingInstructions == 0U) {
+        return _pollInProgressStatus("Poll instruction budget exhausted");
+      }
+      Status st = _readBurstBlockTracked(_pollBurst);
+      --remainingInstructions;
+      if (!st.ok() && st.code != Err::CRC_ERROR) {
+        return _finishPollJob(st);
+      }
+      if (!_sampleCounterIsFresh(_pollBurst.newest.counter)) {
+        _clearReadinessEvidence();
+        return _finishPollJob(
+            Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready"));
+      }
+
+      if (_pollJob == PollJob::READ_BURST) {
+        _lastBurst = _pollBurst;
+        _lastBurstValid = true;
+      }
+      _markFreshSampleConsumedAt(_pollBurst.newest, nowMs);
+      return _finishPollJob(st);
+    }
+
+    return _finishPollJob(Status::Error(Err::INVALID_CONFIG, "Invalid poll read state"));
+  }
+}
+
+Status OPT4001::_pollConfigJob(uint32_t nowMs, uint8_t& remainingInstructions) {
+  const bool resetJob = (_pollJob == PollJob::RESET_AND_REAPPLY);
+  ScopedOfflineI2cAllowance allowOfflineI2c(
+      _allowOfflineI2c, resetJob || _allowOfflineI2c);
+
+  while (remainingInstructions > 0U) {
+    Status st = Status::Ok();
+
+    if (_pollStep == PollStep::WRITE_THRESHOLD_L) {
+      st = _writeRegister16Tracked(cmd::REG_THRESHOLD_L,
+                                   _packThreshold(_pollTargetConfig.lowThreshold));
+      --remainingInstructions;
+      if (!st.ok()) {
+        if (resetJob && _pollResetApplied) {
+          _markHardwareConfigDirty(st);
+        }
+        return _finishPollJob(st);
+      }
+      ++_pollWritesApplied;
+      _pollStep = PollStep::WRITE_THRESHOLD_H;
+      continue;
+    }
+
+    if (_pollStep == PollStep::WRITE_THRESHOLD_H) {
+      st = _writeRegister16Tracked(cmd::REG_THRESHOLD_H,
+                                   _packThreshold(_pollTargetConfig.highThreshold));
+      --remainingInstructions;
+      if (!st.ok()) {
+        if (_pollWritesApplied > 0U) {
+          _markHardwareConfigDirty(st);
+        }
+        return _finishPollJob(st);
+      }
+      ++_pollWritesApplied;
+      _pollStep = PollStep::WRITE_INT_CONFIG;
+      continue;
+    }
+
+    if (_pollStep == PollStep::WRITE_INT_CONFIG) {
+      st = _writeRegister16Tracked(cmd::REG_INT_CONFIGURATION,
+                                   _buildIntConfigurationRegister(_pollTargetConfig));
+      --remainingInstructions;
+      if (!st.ok()) {
+        if (_pollWritesApplied > 0U) {
+          _markHardwareConfigDirty(st);
+        }
+        return _finishPollJob(st);
+      }
+      ++_pollWritesApplied;
+      _pollStep = PollStep::WRITE_CONFIG;
+      continue;
+    }
+
+    if (_pollStep == PollStep::WRITE_CONFIG) {
+      st = _writeRegister16Tracked(cmd::REG_CONFIGURATION,
+                                   _buildConfigurationRegister(_pollTargetConfig,
+                                                               _pollTargetConfig.mode));
+      --remainingInstructions;
+      if (!st.ok()) {
+        if (_pollWritesApplied > 0U) {
+          _markHardwareConfigDirty(st);
+        }
+        return _finishPollJob(st);
+      }
+      ++_pollWritesApplied;
+      _config = _pollTargetConfig;
+      _finishApplyConfig(nowMs);
+      return _finishPollJob(Status::Ok());
+    }
+
+    return _finishPollJob(Status::Error(Err::INVALID_CONFIG, "Invalid poll config state"));
+  }
+
+  return _pollInProgressStatus("Poll instruction budget exhausted");
+}
+
+Status OPT4001::_pollResetAndReapplyJob(uint32_t nowMs,
+                                        uint8_t& remainingInstructions) {
+  while (remainingInstructions > 0U) {
+    if (_pollStep == PollStep::WRITE_RESET) {
+      const uint8_t payload[1] = {cmd::GENERAL_CALL_RESET};
+      ScopedOfflineI2cAllowance allowOfflineI2c(_allowOfflineI2c, true);
+      Status st = _i2cWriteTrackedTo(cmd::GENERAL_CALL_ADDRESS, payload, sizeof(payload));
+      --remainingInstructions;
+      if (!st.ok()) {
+        return _finishPollJob(st);
+      }
+      _pollResetApplied = true;
+      _clearRuntimeState();
+      _pollStep = PollStep::WRITE_THRESHOLD_L;
+      continue;
+    }
+
+    const bool resetApplied = _pollResetApplied;
+    const Status st = _pollConfigJob(nowMs, remainingInstructions);
+    if (_pollJob == PollJob::NONE || !st.inProgress()) {
+      if (!st.ok() && resetApplied) {
+        _markHardwareConfigDirty(st);
+        _initialized = false;
+        _driverState = DriverState::UNINIT;
+      }
+      if (st.ok()) {
+        _initialized = true;
+        _driverState = DriverState::READY;
+        _consecutiveFailures = 0;
+      }
+      return st;
+    }
     return st;
   }
 
+  return _pollInProgressStatus("Poll instruction budget exhausted");
+}
+
+Status OPT4001::_finishPollJob(const Status& st) {
+  _pollJob = PollJob::NONE;
+  _pollStep = PollStep::IDLE;
+  _pollWritesApplied = 0;
+  _pollResetApplied = false;
+  _pollExecuting = false;
+  _lastPollStatus = st;
+  return st;
+}
+
+Status OPT4001::_pollInProgressStatus(const char* message) const {
+  return Status{Err::IN_PROGRESS, 0, message};
+}
+
+bool OPT4001::_pollReadGateElapsed(uint32_t nowMs) const {
+  if (_config.mode == Mode::CONTINUOUS) {
+    return static_cast<uint32_t>(nowMs - _conversionStartMs) >= _pollContinuousGateMs();
+  }
+  if (_conversionStarted) {
+    return static_cast<uint32_t>(nowMs - _conversionStartMs) >=
+           getOneShotBudgetMs(_pendingMode);
+  }
+  return true;
+}
+
+uint32_t OPT4001::_pollContinuousGateMs() const {
+  const uint32_t conversionMs = getConversionTimeMs();
+  if (_pollJob == PollJob::READ_BURST &&
+      _config.intConfig == IntConfig::FIFO_FULL) {
+    return conversionMs * cmd::SAMPLE_SLOT_COUNT;
+  }
+  return conversionMs;
+}
+
+bool OPT4001::_shouldProbeCounterForFreshness(uint32_t nowMs) const {
+  if (!_lastFreshCounterValid) {
+    return false;
+  }
+  if (_config.mode == Mode::CONTINUOUS) {
+    return static_cast<uint32_t>(nowMs - _conversionStartMs) >= _pollContinuousGateMs();
+  }
+  if (_conversionStarted) {
+    return static_cast<uint32_t>(nowMs - _conversionStartMs) >=
+           getOneShotBudgetMs(_pendingMode);
+  }
+  return true;
+}
+
+void OPT4001::_finishApplyConfig(uint32_t nowMs) {
+  _clearHardwareConfigDirty();
   _clearRuntimeState();
 
   if (_config.mode == Mode::CONTINUOUS) {
     _conversionStarted = true;
-    _conversionStartMs = _nowMs();
+    _conversionStartMs = nowMs;
   } else {
     _conversionStarted = false;
     _conversionStartMs = 0;
   }
+}
 
-  return Status::Ok();
+void OPT4001::_markHardwareConfigDirty(const Status& st) {
+  if (st.ok() || st.inProgress()) {
+    return;
+  }
+  if (_hardwareConfigDirty) {
+    return;
+  }
+  _hardwareConfigDirty = true;
+  _hardwareConfigDirtyError = st;
+}
+
+void OPT4001::_clearHardwareConfigDirty() {
+  _hardwareConfigDirty = false;
+  _hardwareConfigDirtyError = Status::Ok();
 }
 
 void OPT4001::_clearRuntimeState() {
@@ -1889,24 +2603,46 @@ void OPT4001::_clearRuntimeState() {
   _conversionStartMs = 0;
   _lastSampleTimestampMs = 0;
   _lastSample = Sample{};
+  _lastBurst = BurstFrame{};
+  _lastBurstValid = false;
   _pendingMode = Mode::POWER_DOWN;
+  _lastFreshCounterValid = false;
+  _lastFreshCounter = 0;
   _lastCounter = 0;
   _lastAdcCodes = 0;
   _lastLux = 0.0f;
 }
 
-void OPT4001::_cacheSample(const Sample& sample) {
+void OPT4001::_cacheSampleAt(const Sample& sample, uint32_t nowMs) {
   _lastSample = sample;
   _lastSampleValid = true;
-  _lastSampleTimestampMs = _nowMs();
+  _lastSampleTimestampMs = nowMs;
   _lastCounter = sample.counter;
   _lastAdcCodes = sample.adcCodes;
   _lastLux = sample.lux;
 }
 
+void OPT4001::_cacheSample(const Sample& sample) {
+  _cacheSampleAt(sample, _nowMs());
+}
+
+void OPT4001::_markFreshSampleConsumedAt(const Sample& sample, uint32_t nowMs) {
+  _cacheSampleAt(sample, nowMs);
+  _lastFreshCounterValid = true;
+  _lastFreshCounter = sample.counter;
+  _clearReadinessEvidence();
+  if (_config.mode == Mode::CONTINUOUS) {
+    _conversionStarted = true;
+    _conversionStartMs = nowMs;
+  } else {
+    _conversionStarted = false;
+    _pendingMode = Mode::POWER_DOWN;
+  }
+}
+
 Status OPT4001::_markConversionReadyByRegisterPoll() {
   uint16_t configReg = 0;
-  Status st = readRegister16(cmd::REG_CONFIGURATION, configReg);
+  Status st = _readRegister16Tracked(cmd::REG_CONFIGURATION, configReg);
   if (!st.ok()) {
     return st;
   }
@@ -1925,29 +2661,37 @@ Status OPT4001::_markConversionReadyByRegisterPoll() {
 }
 
 uint16_t OPT4001::_buildConfigurationRegister(Mode mode) const {
+  return _buildConfigurationRegister(_config, mode);
+}
+
+uint16_t OPT4001::_buildConfigurationRegister(const Config& config, Mode mode) const {
   uint16_t value = 0;
-  if (_config.quickWake) {
+  if (config.quickWake) {
     value |= cmd::MASK_QWAKE;
   }
-  value |= (static_cast<uint16_t>(_config.range) << cmd::BIT_RANGE) & cmd::MASK_RANGE;
-  value |= (static_cast<uint16_t>(_config.conversionTime) << cmd::BIT_CONVERSION_TIME) &
+  value |= (static_cast<uint16_t>(config.range) << cmd::BIT_RANGE) & cmd::MASK_RANGE;
+  value |= (static_cast<uint16_t>(config.conversionTime) << cmd::BIT_CONVERSION_TIME) &
            cmd::MASK_CONVERSION_TIME;
   value |= (static_cast<uint16_t>(mode) << cmd::BIT_MODE) & cmd::MASK_MODE;
-  value |= (static_cast<uint16_t>(_config.interruptLatch) << cmd::BIT_LATCH) & cmd::MASK_LATCH;
-  value |= (static_cast<uint16_t>(_config.interruptPolarity) << cmd::BIT_INT_POL) &
+  value |= (static_cast<uint16_t>(config.interruptLatch) << cmd::BIT_LATCH) & cmd::MASK_LATCH;
+  value |= (static_cast<uint16_t>(config.interruptPolarity) << cmd::BIT_INT_POL) &
            cmd::MASK_INT_POL;
-  value |= (static_cast<uint16_t>(_config.faultCount) << cmd::BIT_FAULT_COUNT) &
+  value |= (static_cast<uint16_t>(config.faultCount) << cmd::BIT_FAULT_COUNT) &
            cmd::MASK_FAULT_COUNT;
   return value;
 }
 
 uint16_t OPT4001::_buildIntConfigurationRegister() const {
+  return _buildIntConfigurationRegister(_config);
+}
+
+uint16_t OPT4001::_buildIntConfigurationRegister(const Config& config) const {
   uint16_t value = cmd::INTCFG_FIXED_BITS;
-  value |= (static_cast<uint16_t>(_config.intDirection) << cmd::BIT_INT_DIR) &
+  value |= (static_cast<uint16_t>(config.intDirection) << cmd::BIT_INT_DIR) &
            cmd::MASK_INT_DIR;
-  value |= (static_cast<uint16_t>(_config.intConfig) << cmd::BIT_INT_CFG) &
+  value |= (static_cast<uint16_t>(config.intConfig) << cmd::BIT_INT_CFG) &
            cmd::MASK_INT_CFG;
-  if (_config.burstMode) {
+  if (config.burstMode) {
     value |= cmd::MASK_I2C_BURST;
   }
   return value;

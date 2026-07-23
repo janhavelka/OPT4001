@@ -10,15 +10,25 @@
 namespace OPT4001 {
 
 /// I2C write callback signature.
+///
+/// I2C callbacks are application-owned blocking operations and must honor
+/// `timeoutMs` as their per-transaction bound. They must map platform errors to
+/// `OPT4001::Status`, must externally serialize shared-bus access, and must not
+/// re-enter public methods on the same driver instance.
 using I2cWriteFn = Status (*)(uint8_t addr, const uint8_t* data, size_t len,
                               uint32_t timeoutMs, void* user);
 
-/// I2C write-then-read callback signature.
+/// I2C write-then-read callback signature. See `I2cWriteFn` for ownership,
+/// timeout, serialization, and non-reentrancy requirements.
 using I2cWriteReadFn = Status (*)(uint8_t addr, const uint8_t* txData, size_t txLen,
                                   uint8_t* rxData, size_t rxLen, uint32_t timeoutMs,
                                   void* user);
 
-/// Optional GPIO read callback for the device INT pin.
+/// Optional GPIO read callback for the SOT-5X3 INT pin.
+///
+/// The application owns GPIO configuration, pullups, ISR attachment,
+/// ISR-to-task signaling, debouncing, and pin lifetime. The driver only samples
+/// this hook from normal task context; public driver APIs are not ISR-safe.
 using GpioReadFn = bool (*)(int pin, void* user);
 
 /// Optional monotonic millisecond timestamp callback.
@@ -31,6 +41,9 @@ using NowMsFn = uint32_t (*)(void* user);
 using YieldFn = void (*)(void* user);
 
 /// Package variant. This controls lux scaling and address validation.
+/// Electrical note: power OPT4001 from the datasheet VDD range (1.6 V to
+/// 3.6 V). Digital I/O pins are 5.5 V tolerant, but the device is not a
+/// 5 V powered part.
 enum class PackageVariant : uint8_t {
   PICOSTAR = 0,  ///< 4-pin PicoStar package, fixed address 0x45.
   SOT_5X3  = 1   ///< 8-pin SOT-5X3 package, address-selectable, exposes INT.
@@ -96,22 +109,25 @@ enum class FaultCount : uint8_t {
 
 /// INT pin direction.
 enum class IntDirection : uint8_t {
-  PIN_INPUT  = 0,  ///< Hardware one-shot trigger input.
-  PIN_OUTPUT = 1   ///< Open-drain interrupt output.
+  PIN_INPUT  = 0,  ///< SOT-5X3 hardware one-shot trigger input; no interrupt output.
+  PIN_OUTPUT = 1   ///< SOT-5X3 open-drain interrupt output.
 };
 
 /// INT pin output function.
 enum class IntConfig : uint8_t {
   THRESHOLD        = 0,  ///< Threshold / SMBus alert behavior.
-  EVERY_CONVERSION = 1,  ///< ~1 us pulse after each conversion.
+  EVERY_CONVERSION = 1,  ///< Open-drain ~1 us pulse after each conversion.
   RESERVED         = 2,  ///< Reserved; do not use.
-  FIFO_FULL        = 3   ///< ~1 us pulse every four conversions.
+  FIFO_FULL        = 3   ///< Open-drain ~1 us pulse every four conversions.
 };
 
 /// Threshold register representation.
 struct Threshold {
-  uint8_t exponent = 0;  ///< Register bits [15:12].
-  uint16_t result = 0;   ///< Register bits [11:0].
+  /// Register bits [15:12], valid range 0..15.
+  uint8_t exponent = 0;
+  /// Register bits [11:0], valid range 0..0x0FFF.
+  /// Exact linear threshold ADC codes are `result << (8 + exponent)`.
+  uint16_t result = 0;
 
   constexpr Threshold() = default;
   constexpr Threshold(uint8_t exponentIn, uint16_t resultIn)
@@ -121,7 +137,11 @@ struct Threshold {
 /// Configuration for OPT4001 driver.
 struct Config {
   // === I2C Transport (required) ===
+  /// Required application-owned write callback. The driver never configures,
+  /// owns, or locks the bus.
   I2cWriteFn i2cWrite = nullptr;
+  /// Required application-owned write/read callback. On shared buses, the
+  /// application lock must cover driver calls and the callback transaction.
   I2cWriteReadFn i2cWriteRead = nullptr;
   void* i2cUser = nullptr;
 
@@ -153,11 +173,17 @@ struct Config {
   Threshold highThreshold{0x0B, 0x0FFF};
 
   // === Optional INT Pin Hook ===
+  /// Optional SOT-5X3 INT pin number meaningful to the application GPIO hook.
+  /// PicoStar has no INT pin; leave this disabled for that package.
   int intPin = -1;
+  /// Optional task-context INT sampler. The core never configures GPIO, attaches
+  /// ISRs, owns the pin, or calls platform GPIO APIs directly.
   GpioReadFn gpioRead = nullptr;
   void* gpioUser = nullptr;
 
   // === Health Tracking ===
+  /// Consecutive tracked I2C failures required to latch OFFLINE. A value of 0
+  /// is normalized to 1 during begin().
   uint8_t offlineThreshold = 5;
 };
 

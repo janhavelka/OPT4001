@@ -9,6 +9,11 @@
 *.elf
 *.bin
 *.map
+OPT4001-*.tar.gz
+package.tgz
+build/
+managed_components/
+docs/doxygen/
 
 # Python (for scripts/)
 __pycache__/
@@ -36,6 +41,7 @@ wifi_credentials.h
 *.tmp
 *.bak
 *.log
+hil_logs/
 
-# Auto-generated files
-include/OPT4001/Version.h
+# Version.h is generated from library.json and intentionally tracked so clean
+# manual, CMake, and ESP-IDF consumers can include OPT4001/OPT4001.h.

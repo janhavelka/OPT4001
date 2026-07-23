@@ -34,6 +34,7 @@ struct WatchState {
   int32_t remaining = 0;
   uint32_t startMs = 0;
   uint32_t lastStepMs = 0;
+  uint32_t conversionDeadlineMs = 0;
   uint32_t okCount = 0;
   uint32_t warnCount = 0;
   uint32_t failCount = 0;
@@ -79,6 +80,7 @@ const char* errToStr(OPT4001::Err err) {
     case Err::I2C_NACK_DATA: return "I2C_NACK_DATA";
     case Err::I2C_TIMEOUT: return "I2C_TIMEOUT";
     case Err::I2C_BUS: return "I2C_BUS";
+    case Err::OFFLINE: return "OFFLINE";
     default: return "UNKNOWN";
   }
 }
@@ -366,7 +368,7 @@ OPT4001::Config makeDefaultConfig() {
   cfg.i2cWrite = transport::wireWrite;
   cfg.i2cWriteRead = transport::wireWriteRead;
   cfg.i2cUser = &Wire;
-  cfg.nowMs = [](void*) { return millis(); };
+  cfg.nowMs = [](void*) -> uint32_t { return static_cast<uint32_t>(millis()); };
   cfg.cooperativeYield = [](void*) { yield(); };
   cfg.i2cAddress = OPT4001::cmd::I2C_ADDR_DEFAULT;
   cfg.i2cTimeoutMs = board::I2C_TIMEOUT_MS;
@@ -744,6 +746,10 @@ void handleWatch() {
       } else {
         watchState.waitingConversion = true;
         watchState.lastStepMs = now;
+        const OPT4001::Mode mode =
+            watchState.forceAuto ? OPT4001::Mode::ONE_SHOT_FORCED_AUTO : OPT4001::Mode::ONE_SHOT;
+        watchState.conversionDeadlineMs =
+            now + device.getOneShotBudgetMs(mode) + BLOCKING_READ_TIMEOUT_MS;
       }
     } else {
       OPT4001::Sample sample;
@@ -765,6 +771,13 @@ void handleWatch() {
         if (sampleStatusWarn(st)) {
           printStatus(st);
         }
+        watchState.waitingConversion = false;
+        watchState.lastStepMs = now;
+        watchState.remaining--;
+      } else if (static_cast<int32_t>(now - watchState.conversionDeadlineMs) >= 0) {
+        st = OPT4001::Status::Error(OPT4001::Err::TIMEOUT, "Watch conversion timeout");
+        recordWatchStatus(st);
+        printStatus(st);
         watchState.waitingConversion = false;
         watchState.lastStepMs = now;
         watchState.remaining--;
@@ -904,7 +917,9 @@ void printDeviceIdInfo() {
   Serial.printf("  Raw: 0x%04X\n", info.raw);
   Serial.printf("  DIDH: 0x%03X\n", info.didh);
   Serial.printf("  DIDL: %u\n", info.didl);
-  Serial.printf("  Expected DIDH / DIDL: 0x%03X / 0\n", OPT4001::cmd::DIDH_EXPECTED);
+  Serial.printf("  Reserved bits clear: %s\n", log_bool_str(info.reservedBitsClear));
+  Serial.printf("  Expected DIDH / DIDL / reserved: 0x%03X / %u / clear\n",
+                OPT4001::cmd::DIDH_EXPECTED, OPT4001::cmd::DIDL_EXPECTED);
   Serial.printf("  Matches expected: %s%s%s\n",
                 info.matchesExpected ? LOG_COLOR_GREEN : LOG_COLOR_RED,
                 log_bool_str(info.matchesExpected),

@@ -24,7 +24,8 @@ enum class Err : uint8_t {
   I2C_NACK_ADDR,         ///< I2C address phase was not acknowledged.
   I2C_NACK_DATA,         ///< I2C data phase was not acknowledged.
   I2C_TIMEOUT,           ///< I2C transaction timed out.
-  I2C_BUS                ///< I2C bus or arbitration error.
+  I2C_BUS,               ///< I2C bus or arbitration error.
+  OFFLINE                ///< Driver health is latched offline until recovery.
 };
 
 /// Status structure returned by all fallible operations.

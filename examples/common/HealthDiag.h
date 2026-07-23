@@ -52,6 +52,7 @@ inline const char* errToString(OPT4001::Err err) {
     case OPT4001::Err::I2C_NACK_DATA:        return "I2C_NACK_DATA";
     case OPT4001::Err::I2C_TIMEOUT:          return "I2C_TIMEOUT";
     case OPT4001::Err::I2C_BUS:              return "I2C_BUS";
+    case OPT4001::Err::OFFLINE:              return "OFFLINE";
     default:                                 return "UNKNOWN";
   }
 }

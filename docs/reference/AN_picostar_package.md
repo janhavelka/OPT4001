@@ -25,12 +25,14 @@
 | Resolution (100 ms) | 2.5 mlux | 3.5 mlux | 2.5 mlux |
 | Resolution (1.8 ms) | 160 mlux | 224 mlux | 160 mlux |
 | Full-scale saturation | 107 klux | 117 klux | 83 klux |
-| Temperature range | –40 to 105 °C | –40 to 105 °C | –40 to 125 °C |
+| Temperature range | –40 to 105 °C | –40 to 105 °C | Package note: –40 to 125 °C; OPT4001 datasheet recommended junction range: –40 to 85 °C |
 
 ## Relevance to Implementation
 
 - **Driver must handle absence of INT pin** for PicoStar variant — use CONVERSION_READY_FLAG polling instead of hardware interrupt.
 - **Fixed I²C address (0x45)** means only one PicoStar device per I²C bus. SOT-5X3 allows up to 3 unique addresses (0x44, 0x45, 0x46).
 - **Lux LSB constant differs** between variants — driver must use the correct constant based on configured package type.
-- PicoStar's extended temperature range (–40 to **125 °C**) vs SOT-5X3 (–40 to 85 °C) may matter for automotive underhood applications.
+- The PicoStar package note lists a broader package temperature range, but the
+  OPT4001 datasheet recommended junction operating range remains –40 to 85 °C.
+  Use the device datasheet limit for driver/application operating assumptions.
 - The **FPCB cutout design** affects field of view and light collection — this is a hardware design concern, not a driver concern, but the driver should document recommended angular response considerations.

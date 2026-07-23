@@ -79,8 +79,23 @@ REQUIRED_IDF_TOKENS = [
     "opt4001IdfI2cWriteRead",
     "opt4001IdfNowMs",
     "vTaskDelay",
+    "configureConsole()",
     "getchar()",
+    "O_NONBLOCK",
+    "fcntl(STDIN_FILENO, F_SETFL",
     "char input[",
+]
+
+REQUIRED_STATUS_MAPPING_TOKENS = [
+    "ESP_ERR_TIMEOUT",
+    "I2C_TIMEOUT",
+    "ESP_ERR_INVALID_RESPONSE",
+    "I2C_ERROR",
+    "phase unknown",
+    "ESP_ERR_INVALID_ARG",
+    "INVALID_PARAM",
+    "ESP_ERR_INVALID_STATE",
+    "I2C_BUS",
 ]
 
 FORBIDDEN_PATTERNS = [
@@ -113,8 +128,9 @@ def read(path: pathlib.Path, label: str) -> str:
 def main() -> int:
     main_text = read(IDF_MAIN / "main.cpp", "native ESP-IDF main")
     cmake_text = read(IDF_MAIN / "CMakeLists.txt", "ESP-IDF CMake")
+    transport_header_text = read(IDF_MAIN / "Opt4001IdfI2cTransport.h", "native transport header")
     transport_text = read(IDF_MAIN / "Opt4001IdfI2cTransport.cpp", "native transport")
-    combined = "\n".join([main_text, cmake_text, transport_text])
+    combined = "\n".join([main_text, cmake_text, transport_header_text, transport_text])
 
     for token in REQUIRED_IDF_TOKENS:
         if token not in combined:
@@ -123,6 +139,18 @@ def main() -> int:
     for component in ("OPT4001", "esp_driver_i2c", "esp_driver_gpio", "esp_timer", "freertos"):
         if re.search(rf"\b{re.escape(component)}\b", cmake_text) is None:
             fail(f"ESP-IDF CMake missing required component '{component}'")
+
+    include_dirs = re.findall(r"\b(?:PRIV_)?INCLUDE_DIRS\b([^\n)]*)", cmake_text)
+    for include_dir_args in include_dirs:
+        if ".." in include_dir_args:
+            fail("ESP-IDF example main component exposes parent paths in INCLUDE_DIRS")
+
+    if "PRIV_INCLUDE_DIRS" not in cmake_text:
+        fail("ESP-IDF example local include path must be private")
+
+    for token in REQUIRED_STATUS_MAPPING_TOKENS:
+        if token not in transport_text:
+            fail(f"ESP-IDF transport status mapping token missing: {token}")
 
     for pattern in FORBIDDEN_PATTERNS:
         if re.search(pattern, combined):
