@@ -295,7 +295,11 @@ void processCommand(char* line) {
   } else if (strcmp(cmd, "ready") == 0) {
     bool ready = false;
     const auto st = device.conversionReady(ready);
-    st.ok() ? printf("Ready: %s\n", ready ? "yes" : "no") : printStatus(st);
+    if (st.ok()) {
+      printf("Ready: %s\n", ready ? "yes" : "no");
+    } else {
+      printStatus(st);
+    }
   } else if (strcmp(cmd, "flags") == 0 || strcmp(cmd, "status") == 0) {
     OPT4001::Flags flags;
     const auto st = device.readFlags(flags);
@@ -306,7 +310,11 @@ void processCommand(char* line) {
   } else if (strcmp(cmd, "status_raw") == 0 || strcmp(cmd, "flags_raw") == 0) {
     uint16_t raw = 0;
     const auto st = device.readFlagsRaw(raw);
-    st.ok() ? printf("FLAGS raw=0x%04X\n", raw) : printStatus(st);
+    if (st.ok()) {
+      printf("FLAGS raw=0x%04X\n", raw);
+    } else {
+      printStatus(st);
+    }
   } else if (strcmp(cmd, "clearflags") == 0) {
     printStatus(device.clearFlags());
   } else if (strcmp(cmd, "burst") == 0 || strcmp(cmd, "fifo") == 0) {
@@ -339,7 +347,11 @@ void processCommand(char* line) {
     char* arg = nextToken(&save);
     if (arg == nullptr) {
       bool asserted = false; const auto st = device.readIntPinAsserted(asserted);
-      st.ok() ? printf("INT asserted: %s\n", asserted ? "yes" : "no") : printStatus(st);
+      if (st.ok()) {
+        printf("INT asserted: %s\n", asserted ? "yes" : "no");
+      } else {
+        printStatus(st);
+      }
     } else if (strcmp(arg, "ready") == 0) {
       printStatus(device.enableConversionReadyInterrupt());
     } else if (strcmp(arg, "fifo") == 0) {
@@ -351,7 +363,11 @@ void processCommand(char* line) {
       printStatus(device.setIntDirection(value ? OPT4001::IntDirection::PIN_OUTPUT : OPT4001::IntDirection::PIN_INPUT));
     } else if (strcmp(arg, "pin") == 0) {
       bool asserted = false; const auto st = device.readIntPinAsserted(asserted);
-      st.ok() ? printf("INT asserted: %s\n", asserted ? "yes" : "no") : printStatus(st);
+      if (st.ok()) {
+        printf("INT asserted: %s\n", asserted ? "yes" : "no");
+      } else {
+        printStatus(st);
+      }
     }
   } else if (strcmp(cmd, "threshold") == 0) {
     char* mode = nextToken(&save);
@@ -367,23 +383,39 @@ void processCommand(char* line) {
     } else {
       float low = 0.0f, high = 0.0f;
       const auto st = device.getThresholdsLux(low, high);
-      st.ok() ? printf("Thresholds: low=%.6f high=%.6f lx\n", low, high) : printStatus(st);
+      if (st.ok()) {
+        printf("Thresholds: low=%.6f high=%.6f lx\n", low, high);
+      } else {
+        printStatus(st);
+      }
     }
   } else if (strcmp(cmd, "id") == 0) {
     OPT4001::DeviceIdInfo info;
     const auto st = device.readDeviceId(info);
-    st.ok() ? printf("DEVICE_ID raw=0x%04X didh=0x%03X didl=%u reserved_clear=%s match=%s\n",
-                     info.raw, info.didh, info.didl,
-                     info.reservedBitsClear ? "yes" : "no",
-                     info.matchesExpected ? "yes" : "no") : printStatus(st);
+    if (st.ok()) {
+      printf("DEVICE_ID raw=0x%04X didh=0x%03X didl=%u reserved_clear=%s match=%s\n",
+             info.raw, info.didh, info.didl,
+             info.reservedBitsClear ? "yes" : "no",
+             info.matchesExpected ? "yes" : "no");
+    } else {
+      printStatus(st);
+    }
   } else if (strcmp(cmd, "config") == 0 || strcmp(cmd, "intcfg") == 0) {
     uint16_t raw = 0;
     const auto st = strcmp(cmd, "config") == 0 ? device.readConfiguration(raw) : device.readIntConfiguration(raw);
-    st.ok() ? printf("%s=0x%04X\n", cmd, raw) : printStatus(st);
+    if (st.ok()) {
+      printf("%s=0x%04X\n", cmd, raw);
+    } else {
+      printStatus(st);
+    }
   } else if (strcmp(cmd, "reg") == 0 || strcmp(cmd, "rreg") == 0) {
     uint32_t reg = 0; if (!parseU32(nextToken(&save), reg)) return;
     uint16_t value = 0; const auto st = device.readRegister16(static_cast<uint8_t>(reg), value);
-    st.ok() ? printf("[0x%02lX]=0x%04X\n", static_cast<unsigned long>(reg), value) : printStatus(st);
+    if (st.ok()) {
+      printf("[0x%02lX]=0x%04X\n", static_cast<unsigned long>(reg), value);
+    } else {
+      printStatus(st);
+    }
   } else if (strcmp(cmd, "wreg") == 0) {
     uint32_t reg = 0, value = 0; if (!parseU32(nextToken(&save), reg) || !parseU32(nextToken(&save), value)) return;
     printStatus(device.writeRegister16(static_cast<uint8_t>(reg), static_cast<uint16_t>(value)));
