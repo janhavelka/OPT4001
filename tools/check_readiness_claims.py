@@ -56,7 +56,9 @@ CI_REQUIRED = [
     "python -m platformio test -e native",
     "python -m platformio run -e ${{ matrix.environment }}",
     "python -m platformio pkg pack",
-    "espressif/esp-idf-ci-action@v1",
+    "PLATFORMIO_CORE_VERSION: \"6.1.19\"",
+    "runs-on: ubuntu-24.04",
+    "espressif/esp-idf-ci-action@9d38657f3d789ca759b2b37aaf5ceffbc42c4f0d",
     "idf.py set-target ${{ matrix.target }} build",
 ]
 
@@ -87,25 +89,36 @@ def main() -> int:
             fail(f"README missing readiness contract token: {token}")
 
     metadata = json.loads(read_rel("library.json"))
-    if metadata.get("version") != "1.0.0":
-        fail("library.json version is expected to be 1.0.0 for this hardening line")
+    library_version = metadata.get("version", "")
+    if re.fullmatch(r"\d+\.\d+\.\d+", library_version) is None:
+        fail("library.json version must be SemVer MAJOR.MINOR.PATCH")
     if "production-grade" in metadata.get("description", "").lower():
         fail("library.json description overclaims production-grade readiness")
 
     idf_component = read_rel("idf_component.yml")
-    if re.search(r'^version:\s*"1\.0\.0"\s*$', idf_component, re.MULTILINE) is None:
-        fail("idf_component.yml version must match 1.0.0")
+    if re.search(rf'^version:\s*"{re.escape(library_version)}"\s*$', idf_component,
+                 re.MULTILINE) is None:
+        fail("idf_component.yml version must match library.json")
     if "production-grade" in idf_component.lower():
         fail("idf_component.yml description overclaims production-grade readiness")
 
+    doxyfile = read_rel("Doxyfile")
+    if re.search(rf'^PROJECT_NUMBER\s*=\s*"{re.escape(library_version)}"\s*$',
+                 doxyfile, re.MULTILINE) is None:
+        fail("Doxyfile PROJECT_NUMBER must match library.json")
+
     security = read_rel("SECURITY.md")
-    if "1.0.x" not in security or "0.3.x" in security:
+    supported_line = ".".join(library_version.split(".")[:2]) + ".x"
+    if supported_line not in security or "0.3.x" in security:
         fail("SECURITY.md supported versions are stale")
 
     ci = read_rel(".github/workflows/ci.yml")
     for token in CI_REQUIRED:
         if token not in ci:
             fail(f"CI missing required command/token: {token}")
+    for action, ref in re.findall(r"uses:\s+([^\s@]+)@([^\s#]+)", ci):
+        if re.fullmatch(r"[0-9a-f]{40}", ref) is None:
+            fail(f"CI action {action} must be pinned to a full commit SHA")
 
     print("Readiness claims check PASSED")
     return 0

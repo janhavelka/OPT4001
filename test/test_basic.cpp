@@ -170,7 +170,9 @@ Status fakeWriteRead(uint8_t, const uint8_t* txData, size_t txLen, uint8_t* rxDa
                                  : static_cast<uint8_t>(value & 0xFF);
   }
 
-  if (reg == cmd::REG_FLAGS && rxLen >= 2) {
+  const uint16_t endReg = static_cast<uint16_t>(reg) +
+                          static_cast<uint16_t>((rxLen == 0U ? 0U : rxLen - 1U) / 2U);
+  if (rxLen > 0U && reg <= cmd::REG_FLAGS && endReg >= cmd::REG_FLAGS) {
     bus->registers[cmd::REG_FLAGS] &=
         static_cast<uint16_t>(~(cmd::MASK_CONVERSION_READY_FLAG |
                                 cmd::MASK_FLAG_H |
@@ -403,6 +405,18 @@ void test_status_in_progress() {
   Status st{Err::IN_PROGRESS, 0, "In progress"};
   TEST_ASSERT_TRUE(st.inProgress());
   TEST_ASSERT_FALSE(st.ok());
+}
+
+void test_error_names_are_complete_and_stable() {
+  TEST_ASSERT_EQUAL_STRING("OK", errorName(Err::OK));
+  TEST_ASSERT_EQUAL_STRING("MEASUREMENT_NOT_READY",
+                           errorName(Err::CONVERSION_NOT_READY));
+  TEST_ASSERT_EQUAL_STRING("OFFLINE", toString(Err::OFFLINE));
+  TEST_ASSERT_EQUAL_STRING("UNKNOWN_ERROR", errorName(static_cast<Err>(0xFF)));
+  TEST_ASSERT_EQUAL_STRING("READY", driverStateName(DriverState::READY));
+  TEST_ASSERT_EQUAL_STRING("OFFLINE", toString(DriverState::OFFLINE));
+  TEST_ASSERT_EQUAL_STRING("UNKNOWN_STATE",
+                           driverStateName(static_cast<DriverState>(0xFF)));
 }
 
 void test_config_defaults() {
@@ -2011,6 +2025,94 @@ void test_read_register_block_and_sample_slot_helpers() {
   TEST_ASSERT_EQUAL_UINT32(0x33333u, slot.mantissa);
 }
 
+void test_picostar_rejects_impossible_int_hook_configuration() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.packageVariant = PackageVariant::PICOSTAR;
+  cfg.intPin = 4;
+  cfg.gpioRead = fakeGpioRead;
+  cfg.gpioUser = &bus;
+
+  Status st = dev.begin(cfg);
+
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_CONFIG),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_FALSE(dev.isInitialized());
+  TEST_ASSERT_EQUAL_UINT32(0U, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(0U, bus.writeCalls);
+}
+
+void test_runtime_package_switch_rejects_picostar_with_int_hook() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.intPin = 4;
+  cfg.gpioRead = fakeGpioRead;
+  cfg.gpioUser = &bus;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  const Status st = dev.setPackageVariant(PackageVariant::PICOSTAR);
+
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_CONFIG),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(PackageVariant::SOT_5X3),
+                          static_cast<uint8_t>(dev.getPackageVariant()));
+}
+
+void test_generic_raw_flags_access_synchronizes_readiness_without_dirtying_config() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  bus.registers[cmd::REG_FLAGS] = cmd::MASK_CONVERSION_READY_FLAG;
+  dev._sampleAvailable = true;
+  dev._conversionReady = true;
+  uint16_t raw = 0;
+  TEST_ASSERT_TRUE(dev.readRegister16(cmd::REG_FLAGS, raw).ok());
+  TEST_ASSERT_EQUAL_HEX16(cmd::MASK_CONVERSION_READY_FLAG, raw);
+  TEST_ASSERT_FALSE(dev._sampleAvailable);
+  TEST_ASSERT_FALSE(dev._conversionReady);
+
+  bus.registers[cmd::REG_FLAGS] = cmd::MASK_CONVERSION_READY_FLAG;
+  dev._sampleAvailable = true;
+  dev._conversionReady = true;
+  uint8_t bytes[2] = {};
+  TEST_ASSERT_TRUE(dev.readRegisters(cmd::REG_FLAGS, bytes, sizeof(bytes)).ok());
+  TEST_ASSERT_FALSE(dev._sampleAvailable);
+  TEST_ASSERT_FALSE(dev._conversionReady);
+
+  dev._sampleAvailable = true;
+  dev._conversionReady = true;
+  TEST_ASSERT_TRUE(dev.writeRegister16(cmd::REG_FLAGS, 0x0001).ok());
+  TEST_ASSERT_FALSE(dev._sampleAvailable);
+  TEST_ASSERT_FALSE(dev._conversionReady);
+  TEST_ASSERT_FALSE(dev.hardwareConfigDirty());
+
+  dev._sampleAvailable = true;
+  dev._conversionReady = true;
+  TEST_ASSERT_TRUE(dev.writeRegister16(cmd::REG_FLAGS, 0x0000).ok());
+  TEST_ASSERT_TRUE(dev._sampleAvailable);
+  TEST_ASSERT_TRUE(dev._conversionReady);
+  TEST_ASSERT_FALSE(dev.hardwareConfigDirty());
+}
+
+void test_burst_enabled_single_sample_uses_one_coherent_result_transaction() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  seedSample(bus, cmd::REG_RESULT, 2, 0x34567, 3, true);
+  const uint32_t readsBefore = bus.readCalls;
+
+  Sample sample;
+  Status st = dev.readLatestSample(sample);
+
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT32(0x34567u, sample.mantissa);
+  TEST_ASSERT_EQUAL_UINT32(readsBefore + 1U, bus.readCalls);
+}
+
 void test_fifo_shadow_slots_do_not_require_fresh_evidence() {
   FakeBus bus;
   OPT4001::OPT4001 dev;
@@ -2025,7 +2127,7 @@ void test_fifo_shadow_slots_do_not_require_fresh_evidence() {
 
   TEST_ASSERT_TRUE(st.ok());
   TEST_ASSERT_EQUAL_UINT32(0x33333u, slot.mantissa);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore + 2U, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(readsBefore + 1U, bus.readCalls);
   TEST_ASSERT_TRUE((bus.registers[cmd::REG_FLAGS] & cmd::MASK_FLAG_H) != 0U);
 }
 
@@ -2053,7 +2155,7 @@ void test_int_fresh_evidence_does_not_clear_flags() {
 
   TEST_ASSERT_TRUE(st.ok());
   TEST_ASSERT_EQUAL_UINT32(0x45678u, sample.mantissa);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore + 2U, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(readsBefore + 1U, bus.readCalls);
   TEST_ASSERT_TRUE((bus.registers[cmd::REG_FLAGS] & cmd::MASK_FLAG_H) != 0U);
   TEST_ASSERT_TRUE((bus.registers[cmd::REG_FLAGS] & cmd::MASK_FLAG_L) != 0U);
 }
@@ -2622,6 +2724,16 @@ void test_scale_and_counter_helpers() {
   TEST_ASSERT_EQUAL_UINT8(17u, dev.getEffectiveBits());
   TEST_ASSERT_TRUE(dev.getCurrentResolutionLux() > 0.0f);
   TEST_ASSERT_EQUAL_UINT8(2u, dev.sampleCounterDelta(15, 1));
+  TEST_ASSERT_TRUE(std::isnan(
+      dev.getRangeFullScaleLux(static_cast<Range>(9))));
+  TEST_ASSERT_TRUE(std::isnan(
+      dev.getRangeResolutionLux(static_cast<Range>(9), ConversionTime::MS_100)));
+  TEST_ASSERT_TRUE(std::isnan(
+      dev.getRangeResolutionLux(Range::RANGE_0,
+                                static_cast<ConversionTime>(12))));
+  TEST_ASSERT_EQUAL_UINT32(0U, dev.getOneShotBudgetUs(Mode::POWER_DOWN));
+  TEST_ASSERT_EQUAL_UINT32(0U, dev.getOneShotBudgetUs(Mode::CONTINUOUS));
+  TEST_ASSERT_EQUAL_UINT32(0U, dev.getOneShotBudgetMs(static_cast<Mode>(0xFF)));
 
   TEST_ASSERT_TRUE(dev.setPackageVariant(PackageVariant::PICOSTAR).ok());
   TEST_ASSERT_FLOAT_WITHIN(0.01f, 328.0f, dev.getRangeFullScaleLux(Range::RANGE_0));
@@ -2807,6 +2919,27 @@ void test_configuration_and_interrupt_convenience_helpers() {
                           highRead.exponent);
   TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(cmd::THRESHOLD_H_RESET & cmd::MASK_THRESHOLD_RESULT),
                            highRead.result);
+}
+
+void test_picostar_rejects_int_output_presets_without_bus_io() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.packageVariant = PackageVariant::PICOSTAR;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+  const uint32_t writesBefore = bus.writeCalls;
+
+  Status st = dev.enableConversionReadyInterrupt();
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_CONFIG),
+                          static_cast<uint8_t>(st.code));
+  st = dev.enableFifoFullInterrupt();
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_CONFIG),
+                          static_cast<uint8_t>(st.code));
+  st = dev.enableThresholdInterrupt(Threshold{0, 1}, Threshold{0, 2});
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_CONFIG),
+                          static_cast<uint8_t>(st.code));
+
+  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
 }
 
 void test_cached_configuration_rolls_back_after_i2c_failure() {
@@ -3176,11 +3309,14 @@ int main() {
   RUN_TEST(test_status_ok);
   RUN_TEST(test_status_error);
   RUN_TEST(test_status_in_progress);
+  RUN_TEST(test_error_names_are_complete_and_stable);
   RUN_TEST(test_config_defaults);
   RUN_TEST(test_get_last_sample_before_any_read);
   RUN_TEST(test_begin_rejects_missing_callbacks);
   RUN_TEST(test_begin_rejects_one_shot_startup_mode);
   RUN_TEST(test_begin_rejects_invalid_package_address_combo);
+  RUN_TEST(test_picostar_rejects_impossible_int_hook_configuration);
+  RUN_TEST(test_runtime_package_switch_rejects_picostar_with_int_hook);
   RUN_TEST(test_package_address_matrix);
   RUN_TEST(test_invalid_begin_after_success_resets_default_runtime);
   RUN_TEST(test_begin_normalizes_offline_threshold_on_stored_copy);
@@ -3236,12 +3372,14 @@ int main() {
   RUN_TEST(test_read_flags_parses_and_clears_ready_flag);
   RUN_TEST(test_clear_conversion_ready_flag_preserves_window_flags);
   RUN_TEST(test_clear_flags_uses_clear_on_read_semantics);
+  RUN_TEST(test_generic_raw_flags_access_synchronizes_readiness_without_dirtying_config);
   RUN_TEST(test_read_int_pin_asserted_uses_configured_polarity);
   RUN_TEST(test_write_int_configuration_rejects_bad_fixed_pattern);
   RUN_TEST(test_read_device_id_returns_raw_register_value);
   RUN_TEST(test_set_verify_crc_updates_cached_setting);
   RUN_TEST(test_decoded_register_helpers);
   RUN_TEST(test_read_register_block_and_sample_slot_helpers);
+  RUN_TEST(test_burst_enabled_single_sample_uses_one_coherent_result_transaction);
   RUN_TEST(test_fifo_shadow_slots_do_not_require_fresh_evidence);
   RUN_TEST(test_int_fresh_evidence_does_not_clear_flags);
   RUN_TEST(test_counter_fresh_evidence_does_not_clear_flags);
@@ -3272,6 +3410,7 @@ int main() {
   RUN_TEST(test_all_conversion_time_vectors_and_invalid_values);
   RUN_TEST(test_range_vectors_and_invalid_values);
   RUN_TEST(test_configuration_and_interrupt_convenience_helpers);
+  RUN_TEST(test_picostar_rejects_int_output_presets_without_bus_io);
   RUN_TEST(test_cached_configuration_rolls_back_after_i2c_failure);
   RUN_TEST(test_successful_raw_config_write_marks_hardware_config_dirty);
   RUN_TEST(test_raw_register_access_rejects_invalid_bounds_without_bus_io);

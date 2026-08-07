@@ -97,8 +97,7 @@ bool rawWriteCanDirtyCachedSettings(uint8_t reg) {
   return reg == cmd::REG_CONFIGURATION ||
          reg == cmd::REG_INT_CONFIGURATION ||
          reg == cmd::REG_THRESHOLD_L ||
-         reg == cmd::REG_THRESHOLD_H ||
-         reg == cmd::REG_FLAGS;
+         reg == cmd::REG_THRESHOLD_H;
 }
 
 static constexpr uint8_t RESULT_EXPONENT_MAX = 8U;
@@ -226,6 +225,11 @@ Status OPT4001::begin(const Config& config) {
   }
   if (config.intPin < -1) {
     return Status::Error(Err::INVALID_CONFIG, "Invalid INT pin");
+  }
+  if (config.packageVariant == PackageVariant::PICOSTAR &&
+      (config.intPin >= 0 || config.gpioRead != nullptr)) {
+    return Status::Error(Err::INVALID_CONFIG,
+                         "PicoStar package has no INT pin");
   }
   if (!_thresholdValid(config.lowThreshold) || !_thresholdValid(config.highThreshold)) {
     return Status::Error(Err::INVALID_CONFIG, "Invalid threshold register value");
@@ -1090,6 +1094,11 @@ Status OPT4001::setPackageVariant(PackageVariant variant) {
   if (!isValidAddress(_config.i2cAddress, variant)) {
     return Status::Error(Err::INVALID_PARAM, "Current I2C address invalid for package");
   }
+  if (variant == PackageVariant::PICOSTAR &&
+      (_config.intPin >= 0 || _config.gpioRead != nullptr)) {
+    return Status::Error(Err::INVALID_CONFIG,
+                         "PicoStar package has no INT pin");
+  }
   _config.packageVariant = variant;
   return Status::Ok();
 }
@@ -1385,6 +1394,10 @@ Status OPT4001::enableThresholdInterrupt(const Threshold& low, const Threshold& 
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
+  if (_config.packageVariant != PackageVariant::SOT_5X3) {
+    return Status::Error(Err::INVALID_CONFIG,
+                         "Threshold INT requires SOT-5X3 package");
+  }
   if (!_thresholdValid(low) || !_thresholdValid(high)) {
     return Status::Error(Err::INVALID_PARAM, "Invalid threshold");
   }
@@ -1439,6 +1452,10 @@ Status OPT4001::enableConversionReadyInterrupt() {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
+  if (_config.packageVariant != PackageVariant::SOT_5X3) {
+    return Status::Error(Err::INVALID_CONFIG,
+                         "Conversion INT requires SOT-5X3 package");
+  }
 
   const Config oldConfig = _config;
   _config.intDirection = IntDirection::PIN_OUTPUT;
@@ -1453,6 +1470,10 @@ Status OPT4001::enableConversionReadyInterrupt() {
 Status OPT4001::enableFifoFullInterrupt() {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+  if (_config.packageVariant != PackageVariant::SOT_5X3) {
+    return Status::Error(Err::INVALID_CONFIG,
+                         "FIFO INT requires SOT-5X3 package");
   }
 
   const Config oldConfig = _config;
@@ -1614,14 +1635,26 @@ Status OPT4001::readRegisters(uint8_t startReg, uint8_t* buf, size_t len) {
   if (!isValidPublicRegisterBlock(startReg, len)) {
     return Status::Error(Err::INVALID_PARAM, "Invalid register block");
   }
-  return _i2cWriteReadTracked(&startReg, 1, buf, len);
+  Status st = _i2cWriteReadTracked(&startReg, 1, buf, len);
+  if (st.ok()) {
+    const uint16_t endReg = static_cast<uint16_t>(startReg) +
+                            static_cast<uint16_t>((len - 1U) / 2U);
+    if (startReg <= cmd::REG_FLAGS && endReg >= cmd::REG_FLAGS) {
+      _clearReadinessEvidence();
+    }
+  }
+  return st;
 }
 
 Status OPT4001::readRegister16(uint8_t reg, uint16_t& value) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
-  return _readRegister16Tracked(reg, value);
+  Status st = _readRegister16Tracked(reg, value);
+  if (st.ok() && reg == cmd::REG_FLAGS) {
+    _clearReadinessEvidence();
+  }
+  return st;
 }
 
 Status OPT4001::writeRegister16(uint8_t reg, uint16_t value) {
@@ -1629,6 +1662,9 @@ Status OPT4001::writeRegister16(uint8_t reg, uint16_t value) {
     return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
   }
   Status st = _writeRegister16Tracked(reg, value);
+  if (st.ok() && reg == cmd::REG_FLAGS && value != 0U) {
+    _clearReadinessEvidence();
+  }
   if (rawWriteCanDirtyCachedSettings(reg) &&
       st.code != Err::INVALID_PARAM &&
       st.code != Err::OFFLINE &&
@@ -1890,6 +1926,9 @@ float OPT4001::getLuxLsb() const {
 }
 
 float OPT4001::getRangeFullScaleLux(Range range) const {
+  if (!isValidRange(range)) {
+    return invalidLuxValue();
+  }
   uint8_t index = 8U;
   if (range != Range::AUTO) {
     const uint8_t value = static_cast<uint8_t>(range);
@@ -1925,10 +1964,10 @@ uint8_t OPT4001::getEffectiveBits() const {
 }
 
 float OPT4001::getRangeResolutionLux(Range range, ConversionTime time) const {
-  const uint8_t effectiveBits = getEffectiveBits(time);
-  if (effectiveBits == 0U) {
-    return 0.0f;
+  if (!isValidRange(range) || !isValidConversionTime(time)) {
+    return invalidLuxValue();
   }
+  const uint8_t effectiveBits = getEffectiveBits(time);
 
   uint8_t exponent = 8U;
   if (range != Range::AUTO) {
@@ -1965,6 +2004,9 @@ uint32_t OPT4001::getConversionTimeMs() const {
 }
 
 uint32_t OPT4001::getOneShotBudgetUs(Mode mode) const {
+  if (!isOneShotMode(mode)) {
+    return 0U;
+  }
   uint32_t budgetUs = getConversionTimeUs();
   if (!_config.quickWake) {
     budgetUs += cmd::ONE_SHOT_STANDBY_US;
@@ -2130,6 +2172,19 @@ Status OPT4001::_readRegister16Raw(uint8_t reg, uint16_t& value) {
 }
 
 Status OPT4001::_readSampleAt(uint8_t msbReg, Sample& out) {
+  if (_config.burstMode) {
+    uint8_t buffer[4] = {};
+    Status st = _i2cWriteReadTracked(&msbReg, 1, buffer, sizeof(buffer));
+    if (!st.ok()) {
+      return st;
+    }
+    const uint16_t result =
+        static_cast<uint16_t>((static_cast<uint16_t>(buffer[0]) << 8) | buffer[1]);
+    const uint16_t lsbCrc =
+        static_cast<uint16_t>((static_cast<uint16_t>(buffer[2]) << 8) | buffer[3]);
+    return _decodeSampleRegisters(result, lsbCrc, out);
+  }
+
   uint16_t result = 0;
   uint16_t lsbCrc = 0;
   Status st = _readRegister16Tracked(msbReg, result);

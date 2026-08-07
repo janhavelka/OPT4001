@@ -25,19 +25,65 @@ REQUIRED_COMMON = [
 MANDATORY_COMMANDS = [
     "help",
     "version",
+    "ver",
     "scan",
+    "init",
+    "begin",
+    "end",
+    "addr",
+    "pkg",
     "probe",
     "recover",
     "drv",
+    "health",
+    "state",
     "read",
+    "readblocking",
+    "tryread",
+    "trylux",
+    "start",
+    "poll",
+    "drdy",
+    "readburst",
+    "slot",
+    "sample",
+    "sampleage",
+    "lux",
+    "mlux",
+    "ulux",
+    "watch",
+    "stop",
     "diag",
     "scale",
+    "timing",
+    "cfg",
+    "settings",
+    "snapshot",
+    "range",
+    "ctime",
+    "mode",
+    "measure",
+    "qwake",
+    "crc",
+    "burst",
     "config",
     "intcfg",
     "status",
     "flags",
     "threshold",
+    "thcalc",
+    "thdecode",
+    "int",
+    "intpin",
+    "id",
+    "identify",
+    "dump",
+    "reg",
+    "wreg",
     "regs",
+    "raw",
+    "raw2lux",
+    "adc2lux",
     "reset",
     "resetreapply",
     "selftest",
@@ -89,6 +135,19 @@ def main() -> int:
             fail(f"Arduino CLI missing mandatory command '{cmd}'")
         if f'"{cmd}"' not in idf_text:
             fail(f"IDF CLI missing mandatory command '{cmd}'")
+
+    for cli_name, source in (("Arduino", arduino_text), ("IDF", idf_text)):
+        for token in ("errorName", "driverStateName"):
+            if token not in source:
+                fail(f"{cli_name} CLI must reuse library-owned {token} mapping")
+
+    for token in ("\\033[31m", "\\033[32m", "\\033[33m", "\\033[36m"):
+        if token not in idf_text:
+            fail(f"IDF CLI missing ANSI color token {token!r}")
+
+    for token in ("STRESS_COUNT_MAX", "WATCH_COUNT_MAX", "REGISTER_DUMP_MAX_BYTES"):
+        if token not in idf_text:
+            fail(f"IDF CLI missing bounded diagnostic limit '{token}'")
 
     for token in ("driver/i2c_master.h", "i2c_master_probe", "getchar()", "char input["):
         if token not in idf_text:

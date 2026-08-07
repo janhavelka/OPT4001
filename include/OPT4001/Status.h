@@ -28,6 +28,37 @@ enum class Err : uint8_t {
   OFFLINE                ///< Driver health is latched offline until recovery.
 };
 
+/// Return a stable library-owned name for an error code.
+/// @param err Error code to describe.
+/// @return Static storage; invalid enum values return `"UNKNOWN_ERROR"`.
+constexpr const char* errorName(Err err) {
+  switch (err) {
+    case Err::OK: return "OK";
+    case Err::NOT_INITIALIZED: return "NOT_INITIALIZED";
+    case Err::INVALID_CONFIG: return "INVALID_CONFIG";
+    case Err::I2C_ERROR: return "I2C_ERROR";
+    case Err::TIMEOUT: return "TIMEOUT";
+    case Err::INVALID_PARAM: return "INVALID_PARAM";
+    case Err::DEVICE_NOT_FOUND: return "DEVICE_NOT_FOUND";
+    case Err::DEVICE_ID_MISMATCH: return "DEVICE_ID_MISMATCH";
+    case Err::CRC_ERROR: return "CRC_ERROR";
+    case Err::MEASUREMENT_NOT_READY: return "MEASUREMENT_NOT_READY";
+    case Err::BUSY: return "BUSY";
+    case Err::IN_PROGRESS: return "IN_PROGRESS";
+    case Err::I2C_NACK_ADDR: return "I2C_NACK_ADDR";
+    case Err::I2C_NACK_DATA: return "I2C_NACK_DATA";
+    case Err::I2C_TIMEOUT: return "I2C_TIMEOUT";
+    case Err::I2C_BUS: return "I2C_BUS";
+    case Err::OFFLINE: return "OFFLINE";
+  }
+  return "UNKNOWN_ERROR";
+}
+
+/// Cross-library alias for `errorName()`.
+/// @param err Error code to describe.
+/// @return Static storage; invalid enum values return `"UNKNOWN_ERROR"`.
+constexpr const char* toString(Err err) { return errorName(err); }
+
 /// Status structure returned by all fallible operations.
 struct Status {
   Err code = Err::OK;

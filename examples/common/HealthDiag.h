@@ -22,39 +22,14 @@ namespace diag {
  * @brief Convert DriverState enum to human-readable string.
  */
 inline const char* stateToString(OPT4001::DriverState state) {
-  switch (state) {
-    case OPT4001::DriverState::UNINIT:   return "UNINIT";
-    case OPT4001::DriverState::READY:    return "READY";
-    case OPT4001::DriverState::DEGRADED: return "DEGRADED";
-    case OPT4001::DriverState::OFFLINE:  return "OFFLINE";
-    default:                              return "UNKNOWN";
-  }
+  return OPT4001::driverStateName(state);
 }
 
 /**
  * @brief Convert Err enum to human-readable string.
  */
 inline const char* errToString(OPT4001::Err err) {
-  switch (err) {
-    case OPT4001::Err::OK:                   return "OK";
-    case OPT4001::Err::NOT_INITIALIZED:      return "NOT_INITIALIZED";
-    case OPT4001::Err::INVALID_CONFIG:       return "INVALID_CONFIG";
-    case OPT4001::Err::I2C_ERROR:            return "I2C_ERROR";
-    case OPT4001::Err::TIMEOUT:              return "TIMEOUT";
-    case OPT4001::Err::INVALID_PARAM:        return "INVALID_PARAM";
-    case OPT4001::Err::DEVICE_NOT_FOUND:     return "DEVICE_NOT_FOUND";
-    case OPT4001::Err::DEVICE_ID_MISMATCH:   return "DEVICE_ID_MISMATCH";
-    case OPT4001::Err::CRC_ERROR:            return "CRC_ERROR";
-    case OPT4001::Err::MEASUREMENT_NOT_READY:return "MEASUREMENT_NOT_READY";
-    case OPT4001::Err::BUSY:                 return "BUSY";
-    case OPT4001::Err::IN_PROGRESS:          return "IN_PROGRESS";
-    case OPT4001::Err::I2C_NACK_ADDR:        return "I2C_NACK_ADDR";
-    case OPT4001::Err::I2C_NACK_DATA:        return "I2C_NACK_DATA";
-    case OPT4001::Err::I2C_TIMEOUT:          return "I2C_TIMEOUT";
-    case OPT4001::Err::I2C_BUS:              return "I2C_BUS";
-    case OPT4001::Err::OFFLINE:              return "OFFLINE";
-    default:                                 return "UNKNOWN";
-  }
+  return OPT4001::errorName(err);
 }
 
 /**

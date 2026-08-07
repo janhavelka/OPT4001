@@ -62,37 +62,11 @@ void printWatchState();
 void finishWatch(bool cancelled);
 
 const char* errToStr(OPT4001::Err err) {
-  using OPT4001::Err;
-  switch (err) {
-    case Err::OK: return "OK";
-    case Err::NOT_INITIALIZED: return "NOT_INITIALIZED";
-    case Err::INVALID_CONFIG: return "INVALID_CONFIG";
-    case Err::I2C_ERROR: return "I2C_ERROR";
-    case Err::TIMEOUT: return "TIMEOUT";
-    case Err::INVALID_PARAM: return "INVALID_PARAM";
-    case Err::DEVICE_NOT_FOUND: return "DEVICE_NOT_FOUND";
-    case Err::DEVICE_ID_MISMATCH: return "DEVICE_ID_MISMATCH";
-    case Err::CRC_ERROR: return "CRC_ERROR";
-    case Err::MEASUREMENT_NOT_READY: return "MEASUREMENT_NOT_READY";
-    case Err::BUSY: return "BUSY";
-    case Err::IN_PROGRESS: return "IN_PROGRESS";
-    case Err::I2C_NACK_ADDR: return "I2C_NACK_ADDR";
-    case Err::I2C_NACK_DATA: return "I2C_NACK_DATA";
-    case Err::I2C_TIMEOUT: return "I2C_TIMEOUT";
-    case Err::I2C_BUS: return "I2C_BUS";
-    case Err::OFFLINE: return "OFFLINE";
-    default: return "UNKNOWN";
-  }
+  return OPT4001::errorName(err);
 }
 
 const char* stateToStr(OPT4001::DriverState state) {
-  switch (state) {
-    case OPT4001::DriverState::UNINIT: return "UNINIT";
-    case OPT4001::DriverState::READY: return "READY";
-    case OPT4001::DriverState::DEGRADED: return "DEGRADED";
-    case OPT4001::DriverState::OFFLINE: return "OFFLINE";
-    default: return "UNKNOWN";
-  }
+  return OPT4001::driverStateName(state);
 }
 
 const char* modeToStr(OPT4001::Mode mode) {

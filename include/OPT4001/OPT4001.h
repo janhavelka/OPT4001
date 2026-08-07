@@ -20,6 +20,24 @@ enum class DriverState : uint8_t {
   OFFLINE   ///< Consecutive I2C failures reached the configured threshold.
 };
 
+/// Return a stable library-owned name for a driver state.
+/// @param state Driver state to describe.
+/// @return Static storage; invalid enum values return `"UNKNOWN_STATE"`.
+constexpr const char* driverStateName(DriverState state) {
+  switch (state) {
+    case DriverState::UNINIT: return "UNINIT";
+    case DriverState::READY: return "READY";
+    case DriverState::DEGRADED: return "DEGRADED";
+    case DriverState::OFFLINE: return "OFFLINE";
+  }
+  return "UNKNOWN_STATE";
+}
+
+/// Cross-library alias for `driverStateName()`.
+/// @param state Driver state to describe.
+/// @return Static storage; invalid enum values return `"UNKNOWN_STATE"`.
+constexpr const char* toString(DriverState state) { return driverStateName(state); }
+
 /// Decoded measurement sample from RESULT/FIFO registers.
 struct Sample {
   uint16_t resultReg = 0;
@@ -385,6 +403,10 @@ public:
   Status readIntPinAsserted(bool& asserted) const;
 
   // === Configuration ===
+  /// Select the package-specific address and lux scaling profile.
+  /// @param variant Package variant to select.
+  /// @return `INVALID_PARAM` for an invalid variant/address combination, or
+  /// `INVALID_CONFIG` when selecting PicoStar while an INT hook is configured.
   Status setPackageVariant(PackageVariant variant);
   PackageVariant getPackageVariant() const { return _config.packageVariant; }
 
@@ -438,15 +460,17 @@ public:
   /// Convenience helper for common SOT_5X3 output-mode threshold interrupt use.
   /// Configures INT as open-drain output with `INT_CFG=THRESHOLD`; hardware
   /// threshold/SMBus-alert behavior still needs target-board validation.
+  /// Returns `INVALID_CONFIG` for PicoStar, which has no INT pin.
   Status enableThresholdInterrupt(const Threshold& low, const Threshold& high);
   /// Convenience helper for common output-mode threshold interrupt use with lux values.
   Status enableThresholdInterruptLux(float lowLux, float highLux);
   /// Configure SOT_5X3 INT as an open-drain output pulse after every conversion.
   /// The application owns pullup, GPIO/ISR setup, and hardware validation.
+  /// Returns `INVALID_CONFIG` for PicoStar, which has no INT pin.
   Status enableConversionReadyInterrupt();
   /// Configure SOT_5X3 INT as an open-drain output pulse when the 4-deep FIFO
   /// window is full. The application owns pullup, GPIO/ISR setup, and hardware
-  /// validation.
+  /// validation. Returns `INVALID_CONFIG` for PicoStar.
   Status enableFifoFullInterrupt();
 
   Status readConfiguration(uint16_t& value);

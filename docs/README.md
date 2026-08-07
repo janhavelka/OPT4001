@@ -23,6 +23,9 @@ The matching PDFs in `reference/` are retained as vendor source material.
 
 ## Validation
 
+- `reports/source-audit-20260807.md` - 2026-08-07 authoritative
+  source/datasheet/CLI findings, fixes, bounded-loop review, workspace parity,
+  and open HIL/release gates.
 - [Validation status](validation/validation-status.md) - current evidence and
   pending hardware/ESP-IDF evidence.
 - [Hardware validation procedure](validation/hardware-validation-procedure.md)

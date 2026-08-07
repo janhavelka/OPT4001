@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-07
+
 ### Added
 
 - Poll-chunked job API: `poll(nowMs, maxInstructions)`, `pollBusy()`,
@@ -15,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `startResetAndReapply()`.
 - Native tests for shared status+burst read budgets, delay gates, chunked
   config apply budgets, and failure-stop status reporting.
+- Stable library-owned `errorName()` / `driverStateName()` and `toString()`
+  helpers, including defined fallback names for invalid enum casts.
+- Native tests for coherent sample transfers, FLAGS raw-access side effects,
+  PicoStar INT restrictions, and invalid numeric-helper inputs.
 
 ### Changed
 
@@ -22,6 +28,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   poll-chunked sample jobs and caches the most recently completed burst frame.
 - `tryReadSample()` is documented as a synchronous diagnostic/convenience path,
   not an instruction-budgeted poll job.
+- Arduino and native ESP-IDF diagnostics now share library-owned status/state
+  names. The native IDF CLI adds bounded address/package selection, blocking and
+  poll-friendly reads, FIFO slots, watch/stop, decoded configuration, threshold
+  conversion, interrupt presets, timing/scaling, raw registers, and colorized
+  sectioned help.
+- PlatformIO pins the Arduino platform to pioarduino `55.03.311` and native
+  tests to `platformio/native@1.2.1` for reproducible workspace builds.
+- CI uses the stable Ubuntu 24.04 runner, PlatformIO Core `6.1.19`, and
+  full-commit action pins; guard/package/HIL parser gates are enforced in the
+  workflow.
+
+### Fixed
+
+- Read RESULT and RESULT_LSB_CRC in one transaction when burst mode is enabled,
+  preventing mixed fields when a conversion completes between two reads.
+- Kept generic FLAGS reads/writes synchronized with cached freshness evidence,
+  without incorrectly marking cached hardware configuration dirty.
+- Rejected impossible PicoStar INT GPIO hooks and interrupt-output presets
+  before bus I/O.
+- Made invalid range, conversion-time, and one-shot budget helpers honor their
+  documented `NaN`/zero contracts instead of returning plausible values.
+- Corrected native ESP-IDF conversion-time parsing so `ctime 0..11` maps to the
+  enum values shown by the CLI rather than ambiguous rounded millisecond values.
+
+### Validation
+
+- Source/datasheet audit and open HIL gates are recorded in
+  `docs/reports/source-audit-20260807.md`.
 
 ## [1.0.0] - 2026-06-03
 
@@ -123,5 +157,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optical compensation remains application-specific and should be characterized
   with the final product enclosure/window and reference meter setup.
 
-[Unreleased]: https://github.com/janhavelka/OPT4001/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/janhavelka/OPT4001/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/janhavelka/OPT4001/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/janhavelka/OPT4001/releases/tag/v1.0.0

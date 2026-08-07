@@ -5,10 +5,22 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PLATFORMIO_CORE_VERSION: "6.1.19"
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -18,61 +30,69 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Cache PlatformIO
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/pip
             ~/.platformio
-          key: ${{ runner.os }}-pio-${{ hashFiles('platformio.ini') }}
+          key: ${{ runner.os }}-pio-${{ env.PLATFORMIO_CORE_VERSION }}-${{ matrix.environment }}-${{ hashFiles('platformio.ini') }}
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       - name: Install PlatformIO
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install platformio
+          python -m pip install --disable-pip-version-check "platformio==${PLATFORMIO_CORE_VERSION}"
 
       - name: Build ${{ matrix.environment }}
         run: python -m platformio run -e ${{ matrix.environment }}
 
   native-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Cache PlatformIO
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/pip
             ~/.platformio
-          key: ${{ runner.os }}-pio-native-${{ hashFiles('platformio.ini') }}
+          key: ${{ runner.os }}-pio-${{ env.PLATFORMIO_CORE_VERSION }}-native-${{ hashFiles('platformio.ini') }}
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       - name: Install PlatformIO
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install platformio
+          python -m pip install --disable-pip-version-check "platformio==${PLATFORMIO_CORE_VERSION}"
 
       - name: Enforce core timing guard
         run: python tools/check_core_timing_guard.py
+
+      - name: Enforce cross-framework CLI contract
+        run: python tools/check_cli_contract.py
+
+      - name: Enforce native ESP-IDF example contract
+        run: python tools/check_idf_example_contract.py
 
       - name: Enforce public API documentation
         run: python tools/check_public_api_docs.py
 
       - name: Enforce version header contract
         run: python tools/check_version_header_contract.py
+
+      - name: Enforce readiness and metadata claims
+        run: python tools/check_readiness_claims.py
 
       - name: Build clean package consumer
         run: python tools/check_clean_consumer_package.py
@@ -84,20 +104,20 @@ jobs:
         run: python -m platformio test -e native
 
   validate-library:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       - name: Install PlatformIO
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install platformio
+          python -m pip install --disable-pip-version-check "platformio==${PLATFORMIO_CORE_VERSION}"
 
       - name: Enforce core timing guard
         run: python tools/check_core_timing_guard.py
@@ -120,14 +140,25 @@ jobs:
       - name: Enforce public API documentation
         run: python tools/check_public_api_docs.py
 
+      - name: Exercise HIL parser without hardware
+        run: |
+          python tools/hil_opt4001_runner.py --parser-self-test
+          python tools/test_hil_opt4001_runner_parser.py
+
       - name: Check generated version header
         run: python scripts/generate_version.py check
 
       - name: Validate library package
-        run: python -m platformio pkg pack
+        run: python -m platformio pkg pack . --output "${RUNNER_TEMP}/OPT4001.tar.gz"
+
+      - name: Check generated files and whitespace
+        run: |
+          git diff --check
+          git diff --exit-code
 
   idf-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -137,12 +168,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: recursive
 
       - name: Build pure ESP-IDF ${{ matrix.target }}
-        uses: espressif/esp-idf-ci-action@v1
+        uses: espressif/esp-idf-ci-action@9d38657f3d789ca759b2b37aaf5ceffbc42c4f0d # v1
         with:
           esp_idf_version: v6.0.1
           target: ${{ matrix.target }}
@@ -150,7 +181,7 @@ jobs:
           command: idf.py set-target ${{ matrix.target }} build
 
       - name: Upload ESP-IDF build logs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: esp-idf-build-logs-${{ matrix.target }}

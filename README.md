@@ -15,6 +15,8 @@ pattern used by the other device libraries in this workspace:
 - framework-neutral core with no Arduino or ESP-IDF driver headers in `include/` or `src/`
 - deterministic control flow with bounded polling in `tick()`
 - health tracking with `READY`, `DEGRADED`, and `OFFLINE` states
+- stable `errorName()` / `driverStateName()` strings for diagnostics shared by
+  Arduino and native ESP-IDF integrations
 - no heap allocation in steady-state driver operation
 
 ## Current Readiness
@@ -100,7 +102,16 @@ are 5.5 V tolerant; that does not make the device a 5 V powered part.
 
 ### PlatformIO
 
+This repository pins its Arduino builds to pioarduino `55.03.311` and native
+tests to `platformio/native@1.2.1`. On Windows, repository validation uses the
+checked-in `scripts\pio.cmd` wrapper so it selects the existing VS Code-managed
+PlatformIO Core.
+
 Add to `platformio.ini`:
+
+The examples below intentionally use the latest published tag (`v1.0.0`). The
+audited source metadata is `1.1.0`, but this hardening change is not a formal
+release and does not create a tag.
 
 ```ini
 lib_deps =
@@ -555,9 +566,11 @@ driver/bus state errors to `I2C_BUS` while preserving the raw `esp_err_t` in
 - `examples/esp_idf/basic/`
   - native ESP-IDF diagnostic project with `app_main()`, fixed-buffer
     nonblocking CLI input, and `driver/i2c_master.h` transport callbacks
-  - command coverage for scan, probe, recover, reset, status/config decode,
-    thresholds, raw register access, stress, stress-mix, selftest, and live
-    watch workflows
+  - colorized, sectioned command coverage matching the Arduino diagnostic
+    surface: address/package profiles, blocking/poll-friendly reads, FIFO/slot
+    history, watch/stop, measurement and interrupt configuration, decoded
+    status/config, threshold math, raw registers, scaling/timing, stress, and
+    selftest workflows
   - owns its example I2C bus and intentionally does not show production
     shared-bus locking
   - no Arduino compatibility facade; parity is enforced by
@@ -653,10 +666,10 @@ python tools/check_version_header_contract.py
 python tools/check_readiness_claims.py
 python tools/check_public_api_docs.py
 python scripts/generate_version.py check
-python -m platformio test -e native
-python -m platformio run -e esp32s3dev
-python -m platformio run -e esp32s2dev
-python -m platformio pkg pack
+.\scripts\pio.cmd test -e native
+.\scripts\pio.cmd run -e esp32s3dev
+.\scripts\pio.cmd run -e esp32s2dev
+.\scripts\pio.cmd pkg pack
 ```
 
 CI is expected to run the same guard/test/build/package command set above. It
