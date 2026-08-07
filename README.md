@@ -2,11 +2,10 @@
 
 Production-oriented, source-level hardened OPT4001 ambient light sensor
 driver with a framework-neutral core. Current evidence covers native
-fake-transport tests and Arduino/PlatformIO ESP32-S2/S3 builds. A native ESP-IDF
-component and diagnostic example are present, and CI is configured to build the
-pure ESP-IDF example. Local pure ESP-IDF, hardware, optical, INT, FIFO
-timing/order, address-pin, and fault/recovery validation remain pending unless
-captured separately.
+fake-transport tests, Arduino/PlatformIO ESP32-S2/S3 builds, and pure ESP-IDF
+v6.0.1 ESP32-S2/S3 builds in CI. Local ESP-IDF tooling was unavailable;
+hardware, optical, INT, FIFO timing/order, address-pin, and fault/recovery
+validation remain pending unless captured separately.
 
 The library follows the same non-owning I2C transport and `Status`-returning API
 pattern used by the other device libraries in this workspace:
@@ -24,8 +23,7 @@ pattern used by the other device libraries in this workspace:
 Classification: source-level hardened and diagnostic-build tested. The core is
 designed for production integration, but this repository does not currently
 claim real-device hardware validation, optical accuracy validation,
-INT/FIFO/address-pin/fault-recovery validation, or completed pure ESP-IDF
-target-build evidence.
+or INT/FIFO/address-pin/fault-recovery validation.
 
 ### Validation Evidence
 
@@ -38,7 +36,7 @@ target-build evidence.
 | Arduino ESP32 builds | `python -m platformio run -e esp32s3dev` and `python -m platformio run -e esp32s2dev` build the Arduino diagnostic example. |
 | Packaging | `python -m platformio pkg pack` verifies PlatformIO package metadata. |
 | ESP-IDF static contract | `tools/check_idf_example_contract.py` verifies the native IDF example boundary and command coverage. |
-| Pure ESP-IDF builds | CI job configured with Espressif's ESP-IDF action; local attempts failed because `idf.py` was not available on `PATH`. Treat as pending until a completed CI/local build log is captured. |
+| Pure ESP-IDF builds | [GitHub Actions run 31218427198](https://github.com/janhavelka/OPT4001/actions/runs/31218427198) passed for ESP32-S2 and ESP32-S3 with ESP-IDF v6.0.1. |
 
 ### Pending Validation Matrix
 
@@ -51,7 +49,6 @@ target-build evidence.
 | FIFO physical timing/order under real conversions | Pending hardware matrix. |
 | SMBus alert arbitration | Pending controller-level validation. |
 | Fault/recovery paths | Pending controlled hardware/HIL validation for NACK, timeout, unplug/replug, brownout, stuck bus, OFFLINE latch, and manual `recover()`. |
-| Pure ESP-IDF `idf.py` builds | CI configured; local and captured workflow evidence pending. |
 
 Hardware validation procedure: `docs/validation/hardware-validation-procedure.md`.
 
@@ -685,8 +682,9 @@ idf.py -C examples/esp_idf/basic set-target esp32s2 build
 ```
 
 The static IDF contract check does not replace a real `idf.py` build. Local
-release-preparation validation attempted pure ESP-IDF builds, but ESP-IDF was
-not available on `PATH`, so local pure ESP-IDF builds were not run.
+validation could not run because ESP-IDF was not available on `PATH`; captured
+CI run `31218427198` passed the native example for ESP32-S2 and ESP32-S3 using
+ESP-IDF v6.0.1.
 
 ### Optional Hardware-In-Loop Runner
 

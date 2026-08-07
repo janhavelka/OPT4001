@@ -4,9 +4,9 @@ Current classification: source-level hardened and diagnostic-build tested.
 
 The repository currently has native fake-transport tests, Arduino/PlatformIO
 ESP32-S2/S3 build coverage, static contract checks, package-consumer checks, and
-configured ESP-IDF CI. It does not claim completed real-device hardware,
-optical, INT, FIFO timing/order, address-pin, fault/recovery, or reviewed pure
-ESP-IDF target-build evidence unless a future log captures it.
+reviewed pure ESP-IDF v6.0.1 ESP32-S2/S3 CI builds. It does not claim completed
+real-device hardware, optical, INT, FIFO timing/order, address-pin, or
+fault/recovery evidence unless a future log captures it.
 
 ## Current Evidence
 
@@ -20,7 +20,7 @@ ESP-IDF target-build evidence unless a future log captures it.
 | Arduino ESP32 builds | `python -m platformio run -e esp32s3dev` and `python -m platformio run -e esp32s2dev` |
 | Package import | `tools/check_clean_consumer_package.py` |
 | ESP-IDF static boundary | `tools/check_idf_example_contract.py` |
-| Pure ESP-IDF builds | CI is configured; completed logs must be reviewed before claiming pass evidence. |
+| Pure ESP-IDF builds | [GitHub Actions run 31218427198](https://github.com/janhavelka/OPT4001/actions/runs/31218427198) passed for ESP32-S2 and ESP32-S3 with ESP-IDF v6.0.1. |
 
 ## Pending Evidence
 
@@ -33,7 +33,6 @@ ESP-IDF target-build evidence unless a future log captures it.
 | FIFO physical timing/order | Pending hardware matrix. |
 | SMBus alert arbitration | Pending controller-level validation. |
 | Fault/recovery paths | Pending controlled tests for NACK, timeout, unplug/replug, brownout, stuck bus, OFFLINE latch, and manual `recover()`. |
-| Pure ESP-IDF target builds | Pending reviewed `idf.py` or CI logs. |
 
 ## Hardware Log Template
 

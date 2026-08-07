@@ -56,6 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Source/datasheet audit and open HIL gates are recorded in
   `docs/reports/source-audit-20260807.md`.
+- GitHub Actions run `31218427198` passed native tests, package/contract gates,
+  Arduino ESP32-S2/S3 builds, and pure ESP-IDF v6.0.1 ESP32-S2/S3 builds.
 
 ## [1.0.0] - 2026-06-03
 

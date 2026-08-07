@@ -145,9 +145,10 @@ built successfully for `esp32s3dev` and `esp32s2dev` using pioarduino
 `55.03.311`; the package tarball was created successfully and then removed from
 the worktree. The HIL parser self-test and its 15 host parser tests also passed.
 
-Native ESP-IDF `idf.py` target builds remain an open local gate when ESP-IDF is
-not available on PATH; CI is configured for both targets, but the static
-contract checker is not a substitute for a captured build result.
+Local native ESP-IDF builds could not run because `idf.py` was not available on
+PATH. [GitHub Actions run 31218427198](https://github.com/janhavelka/OPT4001/actions/runs/31218427198)
+provided the missing compiler evidence: the pure ESP-IDF v6.0.1 example passed
+for both ESP32-S2 and ESP32-S3. This is build evidence, not hardware evidence.
 
 ## Open HIL / Release Gates
 
@@ -159,5 +160,4 @@ contract checker is not a substitute for a captured build result.
 - Threshold, ready-pulse and FIFO-full INT polarity/latch/pulse captures.
 - NACK/timeout/unplug/brownout/stuck-bus/OFFLINE/recover evidence.
 - Explicit approval and isolation before exercising general-call reset.
-- Successful pure ESP-IDF `esp32s2` and `esp32s3` builds.
 - Formal release review/tag after the above evidence policy is satisfied.

@@ -37,7 +37,7 @@ README_REQUIRED = [
     "### Pending Validation Matrix",
     "### Package, Address, And Electrical Matrix",
     "Hardware validation procedure: `docs/validation/hardware-validation-procedure.md`.",
-    "Pure ESP-IDF builds | CI job configured",
+    "Pure ESP-IDF builds | [GitHub Actions run",
     "5.5 V tolerant",
     "readLatestSample()",
     "readBurst()",
