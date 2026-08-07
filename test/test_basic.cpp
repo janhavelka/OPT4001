@@ -981,6 +981,11 @@ void test_read_blocking_times_out_with_stalled_clock() {
   Sample sample;
   Status st = dev.readBlocking(sample, Mode::ONE_SHOT, 5);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::TIMEOUT), static_cast<uint8_t>(st.code));
+  SettingsSnapshot timedOut;
+  TEST_ASSERT_TRUE(dev.getSettings(timedOut).ok());
+  TEST_ASSERT_TRUE(timedOut.conversionStarted);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Mode::ONE_SHOT),
+                          static_cast<uint8_t>(timedOut.pendingMode));
 
   FakeBus continuousBus;
   OPT4001::OPT4001 continuousDev;
@@ -990,6 +995,34 @@ void test_read_blocking_times_out_with_stalled_clock() {
 
   st = continuousDev.readBlocking(sample, 5);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::TIMEOUT), static_cast<uint8_t>(st.code));
+}
+
+void test_blocking_reads_accept_full_uint32_timeout_range() {
+  FakeBus continuousBus;
+  OPT4001::OPT4001 continuousDev;
+  Config continuousCfg = makeConfig(continuousBus);
+  continuousCfg.mode = Mode::CONTINUOUS;
+  TEST_ASSERT_TRUE(continuousDev.begin(continuousCfg).ok());
+  seedSample(continuousBus, cmd::REG_RESULT, 0, 0x12345, 1, true);
+  markConversionReady(continuousBus);
+
+  Sample sample;
+  Status st = continuousDev.readFreshBlocking(sample, UINT32_MAX);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT32(0x12345U, sample.mantissa);
+
+  FakeBus oneShotBus;
+  OPT4001::OPT4001 oneShotDev;
+  Config oneShotCfg = makeConfig(oneShotBus);
+  oneShotCfg.conversionTime = ConversionTime::US_600;
+  oneShotCfg.quickWake = true;
+  oneShotCfg.cooperativeYield = fakeAdvancingYield;
+  TEST_ASSERT_TRUE(oneShotDev.begin(oneShotCfg).ok());
+  seedSample(oneShotBus, cmd::REG_RESULT, 0, 0x23456, 2, true);
+
+  st = oneShotDev.readFreshBlocking(sample, Mode::ONE_SHOT, UINT32_MAX);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT32(0x23456U, sample.mantissa);
 }
 
 void test_read_sample_decodes_lux_and_crc() {
@@ -1563,6 +1596,18 @@ void test_poll_busy_blocks_tick_and_synchronous_i2c() {
                           static_cast<uint8_t>(st.code));
   TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
 
+  st = dev.setPackageVariant(PackageVariant::PICOSTAR);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::BUSY),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(PackageVariant::SOT_5X3),
+                          static_cast<uint8_t>(dev.getPackageVariant()));
+  st = dev.setVerifyCrc(false);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::BUSY),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_TRUE(dev.getVerifyCrc());
+  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
+
   seedSample(bus, cmd::REG_RESULT, 0, 0x11111, 9, true);
   seedSample(bus, cmd::REG_FIFO0_MSB, 1, 0x22222, 8, true);
   seedSample(bus, cmd::REG_FIFO1_MSB, 2, 0x33333, 7, true);
@@ -2111,6 +2156,45 @@ void test_burst_enabled_single_sample_uses_one_coherent_result_transaction() {
   TEST_ASSERT_TRUE(st.ok());
   TEST_ASSERT_EQUAL_UINT32(0x34567u, sample.mantissa);
   TEST_ASSERT_EQUAL_UINT32(readsBefore + 1U, bus.readCalls);
+}
+
+void test_nonburst_register_block_uses_bounded_per_register_reads() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.burstMode = false;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  bus.registers[cmd::REG_RESULT] = 0x1234;
+  bus.registers[cmd::REG_RESULT_LSB_CRC] = 0x5678;
+  bus.registers[cmd::REG_FIFO0_MSB] = 0x9ABC;
+  uint8_t bytes[5] = {};
+  const uint32_t readsBefore = bus.readCalls;
+
+  Status st = dev.readRegisters(cmd::REG_RESULT, bytes, sizeof(bytes));
+
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT32(readsBefore + 3U, bus.readCalls);
+  TEST_ASSERT_EQUAL_HEX8(0x12, bytes[0]);
+  TEST_ASSERT_EQUAL_HEX8(0x34, bytes[1]);
+  TEST_ASSERT_EQUAL_HEX8(0x56, bytes[2]);
+  TEST_ASSERT_EQUAL_HEX8(0x78, bytes[3]);
+  TEST_ASSERT_EQUAL_HEX8(0x9A, bytes[4]);
+}
+
+void test_register_block_rejects_size_t_span_overflow_before_transport() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  uint8_t byte = 0;
+  const uint32_t readsBefore = bus.readCalls;
+  const size_t wrappedSpanLength = static_cast<size_t>(UINT16_MAX) * 2U + 3U;
+  Status st = dev.readRegisters(cmd::REG_RESULT, &byte, wrappedSpanLength);
+
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
 }
 
 void test_fifo_shadow_slots_do_not_require_fresh_evidence() {
@@ -2731,6 +2815,13 @@ void test_scale_and_counter_helpers() {
   TEST_ASSERT_TRUE(std::isnan(
       dev.getRangeResolutionLux(Range::RANGE_0,
                                 static_cast<ConversionTime>(12))));
+  Sample sample{};
+  sample.exponent = 3U;
+  TEST_ASSERT_TRUE(dev.getSampleFullScaleLux(sample) > 0.0f);
+  TEST_ASSERT_TRUE(dev.getSampleResolutionLux(sample) > 0.0f);
+  sample.exponent = 9U;
+  TEST_ASSERT_TRUE(std::isnan(dev.getSampleFullScaleLux(sample)));
+  TEST_ASSERT_TRUE(std::isnan(dev.getSampleResolutionLux(sample)));
   TEST_ASSERT_EQUAL_UINT32(0U, dev.getOneShotBudgetUs(Mode::POWER_DOWN));
   TEST_ASSERT_EQUAL_UINT32(0U, dev.getOneShotBudgetUs(Mode::CONTINUOUS));
   TEST_ASSERT_EQUAL_UINT32(0U, dev.getOneShotBudgetMs(static_cast<Mode>(0xFF)));
@@ -3203,8 +3294,27 @@ void test_lux_to_threshold_rounding_and_out_of_range_policy() {
   st = dev.luxToThreshold(100.0f, threshold);
   TEST_ASSERT_TRUE(st.ok());
   TEST_ASSERT_EQUAL_UINT8(0u, threshold.exponent);
-  TEST_ASSERT_EQUAL_HEX16(0x037C, threshold.result);
-  TEST_ASSERT_FLOAT_WITHIN(0.001f, 99.904f, dev.thresholdToLux(threshold));
+  TEST_ASSERT_EQUAL_HEX16(0x037D, threshold.result);
+  TEST_ASSERT_FLOAT_WITHIN(0.001f, 100.016f, dev.thresholdToLux(threshold));
+
+  st = dev.luxToThreshold(0.060f, threshold);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT8(0u, threshold.exponent);
+  TEST_ASSERT_EQUAL_HEX16(0x0001, threshold.result);
+  TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.112f, dev.thresholdToLux(threshold));
+
+  st = dev.luxToThreshold(0.05589f, threshold);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT8(0u, threshold.exponent);
+  TEST_ASSERT_EQUAL_HEX16(0x0000, threshold.result);
+
+  // At an exponent boundary, the saturated finer encoding can be closer than
+  // the first non-saturated coarser encoding.
+  st = dev.luxToThreshold(458.675f, threshold);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT8(0u, threshold.exponent);
+  TEST_ASSERT_EQUAL_HEX16(0x0FFF, threshold.result);
+  TEST_ASSERT_FLOAT_WITHIN(0.001f, 458.64f, dev.thresholdToLux(threshold));
 
   TEST_ASSERT_TRUE(dev.setPackageVariant(PackageVariant::PICOSTAR).ok());
   st = dev.luxToThreshold(10.0f, threshold);
@@ -3336,6 +3446,7 @@ int main() {
   RUN_TEST(test_recover_success_returns_ready);
   RUN_TEST(test_start_conversion_wraparound_reaches_ready);
   RUN_TEST(test_read_blocking_times_out_with_stalled_clock);
+  RUN_TEST(test_blocking_reads_accept_full_uint32_timeout_range);
   RUN_TEST(test_read_sample_decodes_lux_and_crc);
   RUN_TEST(test_raw_lux_vectors_use_64_bit_intermediates);
   RUN_TEST(test_raw_lux_rejects_invalid_result_fields_without_shift_ub);
@@ -3380,6 +3491,8 @@ int main() {
   RUN_TEST(test_decoded_register_helpers);
   RUN_TEST(test_read_register_block_and_sample_slot_helpers);
   RUN_TEST(test_burst_enabled_single_sample_uses_one_coherent_result_transaction);
+  RUN_TEST(test_nonburst_register_block_uses_bounded_per_register_reads);
+  RUN_TEST(test_register_block_rejects_size_t_span_overflow_before_transport);
   RUN_TEST(test_fifo_shadow_slots_do_not_require_fresh_evidence);
   RUN_TEST(test_int_fresh_evidence_does_not_clear_flags);
   RUN_TEST(test_counter_fresh_evidence_does_not_clear_flags);

@@ -2,7 +2,7 @@
 # Generated and maintained for unified API documentation.
 
 PROJECT_NAME           = "OPT4001"
-PROJECT_NUMBER         = "1.1.0"
+PROJECT_NUMBER         = "1.1.1"
 PROJECT_BRIEF          = "Framework-neutral OPT4001 driver API documentation"
 OUTPUT_DIRECTORY       = docs/doxygen
 CREATE_SUBDIRS         = NO

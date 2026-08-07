@@ -80,11 +80,12 @@ bool isValidPublicRegisterBlock(uint8_t startReg, size_t len) {
   if (len == 0) {
     return false;
   }
-  const uint16_t endReg = static_cast<uint16_t>(startReg) +
-                          static_cast<uint16_t>((len - 1U) / 2U);
-  if (endReg > UINT8_MAX) {
+  const size_t registerSpan = (len - 1U) / 2U;
+  if (registerSpan > static_cast<size_t>(UINT8_MAX - startReg)) {
     return false;
   }
+  const uint16_t endReg = static_cast<uint16_t>(startReg) +
+                          static_cast<uint16_t>(registerSpan);
   for (uint16_t reg = startReg; reg <= endReg; ++reg) {
     if (!isValidPublicRegisterAddress(static_cast<uint8_t>(reg))) {
       return false;
@@ -879,10 +880,11 @@ Status OPT4001::readFreshBlocking(Sample& out, Mode mode, uint32_t timeoutMs) {
     return Status::Error(Err::INVALID_CONFIG, "Blocking reads require Config::nowMs");
   }
   if (_config.mode == Mode::CONTINUOUS) {
-    const uint32_t deadlineMs = _nowMs() + timeoutMs;
+    const uint32_t startMs = _nowMs();
     uint32_t polls = 0;
     const uint32_t maxPolls = blockingPollLimit(timeoutMs);
-    while (static_cast<int32_t>(_nowMs() - deadlineMs) < 0 && polls < maxPolls) {
+    while (static_cast<uint32_t>(_nowMs() - startMs) < timeoutMs &&
+           polls < maxPolls) {
       bool didRead = false;
       Status st = tryReadFreshSample(out, didRead);
       if (!st.ok() && st.code != Err::CRC_ERROR) {
@@ -905,20 +907,14 @@ Status OPT4001::readFreshBlocking(Sample& out, Mode mode, uint32_t timeoutMs) {
     return st;
   }
 
-  const uint32_t nowMs = _nowMs();
+  const uint32_t startMs = _nowMs();
   const uint32_t budgetMs = getOneShotBudgetMs(_pendingMode);
-  const uint32_t deadlineMs = nowMs + timeoutMs;
-
-  uint32_t readyAtMs = nowMs + budgetMs;
-  if (st.code == Err::BUSY) {
-    const uint32_t elapsed = nowMs - _conversionStartMs;
-    readyAtMs = (elapsed >= budgetMs) ? nowMs : (nowMs + budgetMs - elapsed);
-  }
 
   uint32_t polls = 0;
   const uint32_t maxPolls = blockingPollLimit(timeoutMs, budgetMs);
-  while (static_cast<int32_t>(_nowMs() - deadlineMs) < 0 && polls < maxPolls) {
-    if (static_cast<int32_t>(_nowMs() - readyAtMs) < 0) {
+  while (static_cast<uint32_t>(_nowMs() - startMs) < timeoutMs &&
+         polls < maxPolls) {
+    if (static_cast<uint32_t>(_nowMs() - _conversionStartMs) < budgetMs) {
       ++polls;
       _cooperativeYield();
       continue;
@@ -932,11 +928,9 @@ Status OPT4001::readFreshBlocking(Sample& out, Mode mode, uint32_t timeoutMs) {
       return readSt;
     }
     ++polls;
+    _cooperativeYield();
   }
 
-  _conversionStarted = false;
-  _clearReadinessEvidence();
-  _pendingMode = Mode::POWER_DOWN;
   return Status::Error(Err::TIMEOUT, "Conversion timeout");
 }
 
@@ -1088,6 +1082,9 @@ Status OPT4001::readIntPinAsserted(bool& asserted) const {
 // ============================================================================
 
 Status OPT4001::setPackageVariant(PackageVariant variant) {
+  if (_pollJob != PollJob::NONE) {
+    return Status::Error(Err::BUSY, "Poll job already active");
+  }
   if (!isValidPackageVariant(variant)) {
     return Status::Error(Err::INVALID_PARAM, "Invalid package variant");
   }
@@ -1165,6 +1162,9 @@ Status OPT4001::setQuickWake(bool enable) {
 }
 
 Status OPT4001::setVerifyCrc(bool enable) {
+  if (_pollJob != PollJob::NONE) {
+    return Status::Error(Err::BUSY, "Poll job already active");
+  }
   _config.verifyCrc = enable;
   return Status::Ok();
 }
@@ -1635,10 +1635,29 @@ Status OPT4001::readRegisters(uint8_t startReg, uint8_t* buf, size_t len) {
   if (!isValidPublicRegisterBlock(startReg, len)) {
     return Status::Error(Err::INVALID_PARAM, "Invalid register block");
   }
-  Status st = _i2cWriteReadTracked(&startReg, 1, buf, len);
+  Status st = Status::Ok();
+  if (_config.burstMode || len <= 2U) {
+    st = _i2cWriteReadTracked(&startReg, 1, buf, len);
+  } else {
+    size_t offset = 0;
+    while (offset < len) {
+      const uint8_t reg = static_cast<uint8_t>(
+          static_cast<size_t>(startReg) + (offset / 2U));
+      uint16_t value = 0;
+      st = _readRegister16Tracked(reg, value);
+      if (!st.ok()) {
+        return st;
+      }
+      buf[offset++] = static_cast<uint8_t>(value >> 8);
+      if (offset < len) {
+        buf[offset++] = static_cast<uint8_t>(value & 0xFFU);
+      }
+    }
+  }
   if (st.ok()) {
+    const size_t registerSpan = (len - 1U) / 2U;
     const uint16_t endReg = static_cast<uint16_t>(startReg) +
-                            static_cast<uint16_t>((len - 1U) / 2U);
+                            static_cast<uint16_t>(registerSpan);
     if (startReg <= cmd::REG_FLAGS && endReg >= cmd::REG_FLAGS) {
       _clearReadinessEvidence();
     }
@@ -1946,10 +1965,10 @@ float OPT4001::getCurrentFullScaleLux() const {
 }
 
 float OPT4001::getSampleFullScaleLux(const Sample& sample) const {
-  const Range range = (sample.exponent <= 8U)
-                          ? static_cast<Range>(sample.exponent)
-                          : Range::AUTO;
-  return getRangeFullScaleLux(range);
+  if (sample.exponent > RESULT_EXPONENT_MAX) {
+    return invalidLuxValue();
+  }
+  return getRangeFullScaleLux(static_cast<Range>(sample.exponent));
 }
 
 uint8_t OPT4001::getEffectiveBits(ConversionTime time) const {
@@ -1987,10 +2006,11 @@ float OPT4001::getCurrentResolutionLux() const {
 }
 
 float OPT4001::getSampleResolutionLux(const Sample& sample) const {
-  const Range range = (sample.exponent <= 8U)
-                          ? static_cast<Range>(sample.exponent)
-                          : Range::AUTO;
-  return getRangeResolutionLux(range, _config.conversionTime);
+  if (sample.exponent > RESULT_EXPONENT_MAX) {
+    return invalidLuxValue();
+  }
+  return getRangeResolutionLux(static_cast<Range>(sample.exponent),
+                               _config.conversionTime);
 }
 
 uint32_t OPT4001::getConversionTimeUs() const {
@@ -2027,32 +2047,32 @@ Status OPT4001::luxToThreshold(float lux, Threshold& out) const {
   }
 
   const float lsb = getLuxLsb();
-  uint64_t adcCodes = 0;
+  double scaledCodes = 0.0;
   if (lsb > 0.0f) {
-    const double scaled = static_cast<double>(lux) / static_cast<double>(lsb);
-    if (scaled > static_cast<double>(THRESHOLD_ADC_CODES_MAX) +
-                     THRESHOLD_ADC_FLOAT_GUARD_CODES) {
+    scaledCodes = static_cast<double>(lux) / static_cast<double>(lsb);
+    if (scaledCodes > static_cast<double>(THRESHOLD_ADC_CODES_MAX) +
+                          THRESHOLD_ADC_FLOAT_GUARD_CODES) {
       return Status::Error(Err::INVALID_PARAM, "Lux threshold exceeds register range");
     }
-    adcCodes = static_cast<uint64_t>(scaled + 0.5);
-    if (adcCodes > THRESHOLD_ADC_CODES_MAX) {
-      adcCodes = THRESHOLD_ADC_CODES_MAX;
-    }
   }
 
-  uint8_t exponent = 0;
-  while (exponent < cmd::THRESHOLD_EXPONENT_MAX) {
-    const uint64_t result = adcCodes >> (THRESHOLD_SHIFT_BASE + exponent);
-    if (result <= cmd::THRESHOLD_RESULT_MAX) {
+  double bestError = std::numeric_limits<double>::infinity();
+  for (uint8_t exponent = 0; exponent <= cmd::THRESHOLD_EXPONENT_MAX; ++exponent) {
+    const uint8_t shift = static_cast<uint8_t>(THRESHOLD_SHIFT_BASE + exponent);
+    const uint64_t quantum = 1ULL << shift;
+    uint64_t result = static_cast<uint64_t>(
+        (scaledCodes / static_cast<double>(quantum)) + 0.5);
+    if (result > cmd::THRESHOLD_RESULT_MAX) {
+      result = cmd::THRESHOLD_RESULT_MAX;
+    }
+    const double representedCodes = static_cast<double>(result * quantum);
+    const double error = std::fabs(representedCodes - scaledCodes);
+    if (error < bestError) {
+      bestError = error;
       out.exponent = exponent;
       out.result = static_cast<uint16_t>(result);
-      return Status::Ok();
     }
-    ++exponent;
   }
-
-  out.exponent = cmd::THRESHOLD_EXPONENT_MAX;
-  out.result = cmd::THRESHOLD_RESULT_MAX;
   return Status::Ok();
 }
 

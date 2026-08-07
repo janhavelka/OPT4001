@@ -107,7 +107,7 @@ PlatformIO Core.
 Add to `platformio.ini`:
 
 The examples below intentionally use the latest published tag (`v1.0.0`). The
-audited source metadata is `1.1.0`, but this hardening change is not a formal
+audited source metadata is `1.1.1`, but this hardening change is not a formal
 release and does not create a tag.
 
 ```ini
@@ -293,7 +293,8 @@ void loop() {
 - Blocking read helpers require `Config::nowMs`; it must be monotonic and
   advance in milliseconds. `timeoutMs` must cover `getOneShotBudgetMs(mode)`
   plus transport and scheduler margin. The finite poll cap prevents an infinite
-  loop, but it is not a replacement clock.
+  loop, but it is not a replacement clock. A timeout does not cancel a hardware
+  one-shot already in flight; a later readiness poll may still consume it.
 - `readLux()`, `readMilliLux()`, `readMicroLux()`, and `tryReadLux()` follow the
   same rule: on `CRC_ERROR`, the scaled output value is still written.
 - `readBurst()` returns `BurstFrame::newest` from `RESULT`, followed by
@@ -457,6 +458,12 @@ but elapsed time alone is not reported as completion. This matters in auto-range
 overflow can abort a measurement, increase range, and make completion exceed the
 nominal conversion-time setting.
 
+Without configured INT evidence or prior-counter evidence, readiness checks
+read `FLAGS` to observe `CONVERSION_READY_FLAG`. Per the data sheet, that same
+read consumes latched high/low threshold flags. Use the SOT-5X3 INT evidence
+path or schedule explicit FLAGS consumption when those events must remain
+available to application policy.
+
 ### Probe Diagnostics
 
 | Condition during `probe()` / startup | Returned status | Detail field |
@@ -539,6 +546,10 @@ driver/bus state errors to `I2C_BUS` while preserving the raw `esp_err_t` in
 - `readIntPinAsserted(bool&)`
 - `readRegisters()`, `readRegister16()`, `writeRegister16()`
 
+`readRegisters()` preserves register-window byte ordering with I2C burst mode
+disabled by issuing one bounded two-byte transaction per register. Threshold
+lux encoding rounds to the nearest representable exponent/result value.
+
 ### Decode And Scaling Helpers
 
 - `decodeDeviceId()`, `decodeConfiguration()`, `decodeIntConfiguration()`
@@ -556,7 +567,7 @@ driver/bus state errors to `I2C_BUS` while preserving the raw `esp_err_t` in
   - scan, probe, recover, reset, reset-and-reapply, compact state view, and runtime address selection
   - decoded config / intcfg / flags / status / device-ID readback with colored health reporting
   - one-shot reads, poll-friendly `tryread` / `trylux`, non-blocking `watch` / `stop`, burst FIFO reads, single-slot history reads, cached-sample inspection, stress, stress-mix, and selftest
-  - lux / milli-lux / micro-lux commands plus `adc2lux`, `raw2lux`, scale / timing diagnostics, and the per-range scale table
+  - lux / milli-lux / micro-lux commands plus latest-register `raw`, `adc2lux`, `raw2lux`, scale / timing diagnostics, and the per-range scale table
   - threshold lux helpers, `thcalc`, `thdecode`, `threshold default`, raw threshold programming, interrupt configuration, and raw register / block access
   - measurement and interrupt convenience flows exposed directly in the shell via `measure`, `int ready`, `int fifo`, and `int th`
   - consolidated `diag` report and optional periodic `healthmon` output using the shared health diagnostic helper

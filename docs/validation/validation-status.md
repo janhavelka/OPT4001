@@ -22,6 +22,23 @@ fault/recovery evidence unless a future log captures it.
 | ESP-IDF static boundary | `tools/check_idf_example_contract.py` |
 | Pure ESP-IDF builds | [GitHub Actions run 31218427198](https://github.com/janhavelka/OPT4001/actions/runs/31218427198) passed for ESP32-S2 and ESP32-S3 with ESP-IDF v6.0.1. |
 
+### 2026-08-08 Second-Pass Build Matrix
+
+- Native fake-transport suite: **121/121 passed** through
+  `.\scripts\pio.cmd test -e native`.
+- Arduino diagnostic CLI: ESP32-S3 and ESP32-S2 builds passed with pinned
+  pioarduino `55.03.311`, Arduino `3.3.11`, and ESP-IDF library package
+  `5.5.5`.
+- Packed-library consumer and `pio pkg pack` checks passed using the
+  VS Code-managed PlatformIO Core selected by `scripts/pio.cmd`; artifacts were
+  written outside the repository.
+- Static core, CLI, IDF-boundary, public-doc, readiness, generated-version,
+  Doxygen, HIL-parser, and strict host syntax gates passed. HIL parser tests
+  passed **15/15**.
+- No local `idf.py` installation was available. Pure ESP-IDF target compiler
+  evidence therefore remains the pinned CI run above; no new hardware claim is
+  implied.
+
 ## Pending Evidence
 
 | Area | Status |

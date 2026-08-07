@@ -293,6 +293,10 @@ bool sampleStatusHasData(const OPT4001::Status& st) {
   return st.ok() || st.code == OPT4001::Err::CRC_ERROR;
 }
 
+bool conversionStartAccepted(const OPT4001::Status& st) {
+  return st.inProgress() || st.code == OPT4001::Err::BUSY;
+}
+
 bool sampleStatusWarn(const OPT4001::Status& st) {
   return st.code == OPT4001::Err::CRC_ERROR;
 }
@@ -712,7 +716,7 @@ void handleWatch() {
       }
       OPT4001::Status st = device.startConversion(
           watchState.forceAuto ? OPT4001::Mode::ONE_SHOT_FORCED_AUTO : OPT4001::Mode::ONE_SHOT);
-      if (!st.ok()) {
+      if (!conversionStartAccepted(st)) {
         recordWatchStatus(st);
         printStatus(st);
         watchState.lastStepMs = now;
@@ -1209,23 +1213,36 @@ void printFlagsRawOnly() {
   Serial.printf("  FLAGS raw = 0x%04X (clear-on-read)\n", raw);
 }
 
-bool primePowerDownSample(OPT4001::Mode mode) {
-  if (device.getMode() != OPT4001::Mode::POWER_DOWN) {
-    return true;
+bool waitForFreshSampleReady(OPT4001::Mode mode) {
+  if (device.getMode() == OPT4001::Mode::POWER_DOWN) {
+    const OPT4001::Status startStatus = device.startConversion(mode);
+    if (!conversionStartAccepted(startStatus)) {
+      printStatus(startStatus);
+      return false;
+    }
   }
 
-  OPT4001::Sample sample;
-  OPT4001::Status st = device.readBlocking(sample, mode, BLOCKING_READ_TIMEOUT_MS);
-  if (!sampleStatusHasData(st)) {
-    printStatus(st);
-    return false;
+  const uint32_t startMs = millis();
+  for (uint32_t polls = 0; polls < 2000U; ++polls) {
+    bool ready = false;
+    const OPT4001::Status readyStatus = device.conversionReady(ready);
+    if (!readyStatus.ok()) {
+      printStatus(readyStatus);
+      return false;
+    }
+    if (ready) {
+      return true;
+    }
+    if (static_cast<uint32_t>(millis() - startMs) >= BLOCKING_READ_TIMEOUT_MS) {
+      printStatus(OPT4001::Status::Error(
+          OPT4001::Err::TIMEOUT, "Fresh-sample readiness timeout"));
+      return false;
+    }
+    delay(1);
   }
-  LOGV(verboseMode, "Prime sample complete before cached read path.");
-  if (sampleStatusWarn(st)) {
-    Serial.println("  Prime sample completed with warning:");
-    printStatus(st);
-  }
-  return true;
+  printStatus(OPT4001::Status::Error(
+      OPT4001::Err::TIMEOUT, "Fresh-sample readiness poll limit reached"));
+  return false;
 }
 
 bool blockingReadAndPrint(OPT4001::Mode mode) {
@@ -1482,7 +1499,10 @@ void runStressMix(int32_t count) {
       }
       case 1: {
         OPT4001::BurstFrame frame;
-        st = device.readBurst(frame);
+        st = waitForFreshSampleReady(OPT4001::Mode::ONE_SHOT)
+                 ? device.readBurst(frame)
+                 : OPT4001::Status::Error(
+                       OPT4001::Err::TIMEOUT, "Burst readiness failed");
         if (sampleStatusHasData(st)) {
           recordSampleStats(frame.newest);
         }
@@ -1490,7 +1510,10 @@ void runStressMix(int32_t count) {
       }
       case 2: {
         OPT4001::Sample sample;
-        st = device.readSampleSlot(0, sample);
+        st = waitForFreshSampleReady(OPT4001::Mode::ONE_SHOT)
+                 ? device.readSampleSlot(0, sample)
+                 : OPT4001::Status::Error(
+                       OPT4001::Err::TIMEOUT, "Slot readiness failed");
         if (sampleStatusHasData(st)) {
           recordSampleStats(sample);
         }
@@ -1768,13 +1791,19 @@ void runSelfTest() {
 
   bool didRead = false;
   OPT4001::Sample trySample;
-  st = device.tryReadSample(trySample, didRead);
+  st = waitForFreshSampleReady(OPT4001::Mode::ONE_SHOT)
+           ? device.tryReadSample(trySample, didRead)
+           : OPT4001::Status::Error(
+                 OPT4001::Err::TIMEOUT, "tryReadSample readiness failed");
   reportCheck("tryReadSample", st.ok() || sampleStatusWarn(st), st.ok() || sampleStatusWarn(st) ? "" : errToStr(st.code));
   reportCheck("tryReadSample returned data", didRead, "");
 
   float tryLux = -1.0f;
   didRead = false;
-  st = device.tryReadLux(tryLux, didRead);
+  st = waitForFreshSampleReady(OPT4001::Mode::ONE_SHOT)
+           ? device.tryReadLux(tryLux, didRead)
+           : OPT4001::Status::Error(
+                 OPT4001::Err::TIMEOUT, "tryReadLux readiness failed");
   reportCheck("tryReadLux", st.ok() || sampleStatusWarn(st), st.ok() || sampleStatusWarn(st) ? "" : errToStr(st.code));
   reportCheck("tryReadLux returned data", didRead && tryLux >= 0.0f, "");
 
@@ -1787,11 +1816,17 @@ void runSelfTest() {
   }
 
   OPT4001::Sample slot0;
-  st = device.readSampleSlot(0, slot0);
+  st = waitForFreshSampleReady(OPT4001::Mode::ONE_SHOT)
+           ? device.readSampleSlot(0, slot0)
+           : OPT4001::Status::Error(
+                 OPT4001::Err::TIMEOUT, "readSampleSlot readiness failed");
   reportCheck("readSampleSlot(0)", sampleStatusHasData(st), sampleStatusHasData(st) ? "" : errToStr(st.code));
 
   OPT4001::BurstFrame frame;
-  st = device.readBurst(frame);
+  st = waitForFreshSampleReady(OPT4001::Mode::ONE_SHOT)
+           ? device.readBurst(frame)
+           : OPT4001::Status::Error(
+                 OPT4001::Err::TIMEOUT, "readBurst readiness failed");
   reportCheck("readBurst", sampleStatusHasData(st), sampleStatusHasData(st) ? "" : errToStr(st.code));
   if (sampleStatusHasData(st)) {
     reportCheck("burst counter delta sane",
@@ -1896,7 +1931,7 @@ void printHelp() {
   cli::printHelpItem("readblocking [force]", "Explicit blocking alias");
   cli::printHelpItem("tryread / trylux", "Poll-friendly read helpers");
   cli::printHelpItem("start [force]", "Start one-shot conversion");
-  cli::printHelpItem("poll / drdy", "Check conversion ready");
+  cli::printHelpItem("poll / drdy / ready", "Check conversion ready");
   cli::printHelpItem("watch [N] [interval]", "Stream samples using current mode");
   cli::printHelpItem("watch force [N] [interval]", "Repeat forced-auto one-shots");
   cli::printHelpItem("stop", "Stop active watch session");
@@ -1905,6 +1940,7 @@ void printHelp() {
   cli::printHelpItem("sample / sampleage", "Cached sample and age");
   cli::printHelpItem("lux / mlux / ulux", "Read scaled lux helpers");
   cli::printHelpItem("adc2lux <codes>", "Convert linearized ADC codes to lux");
+  cli::printHelpItem("raw", "Read current RESULT registers without freshness proof");
   cli::printHelpItem("raw2lux <exp> <mant>", "Convert raw exponent(0..8)/mantissa fields to lux");
   cli::printHelpItem("scale / timing", "Show package scaling and timing helpers");
 
@@ -1935,11 +1971,11 @@ void printHelp() {
 
   cli::printHelpSection("Registers");
   cli::printHelpItem("status / flags", "Read and decode FLAGS (clear-on-read)");
-  cli::printHelpItem("status_raw / flags raw", "Read raw FLAGS register");
+  cli::printHelpItem("status_raw / flags_raw / flags raw", "Read raw FLAGS register");
   cli::printHelpItem("flags readyclear", "Clear ready flag only by write");
-  cli::printHelpItem("flags clear", "Clear sticky flags via read path");
+  cli::printHelpItem("flags clear / clearflags", "Clear sticky flags via read path");
   cli::printHelpItem("dump", "Dump key registers");
-  cli::printHelpItem("reg <addr>", "Read 16-bit register");
+  cli::printHelpItem("reg / rreg <addr>", "Read 16-bit register");
   cli::printHelpItem("regs <start> <len>", "Read raw register bytes");
   cli::printHelpItem("wreg <addr> <val>", "Write 16-bit register");
 
@@ -2129,9 +2165,9 @@ void processCommand(const String& cmdLine) {
     return;
   }
   if (cmd == "status" || cmd == "flags") { printFlagsDecoded(); return; }
-  if (cmd == "status_raw" || cmd == "flags raw") { printFlagsRawOnly(); return; }
+  if (cmd == "status_raw" || cmd == "flags_raw" || cmd == "flags raw") { printFlagsRawOnly(); return; }
   if (cmd == "flags readyclear") { printStatus(device.clearConversionReadyFlag()); return; }
-  if (cmd == "flags clear") { printStatus(device.clearFlags()); return; }
+  if (cmd == "flags clear" || cmd == "clearflags") { printStatus(device.clearFlags()); return; }
   if (cmd == "dump") { printRegisterDump(); return; }
   if (cmd == "read") { (void)blockingReadAndPrint(OPT4001::Mode::ONE_SHOT); return; }
   if (cmd == "read force") { (void)blockingReadAndPrint(OPT4001::Mode::ONE_SHOT_FORCED_AUTO); return; }
@@ -2192,7 +2228,7 @@ void processCommand(const String& cmdLine) {
   }
   if (cmd == "start") { printStatus(device.startConversion()); return; }
   if (cmd == "start force") { printStatus(device.startConversion(OPT4001::Mode::ONE_SHOT_FORCED_AUTO)); return; }
-  if (cmd == "poll" || cmd == "drdy") {
+  if (cmd == "poll" || cmd == "drdy" || cmd == "ready") {
     bool ready = false;
     OPT4001::Status st = device.conversionReady(ready);
     if (!st.ok()) {
@@ -2243,7 +2279,7 @@ void processCommand(const String& cmdLine) {
   if (cmd == "readburst" || cmd == "readburst force") {
     const OPT4001::Mode mode =
         cmd.endsWith("force") ? OPT4001::Mode::ONE_SHOT_FORCED_AUTO : OPT4001::Mode::ONE_SHOT;
-    if (!primePowerDownSample(mode)) {
+    if (!waitForFreshSampleReady(mode)) {
       return;
     }
     OPT4001::BurstFrame frame;
@@ -2264,7 +2300,7 @@ void processCommand(const String& cmdLine) {
       LOGW("Usage: slot <0..3>");
       return;
     }
-    if (!primePowerDownSample(OPT4001::Mode::ONE_SHOT)) {
+    if (!waitForFreshSampleReady(OPT4001::Mode::ONE_SHOT)) {
       return;
     }
     OPT4001::Sample sample;
@@ -2304,7 +2340,7 @@ void processCommand(const String& cmdLine) {
     return;
   }
   if (cmd == "mlux") {
-    if (!primePowerDownSample(OPT4001::Mode::ONE_SHOT)) {
+    if (!waitForFreshSampleReady(OPT4001::Mode::ONE_SHOT)) {
       return;
     }
     uint32_t milliLux = 0;
@@ -2320,7 +2356,7 @@ void processCommand(const String& cmdLine) {
     return;
   }
   if (cmd == "ulux") {
-    if (!primePowerDownSample(OPT4001::Mode::ONE_SHOT)) {
+    if (!waitForFreshSampleReady(OPT4001::Mode::ONE_SHOT)) {
       return;
     }
     uint64_t microLux = 0;
@@ -2342,6 +2378,15 @@ void processCommand(const String& cmdLine) {
       return;
     }
     printAdcToLux(adcCodes);
+    return;
+  }
+  if (cmd == "raw") {
+    OPT4001::Sample sample;
+    const OPT4001::Status st = device.readLatestSample(sample);
+    if (sampleStatusHasData(st)) {
+      printSample(sample);
+    }
+    printStatus(st);
     return;
   }
   if (cmd.startsWith("raw2lux ")) {
@@ -2752,10 +2797,11 @@ void processCommand(const String& cmdLine) {
                   polarityToStr(device.getInterruptPolarity()));
     return;
   }
-  if (cmd.startsWith("reg ")) {
+  if (cmd.startsWith("reg ") || cmd.startsWith("rreg ")) {
     uint32_t addr = 0;
-    if (!parseU32(cmd.substring(4), addr) || addr > 0xFFu) {
-      LOGW("Usage: reg <addr>");
+    const uint8_t prefixLength = cmd.startsWith("rreg ") ? 5U : 4U;
+    if (!parseU32(cmd.substring(prefixLength), addr) || addr > 0xFFu) {
+      LOGW("Usage: reg|rreg <addr>");
       return;
     }
     uint16_t value = 0;
@@ -2790,8 +2836,9 @@ void processCommand(const String& cmdLine) {
       return;
     }
     for (uint32_t i = 0; i < len; ++i) {
-      Serial.printf("  [0x%02lX] = 0x%02X\n",
-                    static_cast<unsigned long>(start + i),
+      Serial.printf("  Reg 0x%02lX %-3s = 0x%02X\n",
+                    static_cast<unsigned long>(start + (i / 2U)),
+                    ((i & 1U) == 0U) ? "MSB" : "LSB",
                     buf[i]);
     }
     return;

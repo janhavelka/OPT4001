@@ -130,16 +130,40 @@ def main() -> int:
     idf_text = idf_main.read_text(encoding="utf-8", errors="replace")
     cmake_text = idf_cmake.read_text(encoding="utf-8", errors="replace")
 
+    arduino_dispatch = arduino_text[arduino_text.find("void processCommand") :]
+    idf_dispatch = idf_text[idf_text.find("void processCommand") :]
     for cmd in MANDATORY_COMMANDS:
-        if re.search(rf"\b{re.escape(cmd)}\b", arduino_text) is None:
+        arduino_handler = re.search(
+            rf'cmd\s*(?:==\s*"{re.escape(cmd)}"|\.startsWith\("{re.escape(cmd)}(?:\s|"))',
+            arduino_dispatch,
+        )
+        if arduino_handler is None:
             fail(f"Arduino CLI missing mandatory command '{cmd}'")
-        if f'"{cmd}"' not in idf_text:
+        if re.search(rf'strcmp\(cmd,\s*"{re.escape(cmd)}"\)', idf_dispatch) is None:
             fail(f"IDF CLI missing mandatory command '{cmd}'")
 
     for cli_name, source in (("Arduino", arduino_text), ("IDF", idf_text)):
         for token in ("errorName", "driverStateName"):
             if token not in source:
                 fail(f"{cli_name} CLI must reuse library-owned {token} mapping")
+        if "conversionStartAccepted" not in source:
+            fail(f"{cli_name} CLI must accept the driver's IN_PROGRESS conversion-start contract")
+        if re.search(
+            r"startConversion\s*\([^;]*;\s*if\s*\(\s*!\s*\w+\.ok\(\)",
+            source,
+            flags=re.DOTALL,
+        ):
+            fail(f"{cli_name} CLI incorrectly treats IN_PROGRESS conversion start as failure")
+
+    for token in ("waitForFreshSampleReady", 'cmd == "raw"', 'cmd == "clearflags"'):
+        if token not in arduino_dispatch:
+            fail(f"Arduino CLI missing executable readiness/parity token '{token}'")
+
+    for token in ("runStressMix(count)", "runSelfTest()", "readLatestSample(sample)"):
+        if token not in idf_dispatch and token != "readLatestSample(sample)":
+            fail(f"IDF CLI missing executable depth token '{token}'")
+        if token == "readLatestSample(sample)" and token not in idf_text:
+            fail("IDF raw command must use latest-register semantics")
 
     for token in ("\\033[31m", "\\033[32m", "\\033[33m", "\\033[36m"):
         if token not in idf_text:

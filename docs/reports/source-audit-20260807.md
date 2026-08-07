@@ -5,7 +5,8 @@
 The repository was audited against the current TI product page and data sheet,
 the framework/health conventions used by mature I2C repositories in the local
 `Projects/` workspace, and native fake-transport tests. Source-level issues
-found during the audit were fixed in version metadata `1.1.0`.
+found during the audit and adversarial second pass were fixed in version
+metadata `1.1.1`.
 
 This is **not hardware validation**. No OPT4001 board, package/address strap,
 optical reference, INT capture, FIFO timing capture, or injected electrical
@@ -86,6 +87,52 @@ avoid undefined shifts and preserve 64-bit threshold intermediates.
 - Core transport remains injected and non-owning; bus locks, pins, device
   handles, scheduler policy, and recovery policy remain application-owned.
 
+## Adversarial Second Pass (1.1.1)
+
+The second pass rechecked public control flow rather than relying on command/help
+tokens. It found and fixed:
+
+1. `readRegisters()` truncated a large `size_t` register span to `uint16_t`.
+   A length of 131073 bytes could therefore pass validation at register `0x00`
+   and reach the injected transport. Validation now stays in `size_t`, rejects
+   the request before I2C, and has a zero-transport regression.
+2. With I2C burst disabled, raw register windows still used one multi-register
+   transfer even though hardware pointer auto-increment is disabled. The driver
+   now performs one bounded two-byte transaction per register and preserves odd
+   final-byte ordering.
+3. Signed deadline comparisons made valid blocking timeouts above `INT32_MAX`
+   expire immediately. Unsigned elapsed-time comparisons now cover the full
+   public `uint32_t` range, while the finite poll cap remains the independent
+   stalled-clock bound.
+4. A host-side one-shot timeout cleared the driver's in-flight state even
+   though OPT4001 has no conversion-cancel command. The pending conversion is
+   now retained for later readiness polling.
+5. Threshold conversion rounded linear codes and then truncated at the much
+   larger threshold register quantum. It now selects the nearest representable
+   exponent/result value. Sample scale/resolution helpers also return NaN for
+   invalid hardware result exponents instead of mapping them to auto-range.
+6. Arduino one-shot watch and two native-IDF wait helpers rejected the
+   documented `IN_PROGRESS` start result. The Arduino priming helper also
+   consumed freshness before burst, slot-0, milli-lux, and micro-lux commands.
+   Both CLIs now wait for readiness without consuming the requested sample.
+7. Native-IDF `stress_mix` and `selftest` were shallow aliases/placeholders.
+   They now run fixed-buffer, bounded device operations with colored summaries.
+   Command checks inspect executable dispatch conditions and guard the
+   conversion-start contract, rather than accepting help-text mentions.
+8. Cache-only package/CRC setters could return success during a staged poll job,
+   then be overwritten by the job snapshot or change sample decoding mid-job.
+   They now return `BUSY`, matching I2C-backed setters.
+
+The non-Q1 Revision A address table was followed exactly: GND `0x44`, VDD
+`0x45`, SDA `0x46`, and the published SCL row also `0x45`. The `0x47` SCL row
+appears in the newer OPT4001-Q1 data sheet, but was not inferred into this
+non-Q1 driver contrary to its task-authoritative table.
+
+Readiness polling has a documented hardware side effect when no
+configured INT or prior-counter evidence exists: reading
+`CONVERSION_READY_FLAG` also consumes the clear-on-read threshold flags. No
+speculative software flag-cache API was added in this patch.
+
 ## Bounded-Control-Flow Audit
 
 Every driver loop was reviewed, including the previously flagged loops near the
@@ -125,7 +172,7 @@ was preserved, while OPT4001 was aligned on:
 
 ## Validation Run
 
-Fresh results captured on 2026-08-07:
+Fresh second-pass results captured on 2026-08-08:
 
 - `python tools/check_core_timing_guard.py`
 - `python tools/check_cli_contract.py`
@@ -134,16 +181,21 @@ Fresh results captured on 2026-08-07:
 - `python tools/check_readiness_claims.py`
 - `python tools/check_public_api_docs.py`
 - `python scripts/generate_version.py check`
+- `python tools/hil_opt4001_runner.py --parser-self-test`
+- `python tools/test_hil_opt4001_runner_parser.py`
 - `doxygen Doxyfile` (warning-free)
 - `.\scripts\pio.cmd test -e native`
 - `.\scripts\pio.cmd run -e esp32s3dev`
 - `.\scripts\pio.cmd run -e esp32s2dev`
+- clean packed-package consumer build using the wrapper-selected PlatformIO
+  Python environment
 - `.\scripts\pio.cmd pkg pack`
 
-All commands above passed. Native tests passed **118/118**. Arduino firmware
+All commands above passed. Native tests passed **121/121**. Arduino firmware
 built successfully for `esp32s3dev` and `esp32s2dev` using pioarduino
-`55.03.311`; the package tarball was created successfully and then removed from
-the worktree. The HIL parser self-test and its 15 host parser tests also passed.
+`55.03.311`; the clean package consumer built against the packed artifact, and
+the package tarball was created outside the worktree. The HIL parser self-test
+and its 15 host parser tests also passed.
 
 Local native ESP-IDF builds could not run because `idf.py` was not available on
 PATH. [GitHub Actions run 31218427198](https://github.com/janhavelka/OPT4001/actions/runs/31218427198)

@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-08-08
+
+### Changed
+
+- Non-burst raw register-window reads now issue one bounded transaction per
+  16-bit register, preserving contiguous byte semantics without hardware
+  pointer auto-increment.
+- Arduino and native ESP-IDF CLIs now share the documented conversion-start
+  acceptance/readiness flow, latest-register `raw` semantics, register-byte
+  formatting, and stronger executable command-contract checks.
+- Native ESP-IDF `stress_mix` and `selftest` now exercise bounded mixed
+  operations instead of aliases/minimal placeholders.
+- Lux-to-threshold conversion rounds to the nearest representable register
+  quantum.
+
+### Fixed
+
+- Rejected overflowing `size_t` register windows before transport instead of
+  truncating the register span and forwarding an oversized read.
+- Made blocking deadlines correct across the full `uint32_t` timeout range and
+  retained truthful in-flight one-shot state after a host timeout.
+- Made sample full-scale/resolution helpers return NaN for invalid hardware
+  result exponents instead of silently treating them as auto-range.
+- Prevented cache-only package/CRC setters from changing or losing policy while
+  a staged poll job owns the driver state.
+- Fixed Arduino one-shot watch and IDF burst/scaled-read helpers that treated
+  the documented `IN_PROGRESS` start result as failure.
+- Fixed Arduino burst, slot-0, milli-lux, and micro-lux commands that consumed
+  the fresh token in a priming read before the requested operation.
+
+### Validation
+
+- Added native regressions for overflow rejection, non-burst register windows,
+  wide blocking timeouts, retained timeout state, poll-job cache admission,
+  invalid sample exponents, and threshold quantization boundaries.
+- This patch remains source/build validation only; hardware, optical, INT,
+  address-strap, FIFO-timing, and injected-fault gates remain open.
+
 ## [1.1.0] - 2026-08-07
 
 ### Added
@@ -159,6 +197,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optical compensation remains application-specific and should be characterized
   with the final product enclosure/window and reference meter setup.
 
-[Unreleased]: https://github.com/janhavelka/OPT4001/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/janhavelka/OPT4001/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/janhavelka/OPT4001/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/janhavelka/OPT4001/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/janhavelka/OPT4001/releases/tag/v1.0.0

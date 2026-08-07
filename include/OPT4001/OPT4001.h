@@ -306,6 +306,8 @@ public:
   /// The reset remains bus-wide; each reset/apply write is one instruction.
   Status startResetAndReapply();
   /// Status-returning fresh-readiness check.
+  /// Without configured INT evidence or prior-counter evidence this reads
+  /// clear-on-read FLAGS, which also consumes latched threshold flags.
   /// @param[out] ready Set true when a fresh sample can be read
   /// @return Status::Ok() with ready=false when no sample is ready; transport errors are returned
   Status conversionReady(bool& ready);
@@ -320,6 +322,8 @@ public:
   /// assertion when configured, or a changed sample counter after a previous
   /// fresh sample. Returns `MEASUREMENT_NOT_READY` when no fresh evidence exists.
   /// On `OK` or `CRC_ERROR`, the fresh token is consumed and the cache updates.
+  /// Resolving ready-flag evidence can consume clear-on-read threshold flags;
+  /// use configured INT/counter evidence when those flags must remain untouched.
   Status readSample(Sample& out);
   /// Read newest RESULT plus FIFO0/FIFO1/FIFO2. Slot order is newest/current
   /// output register, then prior FIFO shadows in hardware order. Every slot is
@@ -360,7 +364,8 @@ public:
   /// timeout, transport error, or finite internal poll cap. Each I2C transaction
   /// is bounded by `Config::i2cTimeoutMs`; `Config::cooperativeYield`, when
   /// configured, is called between polls. On `CRC_ERROR`, sample/lux output is
-  /// still populated.
+  /// still populated. A timeout does not cancel an in-flight hardware one-shot;
+  /// later readiness polling may still consume that conversion.
   /// @pre `Config::nowMs` must be configured, monotonic, and non-blocking.
   Status readBlocking(Sample& out, uint32_t timeoutMs = 1000);
   Status readBlocking(Sample& out, Mode mode, uint32_t timeoutMs);
@@ -406,7 +411,8 @@ public:
   /// Select the package-specific address and lux scaling profile.
   /// @param variant Package variant to select.
   /// @return `INVALID_PARAM` for an invalid variant/address combination, or
-  /// `INVALID_CONFIG` when selecting PicoStar while an INT hook is configured.
+  /// `INVALID_CONFIG` when selecting PicoStar while an INT hook is configured;
+  /// returns `BUSY` while a staged poll job owns decoding/configuration state.
   Status setPackageVariant(PackageVariant variant);
   PackageVariant getPackageVariant() const { return _config.packageVariant; }
 
@@ -423,6 +429,7 @@ public:
   Status setQuickWake(bool enable);
   bool getQuickWake() const { return _config.quickWake; }
 
+  /// Set host-side CRC verification policy. Returns `BUSY` during a poll job.
   Status setVerifyCrc(bool enable);
   bool getVerifyCrc() const { return _config.verifyCrc; }
 
@@ -488,7 +495,9 @@ public:
   /// Read a contiguous byte window from public 16-bit registers.
   /// Requires `begin()`. Blocks spanning reserved register gaps are rejected
   /// before I2C. Returns `OFFLINE` without I2C while `OFFLINE`. Blocks including
-  /// FLAGS register 0x0C clear that register's latched view.
+  /// FLAGS register 0x0C clear that register's latched view. With burst mode
+  /// disabled, one bounded two-byte transaction is used per register instead
+  /// of relying on hardware pointer auto-increment.
   Status readRegisters(uint8_t startReg, uint8_t* buf, size_t len);
   /// Read one public 16-bit register. Requires `begin()`; returns
   /// `NOT_INITIALIZED` without I2C while `UNINIT`. Reserved addresses are
@@ -526,6 +535,7 @@ public:
   /// Invalid ranges return NaN.
   float getRangeFullScaleLux(Range range) const;
   float getCurrentFullScaleLux() const;
+  /// Return the sample exponent's full scale, or NaN for an invalid exponent.
   float getSampleFullScaleLux(const Sample& sample) const;
   /// Invalid conversion times return 0.
   uint8_t getEffectiveBits(ConversionTime time) const;
@@ -533,6 +543,7 @@ public:
   /// Invalid range or conversion-time inputs return NaN.
   float getRangeResolutionLux(Range range, ConversionTime time) const;
   float getCurrentResolutionLux() const;
+  /// Return the sample exponent's resolution, or NaN for an invalid exponent.
   float getSampleResolutionLux(const Sample& sample) const;
   /// Invalid conversion-time inputs return 0.
   uint32_t getConversionTimeUs() const;
@@ -540,8 +551,8 @@ public:
   /// Invalid one-shot mode inputs return 0.
   uint32_t getOneShotBudgetUs(Mode mode) const;
   uint32_t getOneShotBudgetMs(Mode mode) const;
-  /// Pack a lux threshold using nearest-code rounding before register
-  /// quantization. Rejects negative, non-finite, and out-of-range lux values.
+  /// Encode lux to the nearest representable exponent/result threshold value.
+  /// Rejects negative, non-finite, and out-of-range lux values.
   Status luxToThreshold(float lux, Threshold& out) const;
   /// Decode a threshold register to exact linear ADC codes in a 64-bit container.
   /// Formula: `result << (8 + exponent)`.

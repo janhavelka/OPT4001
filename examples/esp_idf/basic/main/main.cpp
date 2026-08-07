@@ -110,6 +110,18 @@ bool parseBool(const char* text, bool& out) {
   return false;
 }
 
+bool parseFaultCount(const char* text, OPT4001::FaultCount& out) {
+  uint32_t value = 0;
+  if (!parseU32(text, value)) return false;
+  switch (value) {
+    case 1: out = OPT4001::FaultCount::FAULTS_1; return true;
+    case 2: out = OPT4001::FaultCount::FAULTS_2; return true;
+    case 4: out = OPT4001::FaultCount::FAULTS_4; return true;
+    case 8: out = OPT4001::FaultCount::FAULTS_8; return true;
+    default: return false;
+  }
+}
+
 const char* errToStr(OPT4001::Err err) { return OPT4001::errorName(err); }
 
 const char* stateToStr(OPT4001::DriverState state) {
@@ -118,6 +130,10 @@ const char* stateToStr(OPT4001::DriverState state) {
 
 bool sampleStatusHasData(const OPT4001::Status& st) {
   return st.ok() || st.code == OPT4001::Err::CRC_ERROR;
+}
+
+bool conversionStartAccepted(const OPT4001::Status& st) {
+  return st.inProgress() || st.code == OPT4001::Err::BUSY;
 }
 
 void printStatus(OPT4001::Status st) {
@@ -212,8 +228,8 @@ void printHelp() {
   printHelpItem("config [write <hex>]", "Read/decode or write CONFIGURATION");
   printHelpItem("intcfg [write <hex>]", "Read/decode or write INT_CONFIGURATION");
   printHelpItem("status / flags", "Read/decode FLAGS (clear-on-read)");
-  printHelpItem("status_raw / flags raw", "Read raw FLAGS (clear-on-read)");
-  printHelpItem("flags readyclear|clear", "Clear ready-only or all flags");
+  printHelpItem("status_raw / flags_raw / flags raw", "Read raw FLAGS (clear-on-read)");
+  printHelpItem("flags readyclear|clear / clearflags", "Clear ready-only or all flags");
   printHelpItem("dump", "Dump public register map");
   printHelpItem("reg / rreg <addr>", "Read one 16-bit register");
   printHelpItem("regs <start> <bytes>", "Read bounded register byte block");
@@ -225,10 +241,11 @@ void printHelp() {
   printHelpItem("diag", "Consolidated diagnostic report");
   printHelpItem("scale / timing", "Show scaling and timing tables");
   printHelpItem("adc2lux <codes>", "Convert linear ADC codes to lux");
-  printHelpItem("raw / raw2lux <exp> <mant>", "Convert result fields to lux");
+  printHelpItem("raw", "Read current RESULT registers without freshness proof");
+  printHelpItem("raw2lux <exp> <mant>", "Convert result fields to lux");
   printHelpItem("probe / recover", "Raw identity probe or manual recovery");
   printHelpItem("reset / resetreapply", "General-call reset paths (bus-wide)");
-  printHelpItem("selftest", "Run bounded non-destructive checks");
+  printHelpItem("selftest", "Run bounded checks including recover/reapply");
   printHelpItem("stress / stress_mix [N]", "Run bounded diagnostic stress");
   printHelpItem("demo", "Alias for watch 10 1000");
 }
@@ -256,8 +273,8 @@ void printSample(const OPT4001::Sample& sample) {
 
 void readAndPrintSample() {
   OPT4001::Sample sample;
-  const OPT4001::Status st = device.readSample(sample);
-  if (st.ok() || st.code == OPT4001::Err::CRC_ERROR) printSample(sample);
+  const OPT4001::Status st = device.readLatestSample(sample);
+  if (sampleStatusHasData(st)) printSample(sample);
   printStatus(st);
 }
 
@@ -290,7 +307,9 @@ void dumpRegisters(uint8_t start, size_t len) {
     return;
   }
   for (size_t i = 0; i < len; ++i) {
-    printf("  [0x%02X] = 0x%02X\n", static_cast<unsigned>(start + i), data[i]);
+    printf("  Reg 0x%02X %-3s = 0x%02X\n",
+           static_cast<unsigned>(start + (i / 2U)),
+           ((i & 1U) == 0U) ? "MSB" : "LSB", data[i]);
   }
 }
 
@@ -395,7 +414,7 @@ OPT4001::Status readBurstBlocking(bool forceAuto, OPT4001::BurstFrame& frame) {
   const OPT4001::Mode mode = forceAuto ? OPT4001::Mode::ONE_SHOT_FORCED_AUTO
                                         : OPT4001::Mode::ONE_SHOT;
   OPT4001::Status st = device.startConversion(mode);
-  if (!st.ok()) return st;
+  if (!conversionStartAccepted(st)) return st;
   const uint32_t start = opt4001IdfNowMs(&i2c);
   const uint32_t timeout = device.getOneShotBudgetMs(mode) + 100U;
   for (uint32_t polls = 0; polls < 2000U; ++polls) {
@@ -413,7 +432,7 @@ OPT4001::Status readBurstBlocking(bool forceAuto, OPT4001::BurstFrame& frame) {
 
 OPT4001::Status primeFreshSample() {
   OPT4001::Status st = device.startConversion(OPT4001::Mode::ONE_SHOT);
-  if (!st.ok()) return st;
+  if (!conversionStartAccepted(st)) return st;
   const uint32_t start = opt4001IdfNowMs(&i2c);
   const uint32_t timeout = device.getOneShotBudgetMs(OPT4001::Mode::ONE_SHOT) + 100U;
   for (uint32_t polls = 0; polls < 2000U; ++polls) {
@@ -426,6 +445,166 @@ OPT4001::Status primeFreshSample() {
     vTaskDelay(pdMS_TO_TICKS(1));
   }
   return OPT4001::Status::Error(OPT4001::Err::TIMEOUT, "Conversion poll limit reached");
+}
+
+void runStressMix(uint32_t count) {
+  struct OpStats {
+    const char* name;
+    uint32_t ok;
+    uint32_t warn;
+    uint32_t fail;
+  };
+  OpStats stats[] = {
+      {"readBlocking", 0, 0, 0}, {"readBurst", 0, 0, 0},
+      {"readSlot0", 0, 0, 0}, {"readConfig", 0, 0, 0},
+      {"readIntCfg", 0, 0, 0}, {"readDeviceId", 0, 0, 0},
+      {"readFlagsRaw", 0, 0, 0}, {"probe", 0, 0, 0},
+  };
+  constexpr size_t OP_COUNT = sizeof(stats) / sizeof(stats[0]);
+  uint32_t ok = 0;
+  uint32_t warn = 0;
+  uint32_t fail = 0;
+
+  for (uint32_t i = 0; i < count; ++i) {
+    const size_t op = static_cast<size_t>(i) % OP_COUNT;
+    OPT4001::Status st = OPT4001::Status::Ok();
+    switch (op) {
+      case 0: {
+        OPT4001::Sample sample{};
+        st = device.readBlocking(sample, 1500);
+        break;
+      }
+      case 1: {
+        OPT4001::BurstFrame frame{};
+        st = readBurstBlocking(false, frame);
+        break;
+      }
+      case 2: {
+        st = primeFreshSample();
+        if (st.ok()) {
+          OPT4001::Sample sample{};
+          st = device.readSampleSlot(0, sample);
+        }
+        break;
+      }
+      case 3: {
+        OPT4001::ConfigurationInfo info{};
+        st = device.readConfiguration(info);
+        break;
+      }
+      case 4: {
+        OPT4001::IntConfigurationInfo info{};
+        st = device.readIntConfiguration(info);
+        break;
+      }
+      case 5: {
+        OPT4001::DeviceIdInfo info{};
+        st = device.readDeviceId(info);
+        break;
+      }
+      case 6: {
+        uint16_t raw = 0;
+        st = device.readFlagsRaw(raw);
+        break;
+      }
+      case 7:
+        st = device.probe();
+        break;
+      default:
+        break;
+    }
+
+    if (st.ok()) {
+      ++ok;
+      ++stats[op].ok;
+    } else if (st.code == OPT4001::Err::CRC_ERROR) {
+      ++warn;
+      ++stats[op].warn;
+    } else {
+      ++fail;
+      ++stats[op].fail;
+    }
+    if (!st.ok() && verboseMode) printStatus(st);
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+
+  printf("\n%s=== stress_mix summary ===%s\n", COLOR_CYAN, COLOR_RESET);
+  printf("  total: %sok=%lu%s %swarn=%lu%s %sfail=%lu%s\n",
+         COLOR_GREEN, static_cast<unsigned long>(ok), COLOR_RESET,
+         warn == 0 ? COLOR_GREEN : COLOR_YELLOW,
+         static_cast<unsigned long>(warn), COLOR_RESET,
+         fail == 0 ? COLOR_GREEN : COLOR_RED,
+         static_cast<unsigned long>(fail), COLOR_RESET);
+  for (const OpStats& stat : stats) {
+    printf("  %-12s ok=%-6lu warn=%-6lu fail=%-6lu\n", stat.name,
+           static_cast<unsigned long>(stat.ok),
+           static_cast<unsigned long>(stat.warn),
+           static_cast<unsigned long>(stat.fail));
+  }
+  printHealth();
+}
+
+void runSelfTest() {
+  uint32_t pass = 0;
+  uint32_t fail = 0;
+  auto report = [&](const char* name, bool passed, const char* detail = "") {
+    printf("  %s[%s]%s %-34s%s%s\n",
+           passed ? COLOR_GREEN : COLOR_RED, passed ? "PASS" : "FAIL",
+           COLOR_RESET, name, detail[0] == '\0' ? "" : " - ", detail);
+    passed ? ++pass : ++fail;
+  };
+
+  printf("\n%s=== OPT4001 selftest (bounded diagnostics) ===%s\n",
+         COLOR_CYAN, COLOR_RESET);
+  if (!device.isInitialized()) {
+    report("driver initialized", false, "run init first");
+    return;
+  }
+
+  const uint32_t successBefore = device.totalSuccess();
+  const uint32_t failureBefore = device.totalFailures();
+  OPT4001::Status st = device.probe();
+  report("probe responds", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
+  report("probe leaves health counters unchanged",
+         device.totalSuccess() == successBefore && device.totalFailures() == failureBefore);
+
+  OPT4001::DeviceIdInfo id{};
+  st = device.readDeviceId(id);
+  report("DEVICE_ID read and fixed pattern", st.ok() && id.matchesExpected,
+         st.ok() ? (id.matchesExpected ? "" : "unexpected ID") : OPT4001::errorName(st.code));
+
+  OPT4001::ConfigurationInfo config{};
+  st = device.readConfiguration(config);
+  report("CONFIGURATION decode", st.ok() && config.valid,
+         st.ok() ? (config.valid ? "" : "invalid fields") : OPT4001::errorName(st.code));
+
+  OPT4001::IntConfigurationInfo intConfig{};
+  st = device.readIntConfiguration(intConfig);
+  report("INT_CONFIGURATION decode", st.ok() && intConfig.valid,
+         st.ok() ? (intConfig.valid ? "" : "invalid fixed/reserved fields")
+                 : OPT4001::errorName(st.code));
+
+  OPT4001::Threshold low{}, high{};
+  st = device.getThresholds(low, high);
+  report("threshold registers readable", st.ok(),
+         st.ok() ? "" : OPT4001::errorName(st.code));
+
+  OPT4001::Sample sample{};
+  st = device.readBlocking(sample, 1500);
+  report("fresh sample read", sampleStatusHasData(st),
+         sampleStatusHasData(st) ? "" : OPT4001::errorName(st.code));
+
+  OPT4001::BurstFrame frame{};
+  st = readBurstBlocking(false, frame);
+  report("newest plus FIFO history read", sampleStatusHasData(st),
+         sampleStatusHasData(st) ? "" : OPT4001::errorName(st.code));
+
+  st = device.recover();
+  report("manual recover/reapply", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
+  printf("Selftest: %spass=%lu%s %sfail=%lu%s\n", COLOR_GREEN,
+         static_cast<unsigned long>(pass), COLOR_RESET,
+         fail == 0 ? COLOR_GREEN : COLOR_RED,
+         static_cast<unsigned long>(fail), COLOR_RESET);
 }
 
 void serviceWatch() {
@@ -706,10 +885,19 @@ void processCommand(char* line) {
     bool value = false; if (!parseBool(arg, value)) { printUsage("burst [0|1]"); return; }
     printStatus(device.setBurstMode(value));
   } else if (strcmp(cmd, "latch") == 0 || strcmp(cmd, "pol") == 0 || strcmp(cmd, "fault") == 0) {
-    uint32_t value = 0; if (!parseU32(nextToken(&save), value)) return;
+    char* valueArg = nextToken(&save);
+    uint32_t value = 0;
+    if (strcmp(cmd, "fault") == 0) {
+      OPT4001::FaultCount faults{};
+      if (!parseFaultCount(valueArg, faults)) { printUsage("fault <1|2|4|8>"); return; }
+      printStatus(device.setFaultCount(faults));
+      return;
+    }
+    if (!parseU32(valueArg, value) || value > 1U) {
+      printUsage("latch|pol <0|1>"); return;
+    }
     if (strcmp(cmd, "latch") == 0) printStatus(device.setInterruptLatch(value ? OPT4001::InterruptLatch::LATCHED : OPT4001::InterruptLatch::TRANSPARENT));
     if (strcmp(cmd, "pol") == 0) printStatus(device.setInterruptPolarity(value ? OPT4001::InterruptPolarity::ACTIVE_HIGH : OPT4001::InterruptPolarity::ACTIVE_LOW));
-    if (strcmp(cmd, "fault") == 0) printStatus(device.setFaultCount(static_cast<OPT4001::FaultCount>(value)));
   } else if (strcmp(cmd, "int") == 0 || strcmp(cmd, "intpin") == 0) {
     char* arg = nextToken(&save);
     if (strcmp(cmd, "intpin") == 0 || arg == nullptr) {
@@ -735,10 +923,20 @@ void processCommand(char* line) {
       printStatus(device.setIntDirection(value ? OPT4001::IntDirection::PIN_OUTPUT : OPT4001::IntDirection::PIN_INPUT));
     } else if (strcmp(arg, "latch") == 0 || strcmp(arg, "pol") == 0 ||
                strcmp(arg, "faults") == 0 || strcmp(arg, "cfg") == 0) {
-      uint32_t value = 0; if (!parseU32(nextToken(&save), value)) { printUsage("int latch|pol|faults|cfg <value>"); return; }
+      char* valueArg = nextToken(&save);
+      if (strcmp(arg, "faults") == 0) {
+        OPT4001::FaultCount faults{};
+        if (!parseFaultCount(valueArg, faults)) { printUsage("int faults <1|2|4|8>"); return; }
+        printStatus(device.setFaultCount(faults));
+        return;
+      }
+      uint32_t value = 0;
+      if (!parseU32(valueArg, value)) { printUsage("int latch|pol <0|1> | int cfg <0|1|3>"); return; }
+      if ((strcmp(arg, "latch") == 0 || strcmp(arg, "pol") == 0) && value > 1U) {
+        printUsage("int latch|pol <0|1>"); return;
+      }
       if (strcmp(arg, "latch") == 0) printStatus(device.setInterruptLatch(value ? OPT4001::InterruptLatch::LATCHED : OPT4001::InterruptLatch::TRANSPARENT));
       else if (strcmp(arg, "pol") == 0) printStatus(device.setInterruptPolarity(value ? OPT4001::InterruptPolarity::ACTIVE_HIGH : OPT4001::InterruptPolarity::ACTIVE_LOW));
-      else if (strcmp(arg, "faults") == 0) printStatus(device.setFaultCount(static_cast<OPT4001::FaultCount>(value)));
       else printStatus(device.setIntConfig(static_cast<OPT4001::IntConfig>(value)));
     }
   } else if (strcmp(cmd, "threshold") == 0) {
@@ -846,15 +1044,14 @@ void processCommand(char* line) {
     printHealth();
     if (strcmp(cmd, "diag") == 0) { printAddressPackage(); printSettings(); printConfigRegisters(); }
   } else if (strcmp(cmd, "selftest") == 0) {
-    puts("Selftest:");
-    printStatus(device.probe());
-    printHealth();
+    runSelfTest();
   } else if (strcmp(cmd, "stress") == 0 || strcmp(cmd, "stress_mix") == 0) {
     uint32_t count = strcmp(cmd, "stress_mix") == 0 ? 50 : 10;
     char* countArg = nextToken(&save);
     if (countArg != nullptr && !parseU32(countArg, count)) { printUsage("stress [1..10000]"); return; }
     if (count == 0 || count > STRESS_COUNT_MAX) { printUsage("stress [1..10000]"); return; }
-    runStress(count);
+    if (strcmp(cmd, "stress_mix") == 0) runStressMix(count);
+    else runStress(count);
   } else if (strcmp(cmd, "watch") == 0 || strcmp(cmd, "demo") == 0) {
     bool force = false; uint32_t count = strcmp(cmd, "demo") == 0 ? 10U : 10U;
     uint32_t interval = strcmp(cmd, "demo") == 0 ? 1000U : 1000U;
