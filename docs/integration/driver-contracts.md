@@ -6,8 +6,12 @@ implementation passes.
 
 ## Lifecycle And Health
 
+- `bind(const Config&)` validates and caches configuration without touching I2C.
+  `unbind()` releases the transport and runtime state without touching I2C.
+- `startAttach()` plus `poll(nowMs, 1)` performs the identity read and four
+  configuration writes with at most one transport callback per owner poll.
 - `begin(const Config&)` validates configuration, probes `DEVICE_ID`, then
-  applies cached configuration.
+  applies cached configuration synchronously for compatibility.
 - Validation failures reset cached config/runtime to defaults.
 - Probe or apply failures after a valid config leave the normalized config
   cached for diagnostics and later `probe()`, while the lifecycle remains
@@ -17,6 +21,9 @@ implementation passes.
 - Latched offline health uses `Err::OFFLINE`; active conversion or poll-job
   contention uses `Err::BUSY`.
 - `recover()` is the manual path back from `OFFLINE` or dirty configuration.
+- `powerDown()` is the explicit error-reporting one-write shutdown. `end()`
+  intentionally retains its older best-effort raw power-down attempt and then
+  moves to `UNINIT`; use `unbind()` when the owner requires a bus-silent path.
 
 ## Transport Status
 
@@ -51,6 +58,7 @@ A successful transport read with an unexpected fixed-pattern `DEVICE_ID` returns
 
 Shared-bus owners can use:
 
+- `bind()` / `startAttach()`
 - `startReadSample()`
 - `startReadBurst()`
 - `startConfigureMeasurement(...)`
@@ -59,14 +67,23 @@ Shared-bus owners can use:
 - `pollBusy()`
 - `lastPollStatus()`
 - `getLastBurst(BurstFrame&)`
+- `cancelPollJob()`
 
 One 16-bit register read, one 16-bit register write, or one RESULT/FIFO block
 read counts as one instruction. CRC checks, lux conversion, cache updates, state
 transitions, and delay gates are CPU-only and do not count. `FLAGS` reads count
 because they are side-effecting register reads.
 
+Sole-owner integrations should keep the default budget of one callback per
+owner poll. Larger budgets are bounded diagnostic batching and intentionally
+allow multiple callbacks in one `poll()` call.
+
 While a poll job is active, `tick()` does not perform readiness I2C and normal
 tracked I2C helpers return `BUSY` for non-poll callers.
+
+Cancellation is bus-silent. If confirmed configuration or reset writes may
+have reached hardware, cancellation marks `hardwareConfigDirty`; a cancelled
+reset that reached the general-call write also leaves lifecycle `UNINIT`.
 
 ## Dirty Configuration
 

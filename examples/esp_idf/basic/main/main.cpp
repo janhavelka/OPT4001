@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include "OPT4001/OPT4001.h"
+#include "../../../common/CliLineBuffer.h"
 #include "Opt4001IdfI2cTransport.h"
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
@@ -22,23 +23,23 @@ constexpr gpio_num_t INT_PIN = GPIO_NUM_NC;
 constexpr uint8_t I2C_ADDRESS = 0x45;
 constexpr uint32_t I2C_FREQ_HZ = 400000;
 constexpr uint32_t I2C_TIMEOUT_MS = 50;
-constexpr size_t INPUT_MAX = 192;
 constexpr uint32_t STRESS_COUNT_MAX = 10000;
 constexpr uint32_t WATCH_COUNT_MAX = 100000;
 constexpr uint32_t WATCH_INTERVAL_MIN_MS = 1;
 constexpr uint32_t WATCH_INTERVAL_MAX_MS = 3600000;
 constexpr size_t REGISTER_DUMP_MAX_BYTES = 64;
 
-constexpr const char* COLOR_RESET = "\033[0m";
-constexpr const char* COLOR_RED = "\033[31m";
-constexpr const char* COLOR_GREEN = "\033[32m";
-constexpr const char* COLOR_YELLOW = "\033[33m";
-constexpr const char* COLOR_CYAN = "\033[36m";
+const char* COLOR_RESET = "\033[0m";
+const char* COLOR_RED = "\033[31m";
+const char* COLOR_GREEN = "\033[32m";
+const char* COLOR_YELLOW = "\033[33m";
+const char* COLOR_CYAN = "\033[36m";
 constexpr int HELP_COMMAND_WIDTH = 32;
 
 OPT4001::OPT4001 device;
 Opt4001IdfI2c i2c;
 bool verboseMode = false;
+bool colorEnabled = true;
 uint8_t selectedAddress = I2C_ADDRESS;
 OPT4001::PackageVariant selectedPackage = OPT4001::PackageVariant::SOT_5X3;
 
@@ -53,6 +54,45 @@ struct WatchState {
 };
 
 WatchState watchState;
+
+enum class StressPhase : uint8_t { START, READY, POLL, SLOT };
+
+struct StressState {
+  bool active = false;
+  bool mixed = false;
+  uint32_t total = 0;
+  uint32_t completed = 0;
+  uint32_t ok = 0;
+  uint32_t warn = 0;
+  uint32_t fail = 0;
+  uint32_t startMs = 0;
+  uint8_t operation = 0;
+  StressPhase phase = StressPhase::START;
+};
+
+StressState stressState;
+
+struct HealthMonitorState {
+  bool enabled = false;
+  bool seeded = false;
+  uint32_t intervalMs = 1000U;
+  uint32_t nextMs = 0U;
+  OPT4001::DriverState state = OPT4001::DriverState::UNINIT;
+  uint8_t consecutiveFailures = 0U;
+  uint32_t totalFailures = 0U;
+  uint32_t totalSuccess = 0U;
+};
+
+HealthMonitorState healthMonitor;
+
+void setColorEnabled(bool enabled) {
+  colorEnabled = enabled;
+  COLOR_RESET = enabled ? "\033[0m" : "";
+  COLOR_RED = enabled ? "\033[31m" : "";
+  COLOR_GREEN = enabled ? "\033[32m" : "";
+  COLOR_YELLOW = enabled ? "\033[33m" : "";
+  COLOR_CYAN = enabled ? "\033[36m" : "";
+}
 
 void printHelpSection(const char* title) {
   printf("\n%s[%s]%s\n", COLOR_GREEN, title, COLOR_RESET);
@@ -185,11 +225,16 @@ void printHelp() {
   printHelpItem("help / ?", "Show this help");
   printHelpItem("version / ver", "Print library/build version");
   printHelpItem("scan", "Scan I2C bus for ACKs");
+  printHelpItem("discover", "Probe legal addresses and validate DEVICE_ID");
   printHelpItem("init / begin", "Initialize/reinitialize selected profile");
   printHelpItem("end", "End driver and return to UNINIT");
+  printHelpItem("bind / unbind", "Bus-silent cache bind or release");
+  printHelpItem("attach", "Start five-step poll-chunked attach");
+  printHelpItem("powerdown", "Error-reporting one-write power down");
   printHelpItem("addr [0x44|0x45|0x46]", "Show or set target address");
   printHelpItem("pkg [pico|sot]", "Show or set package variant");
   printHelpItem("verbose [0|1]", "Toggle verbose diagnostics");
+  printHelpItem("color [0|1|off|on]", "Toggle ANSI color output");
 
   printHelpSection("Data");
   printHelpItem("read [force] [N]", "Bounded blocking fresh sample read(s)");
@@ -203,7 +248,13 @@ void printHelp() {
   printHelpItem("lux / mlux / ulux", "Read scaled lux helpers");
   printHelpItem("watch [N] [interval]", "Run bounded sample stream");
   printHelpItem("watch force [N] [interval]", "Stream forced-auto one-shots");
-  printHelpItem("stop", "Stop active watch");
+  printHelpItem("stop", "Stop active watch/stress session");
+  printHelpItem("job", "Show active poll-job state");
+  printHelpItem("job sample|burst", "Start poll-chunked fresh read job");
+  printHelpItem("job measure <r> <ct> <m> [qw]", "Start four-write config job");
+  printHelpItem("job reset confirm", "Start bus-wide reset/reapply job");
+  printHelpItem("job poll [1..16]", "Poll job; default 1 is owner-fair, >1 batches diagnostics");
+  printHelpItem("job result|cancel", "Show cached result or cancel without I2C");
 
   printHelpSection("Configuration");
   printHelpItem("cfg / settings", "Show live and cached configuration");
@@ -237,6 +288,7 @@ void printHelp() {
 
   printHelpSection("Diagnostics / Helpers");
   printHelpItem("drv / health / online", "Show full driver health");
+  printHelpItem("healthmon [0|1] [interval]", "Cached health monitor; 0 ms is change-only");
   printHelpItem("state", "Show compact health line");
   printHelpItem("diag", "Consolidated diagnostic report");
   printHelpItem("scale / timing", "Show scaling and timing tables");
@@ -245,8 +297,8 @@ void printHelp() {
   printHelpItem("raw2lux <exp> <mant>", "Convert result fields to lux");
   printHelpItem("probe / recover", "Raw identity probe or manual recovery");
   printHelpItem("reset / resetreapply", "General-call reset paths (bus-wide)");
-  printHelpItem("selftest", "Run bounded checks including recover/reapply");
-  printHelpItem("stress / stress_mix [N]", "Run bounded diagnostic stress");
+  printHelpItem("selfcheck / selftest", "Bounded identity/config/sample/recovery checks");
+  printHelpItem("stress / stress_mix [N]", "Run finite cooperative diagnostic stress");
   printHelpItem("demo", "Alias for watch 10 1000");
 }
 
@@ -278,6 +330,26 @@ void readAndPrintSample() {
   printStatus(st);
 }
 
+void serviceHealthMonitor() {
+  if (!healthMonitor.enabled) return;
+  const uint32_t now = opt4001IdfNowMs(&i2c);
+  const bool changed = !healthMonitor.seeded ||
+      healthMonitor.state != device.state() ||
+      healthMonitor.consecutiveFailures != device.consecutiveFailures() ||
+      healthMonitor.totalFailures != device.totalFailures() ||
+      healthMonitor.totalSuccess != device.totalSuccess();
+  const bool due = healthMonitor.intervalMs > 0U &&
+      static_cast<int32_t>(now - healthMonitor.nextMs) >= 0;
+  if (!changed && !due) return;
+  printHealth();
+  healthMonitor.seeded = true;
+  healthMonitor.state = device.state();
+  healthMonitor.consecutiveFailures = device.consecutiveFailures();
+  healthMonitor.totalFailures = device.totalFailures();
+  healthMonitor.totalSuccess = device.totalSuccess();
+  healthMonitor.nextMs = now + healthMonitor.intervalMs;
+}
+
 void scanI2c() {
   puts("I2C scan:");
   for (uint8_t addr = 0x03; addr <= 0x77; ++addr) {
@@ -290,8 +362,9 @@ void scanI2c() {
 void printSettings() {
   OPT4001::SettingsSnapshot s;
   printStatus(device.getSettings(s));
-  printf("Settings: init=%s state=%s addr=0x%02X range=%u ctime=%u mode=%u quick=%s crc=%s sample=%s age=%lu\n",
-         s.initialized ? "yes" : "no", stateToStr(s.state), s.i2cAddress,
+  printf("Settings: bound=%s init=%s state=%s addr=0x%02X range=%u ctime=%u mode=%u quick=%s crc=%s sample=%s age=%lu\n",
+         s.bound ? "yes" : "no", s.initialized ? "yes" : "no",
+         stateToStr(s.state), s.i2cAddress,
          static_cast<unsigned>(s.range), static_cast<unsigned>(s.conversionTime),
          static_cast<unsigned>(s.mode), s.quickWake ? "yes" : "no",
          s.verifyCrc ? "yes" : "no", s.hasSample ? "yes" : "no",
@@ -313,22 +386,59 @@ void dumpRegisters(uint8_t start, size_t len) {
   }
 }
 
-void runStress(uint32_t count) {
-  uint32_t ok = 0;
-  uint32_t warn = 0;
-  uint32_t fail = 0;
-  for (uint32_t i = 0; i < count; ++i) {
-    OPT4001::Sample sample;
-    const OPT4001::Status st = device.readBlocking(sample, 1000);
-    if (st.ok()) ++ok;
-    else if (st.code == OPT4001::Err::CRC_ERROR) ++warn;
-    else ++fail;
-    if (!st.ok() && verboseMode) printStatus(st);
-    vTaskDelay(pdMS_TO_TICKS(1));
+void discoverOpt4001() {
+  puts("OPT4001 protocol-qualified discovery (DEVICE_ID):");
+  bool found = false;
+  for (uint8_t address = OPT4001::cmd::I2C_ADDR_GND;
+       address <= OPT4001::cmd::I2C_ADDR_SDA;
+       ++address) {
+    Opt4001IdfI2c candidate = i2c;
+    candidate.address = address;
+    candidate.generalCallDev = nullptr;
+    i2c_master_dev_handle_t temporary = nullptr;
+    if (address != i2c.address) {
+      i2c_device_config_t devConfig{};
+      devConfig.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+      devConfig.device_address = address;
+      devConfig.scl_speed_hz = I2C_FREQ_HZ;
+      const esp_err_t addResult =
+          i2c_master_bus_add_device(i2c.bus, &devConfig, &temporary);
+      if (addResult != ESP_OK) {
+        if (verboseMode) {
+          printf("  0x%02X: add handle failed (%s)\n", address,
+                 esp_err_to_name(addResult));
+        }
+        continue;
+      }
+      candidate.dev = temporary;
+    }
+
+    OPT4001::Config cfg = makeConfig();
+    cfg.i2cUser = &candidate;
+    cfg.timeUser = &candidate;
+    cfg.gpioRead = nullptr;
+    cfg.intPin = -1;
+    cfg.packageVariant = OPT4001::PackageVariant::SOT_5X3;
+    cfg.i2cAddress = address;
+    OPT4001::OPT4001 sensor;
+    OPT4001::Status st = sensor.bind(cfg);
+    if (st.ok()) {
+      st = sensor.probe();
+    }
+    if (st.ok()) {
+      found = true;
+      printf("  0x%02X: %sOPT4001%s (0x45 may be SOT-5X3 or PicoStar)\n",
+             address, COLOR_GREEN, COLOR_RESET);
+    } else if (verboseMode) {
+      printf("  0x%02X: %s\n", address, errToStr(st.code));
+    }
+    if (temporary != nullptr) {
+      (void)i2c_master_bus_rm_device(temporary);
+    }
   }
-  printf("Stress: ok=%lu warn=%lu fail=%lu\n", static_cast<unsigned long>(ok),
-         static_cast<unsigned long>(warn), static_cast<unsigned long>(fail));
-  printHealth();
+  if (!found) {
+    printf("  %sNo qualified OPT4001 found%s\n", COLOR_YELLOW, COLOR_RESET);
+  }
 }
 
 bool replaceDeviceAddress(uint8_t address) {
@@ -447,101 +557,106 @@ OPT4001::Status primeFreshSample() {
   return OPT4001::Status::Error(OPT4001::Err::TIMEOUT, "Conversion poll limit reached");
 }
 
-void runStressMix(uint32_t count) {
-  struct OpStats {
-    const char* name;
-    uint32_t ok;
-    uint32_t warn;
-    uint32_t fail;
-  };
-  OpStats stats[] = {
-      {"readBlocking", 0, 0, 0}, {"readBurst", 0, 0, 0},
-      {"readSlot0", 0, 0, 0}, {"readConfig", 0, 0, 0},
-      {"readIntCfg", 0, 0, 0}, {"readDeviceId", 0, 0, 0},
-      {"readFlagsRaw", 0, 0, 0}, {"probe", 0, 0, 0},
-  };
-  constexpr size_t OP_COUNT = sizeof(stats) / sizeof(stats[0]);
-  uint32_t ok = 0;
-  uint32_t warn = 0;
-  uint32_t fail = 0;
-
-  for (uint32_t i = 0; i < count; ++i) {
-    const size_t op = static_cast<size_t>(i) % OP_COUNT;
-    OPT4001::Status st = OPT4001::Status::Ok();
-    switch (op) {
-      case 0: {
-        OPT4001::Sample sample{};
-        st = device.readBlocking(sample, 1500);
-        break;
-      }
-      case 1: {
-        OPT4001::BurstFrame frame{};
-        st = readBurstBlocking(false, frame);
-        break;
-      }
-      case 2: {
-        st = primeFreshSample();
-        if (st.ok()) {
-          OPT4001::Sample sample{};
-          st = device.readSampleSlot(0, sample);
-        }
-        break;
-      }
-      case 3: {
-        OPT4001::ConfigurationInfo info{};
-        st = device.readConfiguration(info);
-        break;
-      }
-      case 4: {
-        OPT4001::IntConfigurationInfo info{};
-        st = device.readIntConfiguration(info);
-        break;
-      }
-      case 5: {
-        OPT4001::DeviceIdInfo info{};
-        st = device.readDeviceId(info);
-        break;
-      }
-      case 6: {
-        uint16_t raw = 0;
-        st = device.readFlagsRaw(raw);
-        break;
-      }
-      case 7:
-        st = device.probe();
-        break;
-      default:
-        break;
-    }
-
-    if (st.ok()) {
-      ++ok;
-      ++stats[op].ok;
-    } else if (st.code == OPT4001::Err::CRC_ERROR) {
-      ++warn;
-      ++stats[op].warn;
-    } else {
-      ++fail;
-      ++stats[op].fail;
-    }
-    if (!st.ok() && verboseMode) printStatus(st);
-    vTaskDelay(pdMS_TO_TICKS(1));
-  }
-
-  printf("\n%s=== stress_mix summary ===%s\n", COLOR_CYAN, COLOR_RESET);
-  printf("  total: %sok=%lu%s %swarn=%lu%s %sfail=%lu%s\n",
-         COLOR_GREEN, static_cast<unsigned long>(ok), COLOR_RESET,
-         warn == 0 ? COLOR_GREEN : COLOR_YELLOW,
-         static_cast<unsigned long>(warn), COLOR_RESET,
-         fail == 0 ? COLOR_GREEN : COLOR_RED,
-         static_cast<unsigned long>(fail), COLOR_RESET);
-  for (const OpStats& stat : stats) {
-    printf("  %-12s ok=%-6lu warn=%-6lu fail=%-6lu\n", stat.name,
-           static_cast<unsigned long>(stat.ok),
-           static_cast<unsigned long>(stat.warn),
-           static_cast<unsigned long>(stat.fail));
-  }
+void finishStress(bool cancelled) {
+  if (!stressState.active) return;
+  const uint32_t elapsed = opt4001IdfNowMs(&i2c) - stressState.startMs;
+  if (device.pollBusy()) (void)device.cancelPollJob();
+  stressState.active = false;
+  printf("%s%s summary: completed=%lu/%lu ok=%lu warn=%lu fail=%lu elapsed=%lu ms\n",
+         stressState.mixed ? "stress_mix" : "stress",
+         cancelled ? " (cancelled)" : "",
+         static_cast<unsigned long>(stressState.completed),
+         static_cast<unsigned long>(stressState.total),
+         static_cast<unsigned long>(stressState.ok),
+         static_cast<unsigned long>(stressState.warn),
+         static_cast<unsigned long>(stressState.fail),
+         static_cast<unsigned long>(elapsed));
   printHealth();
+}
+
+void recordStressStatus(const OPT4001::Status& st) {
+  if (st.ok()) ++stressState.ok;
+  else if (st.code == OPT4001::Err::CRC_ERROR) ++stressState.warn;
+  else {
+    ++stressState.fail;
+    if (verboseMode) printStatus(st);
+  }
+  ++stressState.completed;
+  stressState.phase = StressPhase::START;
+  if (stressState.completed >= stressState.total) finishStress(false);
+}
+
+void startStressSession(uint32_t count, bool mixed) {
+  if (!device.isInitialized() || count == 0U || count > STRESS_COUNT_MAX) {
+    printUsage("stress [1..10000] (initialized driver required)");
+    return;
+  }
+  if (stressState.active) finishStress(true);
+  watchState.active = false;
+  stressState = {};
+  stressState.active = true;
+  stressState.mixed = mixed;
+  stressState.total = count;
+  stressState.startMs = opt4001IdfNowMs(&i2c);
+  printf("%s started: %lu finite operations, cooperative one-callback service budget\n",
+         mixed ? "stress_mix" : "stress", static_cast<unsigned long>(count));
+}
+
+void serviceStress() {
+  if (!stressState.active) return;
+  if (stressState.phase == StressPhase::READY) {
+    bool ready = false;
+    const OPT4001::Status st = device.conversionReady(ready);
+    if (!st.ok()) recordStressStatus(st);
+    else if (ready) stressState.phase = StressPhase::SLOT;
+    return;
+  }
+  if (stressState.phase == StressPhase::POLL) {
+    const OPT4001::Status st = device.poll(opt4001IdfNowMs(&i2c), 1);
+    if (st.inProgress()) return;
+    recordStressStatus(st);
+    return;
+  }
+  if (stressState.phase == StressPhase::SLOT) {
+    OPT4001::Sample sample{};
+    recordStressStatus(device.readSampleSlot(0U, sample));
+    return;
+  }
+
+  stressState.operation = stressState.mixed
+                              ? static_cast<uint8_t>(stressState.completed % 8U)
+                              : 0U;
+  if (stressState.operation <= 2U) {
+    OPT4001::Status st = device.startConversion(OPT4001::Mode::ONE_SHOT);
+    if (!conversionStartAccepted(st)) {
+      recordStressStatus(st);
+      return;
+    }
+    if (stressState.operation == 2U) {
+      stressState.phase = StressPhase::READY;
+      return;
+    }
+    st = stressState.operation == 1U ? device.startReadBurst()
+                                     : device.startReadSample();
+    if (!st.inProgress()) {
+      recordStressStatus(st);
+      return;
+    }
+    stressState.phase = StressPhase::POLL;
+    return;
+  }
+
+  OPT4001::Status st = OPT4001::Status::Ok();
+  switch (stressState.operation) {
+    case 3: { OPT4001::ConfigurationInfo info{}; st = device.readConfiguration(info); break; }
+    case 4: { OPT4001::IntConfigurationInfo info{}; st = device.readIntConfiguration(info); break; }
+    case 5: { OPT4001::DeviceIdInfo info{}; st = device.readDeviceId(info); break; }
+    case 6: { uint16_t raw = 0; st = device.readFlagsRaw(raw); break; }
+    case 7: st = device.probe(); break;
+    default: st = OPT4001::Status::Error(OPT4001::Err::INVALID_PARAM,
+                                         "Invalid stress operation"); break;
+  }
+  recordStressStatus(st);
 }
 
 void runSelfTest() {
@@ -554,7 +669,7 @@ void runSelfTest() {
     passed ? ++pass : ++fail;
   };
 
-  printf("\n%s=== OPT4001 selftest (bounded diagnostics) ===%s\n",
+  printf("\n%s=== OPT4001 selfcheck (bounded diagnostics; FLAGS/read/recover may affect hardware state) ===%s\n",
          COLOR_CYAN, COLOR_RESET);
   if (!device.isInitialized()) {
     report("driver initialized", false, "run init first");
@@ -589,6 +704,23 @@ void runSelfTest() {
   report("threshold registers readable", st.ok(),
          st.ok() ? "" : OPT4001::errorName(st.code));
 
+  float lowLux = 0.0f;
+  float highLux = 0.0f;
+  st = device.getThresholdsLux(lowLux, highLux);
+  report("threshold lux decode", st.ok() && highLux >= lowLux,
+         st.ok() ? (highLux >= lowLux ? "" : "threshold order invalid")
+                 : OPT4001::errorName(st.code));
+  report("scale helpers sane",
+         device.getCurrentFullScaleLux() > 0.0f &&
+             device.getCurrentResolutionLux() > 0.0f &&
+             device.getEffectiveBits() > 0U);
+
+  OPT4001::SettingsSnapshot settings{};
+  st = device.getSettings(settings);
+  report("cache-only settings snapshot",
+         st.ok() && settings.bound && settings.initialized,
+         st.ok() ? "" : OPT4001::errorName(st.code));
+
   OPT4001::Sample sample{};
   st = device.readBlocking(sample, 1500);
   report("fresh sample read", sampleStatusHasData(st),
@@ -599,9 +731,14 @@ void runSelfTest() {
   report("newest plus FIFO history read", sampleStatusHasData(st),
          sampleStatusHasData(st) ? "" : OPT4001::errorName(st.code));
 
+  uint16_t flagsRaw = 0;
+  st = device.readFlagsRaw(flagsRaw);
+  report("FLAGS raw read (clear-on-read)", st.ok(),
+         st.ok() ? "" : OPT4001::errorName(st.code));
+
   st = device.recover();
   report("manual recover/reapply", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
-  printf("Selftest: %spass=%lu%s %sfail=%lu%s\n", COLOR_GREEN,
+  printf("Selfcheck: %spass=%lu%s %sfail=%lu%s\n", COLOR_GREEN,
          static_cast<unsigned long>(pass), COLOR_RESET,
          fail == 0 ? COLOR_GREEN : COLOR_RED,
          static_cast<unsigned long>(fail), COLOR_RESET);
@@ -659,10 +796,131 @@ void processCommand(char* line) {
     printf("Version: %s\n", OPT4001::VERSION_FULL);
   } else if (strcmp(cmd, "scan") == 0) {
     scanI2c();
+  } else if (strcmp(cmd, "discover") == 0) {
+    discoverOpt4001();
+  } else if (strcmp(cmd, "bind") == 0) {
+    stressState.active = false;
+    watchState.active = false;
+    printStatus(device.bind(makeConfig()));
+  } else if (strcmp(cmd, "unbind") == 0) {
+    stressState.active = false;
+    watchState.active = false;
+    device.unbind();
+    printInfo("Driver transport released without I2C");
+  } else if (strcmp(cmd, "attach") == 0) {
+    printStatus(device.startAttach());
+  } else if (strcmp(cmd, "powerdown") == 0) {
+    printStatus(device.powerDown());
+  } else if (strcmp(cmd, "job") == 0) {
+    char* op = nextToken(&save);
+    if (op == nullptr) {
+      printf("Poll job: %s status=%s\n", device.pollBusy() ? "ACTIVE" : "IDLE",
+             errToStr(device.lastPollStatus().code));
+    } else if (strcmp(op, "sample") == 0) {
+      printStatus(device.startReadSample());
+    } else if (strcmp(op, "burst") == 0) {
+      printStatus(device.startReadBurst());
+    } else if (strcmp(op, "poll") == 0) {
+      uint32_t budget = 1U;
+      char* budgetArg = nextToken(&save);
+      if (budgetArg != nullptr &&
+          (!parseU32(budgetArg, budget) || budget == 0U || budget > 16U)) {
+        printUsage("job poll [1..16]");
+        return;
+      }
+      printStatus(device.poll(opt4001IdfNowMs(&i2c),
+                              static_cast<uint8_t>(budget)));
+    } else if (strcmp(op, "result") == 0) {
+      printStatus(device.lastPollStatus());
+      OPT4001::Sample sample{};
+      if (device.getLastSample(sample).ok()) printSample(sample);
+      OPT4001::BurstFrame frame{};
+      if (device.getLastBurst(frame).ok()) printBurstFrame(frame);
+    } else if (strcmp(op, "cancel") == 0) {
+      printStatus(device.cancelPollJob());
+    } else if (strcmp(op, "reset") == 0) {
+      char* confirm = nextToken(&save);
+      if (confirm == nullptr || strcmp(confirm, "confirm") != 0) {
+        printUsage("job reset confirm");
+        return;
+      }
+      printStatus(device.startResetAndReapply());
+    } else if (strcmp(op, "measure") == 0) {
+      char* rangeArg = nextToken(&save);
+      char* ctimeArg = nextToken(&save);
+      char* modeArg = nextToken(&save);
+      char* quickArg = nextToken(&save);
+      uint32_t range = 12U;
+      uint32_t ctime = 0U;
+      bool quick = device.getQuickWake();
+      const bool rangeOk = rangeArg != nullptr &&
+          (strcmp(rangeArg, "auto") == 0 ||
+           (parseU32(rangeArg, range) && range <= 8U));
+      const bool timeOk = parseU32(ctimeArg, ctime) && ctime <= 11U;
+      const bool continuous = modeArg != nullptr &&
+          (strcmp(modeArg, "cont") == 0 || strcmp(modeArg, "continuous") == 0);
+      const bool power = modeArg != nullptr &&
+          (strcmp(modeArg, "power") == 0 || strcmp(modeArg, "pd") == 0);
+      if (!rangeOk || !timeOk || (!continuous && !power) ||
+          (quickArg != nullptr && !parseBool(quickArg, quick))) {
+        printUsage("job measure <0..8|auto> <0..11> <power|cont> [qw]");
+        return;
+      }
+      printStatus(device.startConfigureMeasurement(
+          range == 12U ? OPT4001::Range::AUTO
+                       : static_cast<OPT4001::Range>(range),
+          static_cast<OPT4001::ConversionTime>(ctime),
+          continuous ? OPT4001::Mode::CONTINUOUS
+                     : OPT4001::Mode::POWER_DOWN,
+          quick));
+    } else {
+      printUsage("job [sample|burst|measure|reset|poll|result|cancel]");
+    }
+  } else if (strcmp(cmd, "color") == 0) {
+    char* arg = nextToken(&save);
+    if (arg == nullptr) {
+      printf("Color: %s\n", colorEnabled ? "ON" : "OFF");
+      return;
+    }
+    bool enabled = false;
+    if (!parseBool(arg, enabled)) {
+      printUsage("color [0|1|off|on]");
+      return;
+    }
+    setColorEnabled(enabled);
+    printf("Color: %s\n", enabled ? "ON" : "OFF");
   } else if (strcmp(cmd, "verbose") == 0) {
     bool value = false;
     if (parseBool(nextToken(&save), value)) verboseMode = value;
     printf("Verbose: %s\n", verboseMode ? "ON" : "OFF");
+  } else if (strcmp(cmd, "healthmon") == 0) {
+    char* enabledArg = nextToken(&save);
+    if (enabledArg == nullptr) {
+      printf("Health monitor: %s interval=%lu ms%s\n",
+             healthMonitor.enabled ? "ON" : "OFF",
+             static_cast<unsigned long>(healthMonitor.intervalMs),
+             healthMonitor.intervalMs == 0U ? " (change-only)" : "");
+      return;
+    }
+    bool enabled = false;
+    if (!parseBool(enabledArg, enabled)) {
+      printUsage("healthmon [0|1] [intervalMs]");
+      return;
+    }
+    uint32_t interval = healthMonitor.intervalMs;
+    char* intervalArg = nextToken(&save);
+    if (intervalArg != nullptr &&
+        (!parseU32(intervalArg, interval) || interval > 3600000U)) {
+      printUsage("healthmon [0|1] [0..3600000]");
+      return;
+    }
+    healthMonitor.enabled = enabled;
+    healthMonitor.intervalMs = interval;
+    healthMonitor.seeded = false;
+    healthMonitor.nextMs = opt4001IdfNowMs(&i2c);
+    printf("Health monitor: %s interval=%lu ms%s\n",
+           enabled ? "ON" : "OFF", static_cast<unsigned long>(interval),
+           interval == 0U ? " (change-only)" : "");
   } else if (strcmp(cmd, "addr") == 0) {
     char* arg = nextToken(&save);
     if (arg != nullptr) {
@@ -1043,16 +1301,16 @@ void processCommand(char* line) {
            static_cast<unsigned long>(device.getOneShotBudgetUs(OPT4001::Mode::ONE_SHOT_FORCED_AUTO)));
     printHealth();
     if (strcmp(cmd, "diag") == 0) { printAddressPackage(); printSettings(); printConfigRegisters(); }
-  } else if (strcmp(cmd, "selftest") == 0) {
+  } else if (strcmp(cmd, "selfcheck") == 0 || strcmp(cmd, "selftest") == 0) {
     runSelfTest();
   } else if (strcmp(cmd, "stress") == 0 || strcmp(cmd, "stress_mix") == 0) {
     uint32_t count = strcmp(cmd, "stress_mix") == 0 ? 50 : 10;
     char* countArg = nextToken(&save);
     if (countArg != nullptr && !parseU32(countArg, count)) { printUsage("stress [1..10000]"); return; }
     if (count == 0 || count > STRESS_COUNT_MAX) { printUsage("stress [1..10000]"); return; }
-    if (strcmp(cmd, "stress_mix") == 0) runStressMix(count);
-    else runStress(count);
+    startStressSession(count, strcmp(cmd, "stress_mix") == 0);
   } else if (strcmp(cmd, "watch") == 0 || strcmp(cmd, "demo") == 0) {
+    if (stressState.active) finishStress(true);
     bool force = false; uint32_t count = strcmp(cmd, "demo") == 0 ? 10U : 10U;
     uint32_t interval = strcmp(cmd, "demo") == 0 ? 1000U : 1000U;
     char* arg = nextToken(&save);
@@ -1069,8 +1327,10 @@ void processCommand(char* line) {
     printf("Watch: ON count=%lu interval=%lu force=%s\n",
            static_cast<unsigned long>(count), static_cast<unsigned long>(interval), force ? "yes" : "no");
   } else if (strcmp(cmd, "stop") == 0) {
+    if (stressState.active) finishStress(true);
     watchState.active = false;
-    printInfo("Watch stopped");
+    if (device.pollBusy()) printStatus(device.cancelPollJob());
+    printInfo("Active session stopped");
   } else {
     printf("Unknown command: %s\n", cmd);
   }
@@ -1119,32 +1379,32 @@ bool configureConsole() {
 }
 
 void cliLoop() {
-  static char input[INPUT_MAX];
-  size_t len = 0;
+  static cli_shell::FixedLineBuffer line;
+  static char input[cli_shell::FixedLineBuffer::CAPACITY]{};
   printf("> ");
   while (true) {
     device.tick(opt4001IdfNowMs(&i2c));
     serviceWatch();
+    serviceStress();
+    serviceHealthMonitor();
 
     const int c = getchar();
     if (c == EOF) {
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
-    if (c == '\b' || c == 0x7F) {
-      if (len > 0) --len;
-      continue;
+    const cli_shell::LineResult result =
+        line.push(static_cast<char>(c), input, sizeof(input));
+    if (result == cli_shell::LineResult::READY) {
+      processCommand(input);
+      printf("> ");
+    } else if (result == cli_shell::LineResult::TOO_LONG) {
+      printUsage("command shorter than 192 bytes; complete line discarded");
+      printf("> ");
+    } else if (result == cli_shell::LineResult::OUTPUT_TOO_SMALL) {
+      puts("CLI output buffer too small");
+      printf("> ");
     }
-    if (c == '\n' || c == '\r') {
-      if (len > 0) {
-        input[len] = '\0';
-        processCommand(input);
-        len = 0;
-        printf("> ");
-      }
-      continue;
-    }
-    if (len < sizeof(input) - 1) input[len++] = static_cast<char>(c);
   }
 }
 

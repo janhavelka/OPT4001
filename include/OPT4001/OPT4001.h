@@ -171,6 +171,9 @@ struct SettingsSnapshot {
   /// intentional successful raw register write made the cache relationship
   /// uncertain.
   Status hardwareConfigDirtyError = Status::Ok();
+  /// A validated callback/configuration set is cached. Appended to preserve the
+  /// positional meaning of existing aggregate initializers.
+  bool bound = false;
 };
 
 /// OPT4001 driver class.
@@ -180,8 +183,9 @@ struct SettingsSnapshot {
 /// I2C transport with external serialization. Transport callbacks must not
 /// re-enter the same driver instance.
 ///
-/// Public methods that can perform I2C require a successful `begin()` unless
-/// explicitly documented otherwise. They return `Err::NOT_INITIALIZED` without
+/// Public methods that perform normal tracked I2C require a completed `begin()`
+/// or `startAttach()` unless explicitly documented otherwise. They return
+/// `Err::NOT_INITIALIZED` without
 /// touching the bus when the driver is `UNINIT`. When health state is `OFFLINE`,
 /// normal public I2C APIs return `Err::OFFLINE` without bus access; `recover()`,
 /// `softReset()`, and `resetAndReapply()` are the explicit recovery/reset
@@ -195,6 +199,15 @@ public:
   OPT4001& operator=(OPT4001&&) = delete;
 
   // === Lifecycle ===
+  /// Validate and cache transport/configuration without touching I2C. This is
+  /// the preferred first step for an application-owned single-transfer poller.
+  /// A successful bind leaves the driver uninitialized until `startAttach()`
+  /// completes (or legacy synchronous `begin()` is used).
+  Status bind(const Config& config);
+  /// Release the cached transport/configuration and all runtime state without
+  /// touching I2C. Unlike `end()`, this never attempts to power down hardware.
+  void unbind();
+  bool isBound() const { return _bound; }
   /// Initialize the driver, verify Device ID, and apply the supplied config.
   /// Config application writes multiple registers. If a later write fails after
   /// earlier writes reached hardware, `hardwareConfigDirty()` may be set even
@@ -211,8 +224,19 @@ public:
   void tick(uint32_t nowMs);
   /// Best-effort shutdown. Attempts a raw power-down write only when initialized
   /// and online, ignores that write status, then clears runtime state and moves
-  /// the driver to `UNINIT`.
+  /// the driver to `UNINIT`. The validated transport/configuration remains bound
+  /// for a later `startAttach()`; call `unbind()` for a bus-silent full release.
   void end();
+
+  /// Start a five-instruction attach job: one DEVICE_ID read followed by four
+  /// configuration writes. `poll(nowMs)` defaults to at most one transport
+  /// callback, allowing a sole bus-owner task to budget attachment precisely.
+  /// Call `bind()` first. Completion moves the driver to READY.
+  Status startAttach();
+
+  /// Explicit, error-reporting power down. Performs one tracked CONFIGURATION
+  /// write and updates the cached mode/runtime state only after success.
+  Status powerDown();
 
   bool isInitialized() const { return _initialized; }
   const Config& getConfig() const { return _config; }
@@ -305,6 +329,10 @@ public:
   /// Start a poll-chunked general-call reset plus cached-configuration reapply.
   /// The reset remains bus-wide; each reset/apply write is one instruction.
   Status startResetAndReapply();
+  /// Cancel an active poll-chunked job without touching I2C. Cancellation is
+  /// idempotent when idle. If confirmed configuration/reset writes may have
+  /// partially applied, the cache/hardware relationship is marked dirty.
+  Status cancelPollJob();
   /// Status-returning fresh-readiness check.
   /// Without configured INT evidence or prior-counter evidence this reads
   /// clear-on-read FLAGS, which also consumes latched threshold flags.
@@ -565,6 +593,7 @@ public:
 private:
   enum class PollJob : uint8_t {
     NONE,
+    ATTACH,
     READ_SAMPLE,
     READ_BURST,
     CONFIGURE_MEASUREMENT,
@@ -573,6 +602,7 @@ private:
 
   enum class PollStep : uint8_t {
     IDLE,
+    READ_DEVICE_ID,
     WAIT_READY,
     READ_FLAGS,
     READ_COUNTER,
@@ -646,6 +676,7 @@ private:
 
   // === State ===
   Config _config;
+  bool _bound = false;
   bool _initialized = false;
   DriverState _driverState = DriverState::UNINIT;
   bool _allowOfflineI2c = false;

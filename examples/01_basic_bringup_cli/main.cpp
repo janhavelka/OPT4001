@@ -3,7 +3,9 @@
 /// @note This is an EXAMPLE, not part of the library.
 
 #include <Arduino.h>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "examples/common/BoardConfig.h"
 #include "examples/common/BusDiag.h"
@@ -12,6 +14,8 @@
 #include "examples/common/I2cScanner.h"
 #include "examples/common/I2cTransport.h"
 #include "examples/common/CliStyle.h"
+#include "examples/common/CliShell.h"
+#include "examples/common/CliText.h"
 #include "examples/common/Log.h"
 
 #include "OPT4001/OPT4001.h"
@@ -57,9 +61,29 @@ struct WatchState {
 
 WatchState watchState;
 
+enum class StressPhase : uint8_t { START, READY, POLL, SLOT };
+
+struct StressState {
+  bool active = false;
+  bool mixed = false;
+  uint32_t total = 0;
+  uint32_t completed = 0;
+  uint32_t ok = 0;
+  uint32_t warn = 0;
+  uint32_t fail = 0;
+  uint32_t startMs = 0;
+  uint8_t operation = 0;
+  StressPhase phase = StressPhase::START;
+};
+
+StressState stressState;
+
 void printScale();
 void printWatchState();
 void finishWatch(bool cancelled);
+void serviceStress();
+void startStressSession(uint32_t count, bool mixed);
+void finishStress(bool cancelled);
 
 const char* errToStr(OPT4001::Err err) {
   return OPT4001::errorName(err);
@@ -197,7 +221,7 @@ const char* crcColor(bool crcValid) {
   return crcValid ? LOG_COLOR_GREEN : LOG_COLOR_YELLOW;
 }
 
-bool parseI32(const String& token, int32_t& out) {
+bool parseI32(const cli_shell::FixedText& token, int32_t& out) {
   char* end = nullptr;
   const long value = strtol(token.c_str(), &end, 0);
   if (end == token.c_str() || *end != '\0') {
@@ -207,7 +231,7 @@ bool parseI32(const String& token, int32_t& out) {
   return true;
 }
 
-bool parseU32(const String& token, uint32_t& out) {
+bool parseU32(const cli_shell::FixedText& token, uint32_t& out) {
   char* end = nullptr;
   const unsigned long value = strtoul(token.c_str(), &end, 0);
   if (end == token.c_str() || *end != '\0') {
@@ -217,7 +241,7 @@ bool parseU32(const String& token, uint32_t& out) {
   return true;
 }
 
-bool parseF32(const String& token, float& out) {
+bool parseF32(const cli_shell::FixedText& token, float& out) {
   char* end = nullptr;
   const float value = strtof(token.c_str(), &end);
   if (end == token.c_str() || *end != '\0') {
@@ -227,7 +251,15 @@ bool parseF32(const String& token, float& out) {
   return true;
 }
 
-bool parseBool01(const String& token, bool& out) {
+bool parseBool01(const cli_shell::FixedText& token, bool& out) {
+  if (token == "on" || token == "true") {
+    out = true;
+    return true;
+  }
+  if (token == "off" || token == "false") {
+    out = false;
+    return true;
+  }
   int32_t value = 0;
   if (!parseI32(token, value) || (value != 0 && value != 1)) {
     return false;
@@ -236,8 +268,8 @@ bool parseBool01(const String& token, bool& out) {
   return true;
 }
 
-bool parseRangeToken(const String& token, OPT4001::Range& out) {
-  String normalized = token;
+bool parseRangeToken(const cli_shell::FixedText& token, OPT4001::Range& out) {
+  cli_shell::FixedText normalized = token;
   normalized.trim();
   if (normalized == "auto") {
     out = OPT4001::Range::AUTO;
@@ -253,8 +285,8 @@ bool parseRangeToken(const String& token, OPT4001::Range& out) {
   return true;
 }
 
-bool parseStableModeToken(const String& token, OPT4001::Mode& out) {
-  String normalized = token;
+bool parseStableModeToken(const cli_shell::FixedText& token, OPT4001::Mode& out) {
+  cli_shell::FixedText normalized = token;
   normalized.trim();
   if (normalized == "cont" || normalized == "continuous") {
     out = OPT4001::Mode::CONTINUOUS;
@@ -267,12 +299,12 @@ bool parseStableModeToken(const String& token, OPT4001::Mode& out) {
   return false;
 }
 
-bool parseOptionalCountInterval(const String& args,
+bool parseOptionalCountInterval(const cli_shell::FixedText& args,
                                 int32_t defaultCount,
                                 uint32_t defaultIntervalMs,
                                 int32_t& countOut,
                                 uint32_t& intervalOut) {
-  String normalized = args;
+  cli_shell::FixedText normalized = args;
   normalized.trim();
   countOut = defaultCount;
   intervalOut = defaultIntervalMs;
@@ -358,6 +390,35 @@ OPT4001::Config makeDefaultConfig() {
     cfg.gpioRead = board::readIntPin;
   }
   return cfg;
+}
+
+void discoverOpt4001() {
+  Serial.println("OPT4001 protocol-qualified discovery (DEVICE_ID):");
+  bool found = false;
+  for (uint8_t address = OPT4001::cmd::I2C_ADDR_GND;
+       address <= OPT4001::cmd::I2C_ADDR_SDA;
+       ++address) {
+    OPT4001::Config cfg = makeDefaultConfig();
+    cfg.packageVariant = OPT4001::PackageVariant::SOT_5X3;
+    cfg.i2cAddress = address;
+    OPT4001::OPT4001 candidate;
+    OPT4001::Status st = candidate.bind(cfg);
+    if (st.ok()) {
+      st = candidate.probe();
+    }
+    if (st.ok()) {
+      found = true;
+      Serial.printf("  0x%02X: %sOPT4001%s (0x45 may be SOT-5X3 or PicoStar)\n",
+                    address, LOG_COLOR_GREEN, LOG_COLOR_RESET);
+    } else if (verboseMode) {
+      Serial.printf("  0x%02X: %s%s%s\n", address, LOG_COLOR_GRAY,
+                    errToStr(st.code), LOG_COLOR_RESET);
+    }
+  }
+  if (!found) {
+    Serial.printf("  %sNo qualified OPT4001 found%s\n", LOG_COLOR_YELLOW,
+                  LOG_COLOR_RESET);
+  }
 }
 
 void printStatus(const OPT4001::Status& st) {
@@ -829,6 +890,7 @@ void printSnapshot() {
   const uint32_t ageMs = snap.sampleTimestampMs > 0U ? (millis() - snap.sampleTimestampMs) : 0U;
 
   Serial.println("=== Cached Settings ===");
+  Serial.printf("  Bound: %s\n", log_bool_str(snap.bound));
   Serial.printf("  Initialized: %s\n", log_bool_str(snap.initialized));
   Serial.printf("  State: %s%s%s\n",
                 stateColor(snap.state, online, 0),
@@ -1221,6 +1283,9 @@ bool waitForFreshSampleReady(OPT4001::Mode mode) {
       return false;
     }
   }
+  if (stressState.active) {
+    finishStress(true);
+  }
 
   const uint32_t startMs = millis();
   for (uint32_t polls = 0; polls < 2000U; ++polls) {
@@ -1259,391 +1324,124 @@ bool blockingReadAndPrint(OPT4001::Mode mode) {
   return true;
 }
 
-void runStress(int32_t count) {
-  uint32_t okCount = 0;
-  uint32_t warnCount = 0;
-  uint32_t failCount = 0;
-  uint32_t counterGapCount = 0;
-  bool hasWarn = false;
-  bool hasFail = false;
-  bool haveSample = false;
-  bool havePrevCounter = false;
-  float minLux = 0.0f;
-  float maxLux = 0.0f;
-  uint32_t minAdc = 0U;
-  uint32_t maxAdc = 0U;
-  uint8_t prevCounter = 0U;
-  OPT4001::Status firstWarn = OPT4001::Status::Ok();
-  OPT4001::Status lastWarn = OPT4001::Status::Ok();
-  OPT4001::Status firstFail = OPT4001::Status::Ok();
-  OPT4001::Status lastFail = OPT4001::Status::Ok();
-  HealthSnapshot<OPT4001::OPT4001> before;
-  before.capture(device);
-  const uint32_t startMs = millis();
-
-  auto recordSampleStats = [&](const OPT4001::Sample& sample) {
-    if (!haveSample) {
-      haveSample = true;
-      minLux = sample.lux;
-      maxLux = sample.lux;
-      minAdc = sample.adcCodes;
-      maxAdc = sample.adcCodes;
-    } else {
-      if (sample.lux < minLux) minLux = sample.lux;
-      if (sample.lux > maxLux) maxLux = sample.lux;
-      if (sample.adcCodes < minAdc) minAdc = sample.adcCodes;
-      if (sample.adcCodes > maxAdc) maxAdc = sample.adcCodes;
-    }
-
-    if (havePrevCounter && device.sampleCounterDelta(prevCounter, sample.counter) != 1U) {
-      counterGapCount++;
-    }
-    prevCounter = sample.counter;
-    havePrevCounter = true;
-  };
-
-  for (int32_t i = 0; i < count; ++i) {
-    OPT4001::Sample sample;
-    OPT4001::Status st = device.readBlocking(sample, BLOCKING_READ_TIMEOUT_MS);
-    if (st.ok()) {
-      okCount++;
-      recordSampleStats(sample);
-      LOGV(verboseMode, "[%ld] lux=%.6f adc=%lu ctr=%u",
-           static_cast<long>(i + 1),
-           sample.lux,
-           static_cast<unsigned long>(sample.adcCodes),
-           sample.counter);
-    } else if (sampleStatusWarn(st)) {
-      warnCount++;
-      recordSampleStats(sample);
-      if (!hasWarn) {
-        firstWarn = st;
-        hasWarn = true;
-      }
-      lastWarn = st;
-      LOGV(verboseMode, "[%ld] CRC warning lux=%.6f adc=%lu ctr=%u",
-           static_cast<long>(i + 1),
-           sample.lux,
-           static_cast<unsigned long>(sample.adcCodes),
-           sample.counter);
-    } else {
-      failCount++;
-      if (!hasFail) {
-        firstFail = st;
-        hasFail = true;
-      }
-      lastFail = st;
-      if (verboseMode) {
-        printStatus(st);
-      }
-    }
-    printStressProgress(static_cast<uint32_t>(i + 1),
-                        static_cast<uint32_t>(count),
-                        okCount,
-                        warnCount,
-                        failCount);
+void finishStress(bool cancelled) {
+  if (!stressState.active) return;
+  const uint32_t elapsedMs = millis() - stressState.startMs;
+  if (device.pollBusy()) {
+    (void)device.cancelPollJob();
   }
+  stressState.active = false;
+  Serial.printf("=== %s summary%s ===\n",
+                stressState.mixed ? "stress_mix" : "stress",
+                cancelled ? " (cancelled)" : "");
+  Serial.printf("  completed=%lu/%lu ok=%s%lu%s warn=%s%lu%s fail=%s%lu%s elapsed=%lu ms\n",
+                static_cast<unsigned long>(stressState.completed),
+                static_cast<unsigned long>(stressState.total),
+                goodIfNonZeroColor(stressState.ok),
+                static_cast<unsigned long>(stressState.ok), LOG_COLOR_RESET,
+                warnCountColor(stressState.warn),
+                static_cast<unsigned long>(stressState.warn), LOG_COLOR_RESET,
+                goodIfZeroColor(stressState.fail),
+                static_cast<unsigned long>(stressState.fail), LOG_COLOR_RESET,
+                static_cast<unsigned long>(elapsedMs));
+  printDriverHealth();
+}
 
-  const uint32_t elapsedMs = millis() - startMs;
-  const uint32_t successLike = okCount + warnCount;
-  const float pct = (count > 0)
-                        ? (100.0f * static_cast<float>(successLike) / static_cast<float>(count))
-                        : 0.0f;
-  HealthSnapshot<OPT4001::OPT4001> after;
-  after.capture(device);
-
-  Serial.println("=== stress summary ===");
-  Serial.printf("  Results: %sok=%lu%s %swarn=%lu%s %sfail=%lu%s (%s%.2f%%%s success-like)\n",
-                goodIfNonZeroColor(okCount),
-                static_cast<unsigned long>(okCount),
-                LOG_COLOR_RESET,
-                warnCountColor(warnCount),
-                static_cast<unsigned long>(warnCount),
-                LOG_COLOR_RESET,
-                goodIfZeroColor(failCount),
-                static_cast<unsigned long>(failCount),
-                LOG_COLOR_RESET,
-                successRateColor(pct),
-                pct,
-                LOG_COLOR_RESET);
-  Serial.printf("  Duration: %lu ms\n", static_cast<unsigned long>(elapsedMs));
-  if (elapsedMs > 0U) {
-    Serial.printf("  Rate: %.2f ops/s\n",
-                  (1000.0f * static_cast<float>(count)) / static_cast<float>(elapsedMs));
+void recordStressStatus(const OPT4001::Status& st) {
+  if (st.ok()) {
+    ++stressState.ok;
+  } else if (sampleStatusWarn(st)) {
+    ++stressState.warn;
+  } else {
+    ++stressState.fail;
+    if (verboseMode) printStatus(st);
   }
-  if (haveSample) {
-    Serial.printf("  Lux range: %.6f .. %.6f lx\n", minLux, maxLux);
-    Serial.printf("  ADC range: %lu .. %lu\n",
-                  static_cast<unsigned long>(minAdc),
-                  static_cast<unsigned long>(maxAdc));
-    Serial.printf("  Counter gaps: %s%lu%s\n",
-                  warnCountColor(counterGapCount),
-                  static_cast<unsigned long>(counterGapCount),
-                  LOG_COLOR_RESET);
-  }
-  Serial.println("  Health changes:");
-  printHealthDiff(before, after);
-
-  if (hasWarn) {
-    Serial.println("  First warning:");
-    printStatus(firstWarn);
-    if (warnCount > 1U) {
-      Serial.println("  Last warning:");
-      printStatus(lastWarn);
-    }
-  }
-  if (hasFail) {
-    Serial.println("  First failure:");
-    printStatus(firstFail);
-    if (failCount > 1U) {
-      Serial.println("  Last failure:");
-      printStatus(lastFail);
-    }
+  ++stressState.completed;
+  printStressProgress(stressState.completed, stressState.total,
+                      stressState.ok, stressState.warn, stressState.fail);
+  stressState.phase = StressPhase::START;
+  if (stressState.completed >= stressState.total) {
+    finishStress(false);
   }
 }
 
-void runStressMix(int32_t count) {
-  struct OpStats {
-    const char* name;
-    uint32_t ok;
-    uint32_t warn;
-    uint32_t fail;
-  };
+void startStressSession(uint32_t count, bool mixed) {
+  if (!device.isInitialized() || count == 0U || count > 10000U) {
+    LOGW("Stress requires initialized driver and count 1..10000");
+    return;
+  }
+  if (stressState.active) finishStress(true);
+  if (watchState.active) finishWatch(true);
+  stressState = {};
+  stressState.active = true;
+  stressState.mixed = mixed;
+  stressState.total = count;
+  stressState.startMs = millis();
+  LOGI("%s started: %lu finite operations, cooperative one-callback service budget",
+       mixed ? "stress_mix" : "stress", static_cast<unsigned long>(count));
+}
 
-  OpStats stats[] = {
-    {"readBlocking", 0U, 0U, 0U},
-    {"readBurst", 0U, 0U, 0U},
-    {"readSlot0", 0U, 0U, 0U},
-    {"readConfig", 0U, 0U, 0U},
-    {"readIntCfg", 0U, 0U, 0U},
-    {"readDeviceId", 0U, 0U, 0U},
-    {"readFlagsRaw", 0U, 0U, 0U},
-    {"probe", 0U, 0U, 0U},
-  };
+void serviceStress() {
+  if (!stressState.active) return;
 
-  uint32_t okCount = 0;
-  uint32_t warnCount = 0;
-  uint32_t failCount = 0;
-  uint32_t probeSideEffectCount = 0;
-  bool hasWarn = false;
-  bool hasFail = false;
-  bool haveSample = false;
-  bool havePrevCounter = false;
-  float minLux = 0.0f;
-  float maxLux = 0.0f;
-  uint32_t counterGapCount = 0;
-  uint8_t prevCounter = 0U;
-  OPT4001::Status firstWarn = OPT4001::Status::Ok();
-  OPT4001::Status lastWarn = OPT4001::Status::Ok();
-  OPT4001::Status firstFail = OPT4001::Status::Ok();
-  OPT4001::Status lastFail = OPT4001::Status::Ok();
-  HealthSnapshot<OPT4001::OPT4001> before;
-  before.capture(device);
-  const uint32_t startMs = millis();
-  const size_t opCount = sizeof(stats) / sizeof(stats[0]);
+  if (stressState.phase == StressPhase::READY) {
+    bool ready = false;
+    const OPT4001::Status st = device.conversionReady(ready);
+    if (!st.ok()) {
+      recordStressStatus(st);
+    } else if (ready) {
+      stressState.phase = StressPhase::SLOT;
+    }
+    return;
+  }
 
-  auto record = [&](size_t idx, const OPT4001::Status& st) {
-    if (st.ok()) {
-      stats[idx].ok++;
-      okCount++;
+  if (stressState.phase == StressPhase::POLL) {
+    const OPT4001::Status st = device.poll(millis(), 1);
+    if (st.inProgress()) return;
+    recordStressStatus(st);
+    return;
+  }
+
+  if (stressState.phase == StressPhase::SLOT) {
+    OPT4001::Sample sample{};
+    recordStressStatus(device.readSampleSlot(0U, sample));
+    return;
+  }
+
+  stressState.operation = stressState.mixed
+                              ? static_cast<uint8_t>(stressState.completed % 8U)
+                              : 0U;
+  if (stressState.operation <= 2U) {
+    OPT4001::Status st = device.startConversion(OPT4001::Mode::ONE_SHOT);
+    if (!conversionStartAccepted(st)) {
+      recordStressStatus(st);
       return;
     }
-    if (sampleStatusWarn(st)) {
-      stats[idx].warn++;
-      warnCount++;
-      if (!hasWarn) {
-        firstWarn = st;
-        hasWarn = true;
-      }
-      lastWarn = st;
+    if (stressState.operation == 2U) {
+      stressState.phase = StressPhase::READY;
       return;
     }
-    stats[idx].fail++;
-    failCount++;
-    if (!hasFail) {
-      firstFail = st;
-      hasFail = true;
+    st = stressState.operation == 1U ? device.startReadBurst()
+                                     : device.startReadSample();
+    if (!st.inProgress()) {
+      recordStressStatus(st);
+      return;
     }
-    lastFail = st;
-  };
-
-  auto recordSampleStats = [&](const OPT4001::Sample& sample) {
-    if (!haveSample) {
-      haveSample = true;
-      minLux = sample.lux;
-      maxLux = sample.lux;
-    } else {
-      if (sample.lux < minLux) minLux = sample.lux;
-      if (sample.lux > maxLux) maxLux = sample.lux;
-    }
-
-    if (havePrevCounter && device.sampleCounterDelta(prevCounter, sample.counter) != 1U) {
-      counterGapCount++;
-    }
-    prevCounter = sample.counter;
-    havePrevCounter = true;
-  };
-
-  for (int32_t i = 0; i < count; ++i) {
-    const size_t op = static_cast<size_t>(i) % opCount;
-    OPT4001::Status st = OPT4001::Status::Ok();
-
-    switch (op) {
-      case 0: {
-        OPT4001::Sample sample;
-        st = device.readBlocking(sample, BLOCKING_READ_TIMEOUT_MS);
-        if (sampleStatusHasData(st)) {
-          recordSampleStats(sample);
-        }
-        break;
-      }
-      case 1: {
-        OPT4001::BurstFrame frame;
-        st = waitForFreshSampleReady(OPT4001::Mode::ONE_SHOT)
-                 ? device.readBurst(frame)
-                 : OPT4001::Status::Error(
-                       OPT4001::Err::TIMEOUT, "Burst readiness failed");
-        if (sampleStatusHasData(st)) {
-          recordSampleStats(frame.newest);
-        }
-        break;
-      }
-      case 2: {
-        OPT4001::Sample sample;
-        st = waitForFreshSampleReady(OPT4001::Mode::ONE_SHOT)
-                 ? device.readSampleSlot(0, sample)
-                 : OPT4001::Status::Error(
-                       OPT4001::Err::TIMEOUT, "Slot readiness failed");
-        if (sampleStatusHasData(st)) {
-          recordSampleStats(sample);
-        }
-        break;
-      }
-      case 3: {
-        OPT4001::ConfigurationInfo info;
-        st = device.readConfiguration(info);
-        break;
-      }
-      case 4: {
-        OPT4001::IntConfigurationInfo info;
-        st = device.readIntConfiguration(info);
-        break;
-      }
-      case 5: {
-        OPT4001::DeviceIdInfo info;
-        st = device.readDeviceId(info);
-        break;
-      }
-      case 6: {
-        uint16_t raw = 0;
-        st = device.readFlagsRaw(raw);
-        break;
-      }
-      case 7: {
-        HealthSnapshot<OPT4001::OPT4001> probeBefore;
-        probeBefore.capture(device);
-        st = device.probe();
-        HealthSnapshot<OPT4001::OPT4001> probeAfter;
-        probeAfter.capture(device);
-        if (probeBefore.state != probeAfter.state ||
-            probeBefore.online != probeAfter.online ||
-            probeBefore.consecutiveFailures != probeAfter.consecutiveFailures ||
-            probeBefore.totalFailures != probeAfter.totalFailures ||
-            probeBefore.totalSuccess != probeAfter.totalSuccess) {
-          probeSideEffectCount++;
-          LOGV(verboseMode, "[%ld] probe changed tracked health unexpectedly",
-               static_cast<long>(i + 1));
-        }
-        break;
-      }
-      default:
-        break;
-    }
-
-    record(op, st);
-    if (!st.ok() && verboseMode) {
-      LOGV(verboseMode, "[%ld] %s -> %s",
-           static_cast<long>(i + 1),
-           stats[op].name,
-           errToStr(st.code));
-    }
-    printStressProgress(static_cast<uint32_t>(i + 1),
-                        static_cast<uint32_t>(count),
-                        okCount,
-                        warnCount,
-                        failCount);
+    stressState.phase = StressPhase::POLL;
+    return;
   }
 
-  const uint32_t elapsedMs = millis() - startMs;
-  const uint32_t successLike = okCount + warnCount;
-  const float pct = (count > 0)
-                        ? (100.0f * static_cast<float>(successLike) / static_cast<float>(count))
-                        : 0.0f;
-  HealthSnapshot<OPT4001::OPT4001> after;
-  after.capture(device);
-
-  Serial.println("=== stress_mix summary ===");
-  Serial.printf("  Total: %sok=%lu%s %swarn=%lu%s %sfail=%lu%s (%s%.2f%%%s success-like)\n",
-                goodIfNonZeroColor(okCount),
-                static_cast<unsigned long>(okCount),
-                LOG_COLOR_RESET,
-                warnCountColor(warnCount),
-                static_cast<unsigned long>(warnCount),
-                LOG_COLOR_RESET,
-                goodIfZeroColor(failCount),
-                static_cast<unsigned long>(failCount),
-                LOG_COLOR_RESET,
-                successRateColor(pct),
-                pct,
-                LOG_COLOR_RESET);
-  Serial.printf("  Duration: %lu ms\n", static_cast<unsigned long>(elapsedMs));
-  if (elapsedMs > 0U) {
-    Serial.printf("  Rate: %.2f ops/s\n",
-                  (1000.0f * static_cast<float>(count)) / static_cast<float>(elapsedMs));
+  OPT4001::Status st = OPT4001::Status::Ok();
+  switch (stressState.operation) {
+    case 3: { OPT4001::ConfigurationInfo info{}; st = device.readConfiguration(info); break; }
+    case 4: { OPT4001::IntConfigurationInfo info{}; st = device.readIntConfiguration(info); break; }
+    case 5: { OPT4001::DeviceIdInfo info{}; st = device.readDeviceId(info); break; }
+    case 6: { uint16_t raw = 0; st = device.readFlagsRaw(raw); break; }
+    case 7: st = device.probe(); break;
+    default: st = OPT4001::Status::Error(OPT4001::Err::INVALID_PARAM,
+                                         "Invalid stress operation"); break;
   }
-  if (haveSample) {
-    Serial.printf("  Sample lux range: %.6f .. %.6f lx\n", minLux, maxLux);
-    Serial.printf("  Sample counter gaps: %s%lu%s\n",
-                  warnCountColor(counterGapCount),
-                  static_cast<unsigned long>(counterGapCount),
-                  LOG_COLOR_RESET);
-  }
-  Serial.printf("  Probe side effects: %s%lu%s\n",
-                goodIfZeroColor(probeSideEffectCount),
-                static_cast<unsigned long>(probeSideEffectCount),
-                LOG_COLOR_RESET);
-  for (size_t i = 0; i < opCount; ++i) {
-    Serial.printf("  %-12s %sok=%lu%s %swarn=%lu%s %sfail=%lu%s\n",
-                  stats[i].name,
-                  goodIfNonZeroColor(stats[i].ok),
-                  static_cast<unsigned long>(stats[i].ok),
-                  LOG_COLOR_RESET,
-                  warnCountColor(stats[i].warn),
-                  static_cast<unsigned long>(stats[i].warn),
-                  LOG_COLOR_RESET,
-                  goodIfZeroColor(stats[i].fail),
-                  static_cast<unsigned long>(stats[i].fail),
-                  LOG_COLOR_RESET);
-  }
-  Serial.println("  Health changes:");
-  printHealthDiff(before, after);
-
-  if (hasWarn) {
-    Serial.println("  First warning:");
-    printStatus(firstWarn);
-    if (warnCount > 1U) {
-      Serial.println("  Last warning:");
-      printStatus(lastWarn);
-    }
-  }
-  if (hasFail) {
-    Serial.println("  First failure:");
-    printStatus(firstFail);
-    if (failCount > 1U) {
-      Serial.println("  Last failure:");
-      printStatus(lastFail);
-    }
-  }
+  recordStressStatus(st);
 }
 
 void runSelfTest() {
@@ -1679,7 +1477,7 @@ void runSelfTest() {
     report(name, SelftestOutcome::SKIP, note);
   };
 
-  Serial.println("=== OPT4001 selftest (safe commands) ===");
+  Serial.println("=== OPT4001 selfcheck (bounded diagnostics; FLAGS/read/recover may affect hardware state) ===");
 
   const uint32_t succBefore = device.totalSuccess();
   const uint32_t failBefore = device.totalFailures();
@@ -1688,8 +1486,8 @@ void runSelfTest() {
   const OPT4001::Status pst = device.probe();
   if (pst.code == OPT4001::Err::NOT_INITIALIZED) {
     reportSkip("probe responds", "driver not initialized");
-    reportSkip("remaining checks", "selftest aborted");
-    Serial.printf("Selftest result: pass=%s%lu%s fail=%s%lu%s skip=%s%lu%s\n",
+    reportSkip("remaining checks", "selfcheck aborted");
+    Serial.printf("Selfcheck result: pass=%s%lu%s fail=%s%lu%s skip=%s%lu%s\n",
                   goodIfNonZeroColor(stats.pass), static_cast<unsigned long>(stats.pass), LOG_COLOR_RESET,
                   goodIfZeroColor(stats.fail), static_cast<unsigned long>(stats.fail), LOG_COLOR_RESET,
                   skipCountColor(stats.skip), static_cast<unsigned long>(stats.skip), LOG_COLOR_RESET);
@@ -1905,10 +1703,28 @@ void runSelfTest() {
   reportCheck("recover", st.ok(), st.ok() ? "" : errToStr(st.code));
   reportCheck("isOnline", device.isOnline(), "");
 
-  Serial.printf("Selftest result: pass=%s%lu%s fail=%s%lu%s skip=%s%lu%s\n",
+  Serial.printf("Selfcheck result: pass=%s%lu%s fail=%s%lu%s skip=%s%lu%s\n",
                 goodIfNonZeroColor(stats.pass), static_cast<unsigned long>(stats.pass), LOG_COLOR_RESET,
                 goodIfZeroColor(stats.fail), static_cast<unsigned long>(stats.fail), LOG_COLOR_RESET,
                 skipCountColor(stats.skip), static_cast<unsigned long>(stats.skip), LOG_COLOR_RESET);
+}
+
+void printPollJobStatus() {
+  Serial.printf("  Poll job: %s status=%s\n",
+                device.pollBusy() ? "ACTIVE" : "IDLE",
+                errToStr(device.lastPollStatus().code));
+}
+
+void printPollJobResult() {
+  printStatus(device.lastPollStatus());
+  OPT4001::Sample sample{};
+  if (device.getLastSample(sample).ok()) {
+    printSample(sample);
+  }
+  OPT4001::BurstFrame frame{};
+  if (device.getLastBurst(frame).ok()) {
+    printBurstFrame(frame);
+  }
 }
 
 void printHelp() {
@@ -1919,10 +1735,15 @@ void printHelp() {
   cli::printHelpItem("help / ?", "Show this help");
   cli::printHelpItem("version / ver", "Print firmware and library version info");
   cli::printHelpItem("scan", "Scan I2C bus");
+  cli::printHelpItem("discover", "Probe legal addresses and validate DEVICE_ID");
   cli::printHelpItem("init / begin", "Initialize/reinitialize device");
   cli::printHelpItem("end", "Shut down driver (returns to UNINIT)");
+  cli::printHelpItem("bind / unbind", "Bus-silent cache bind or release");
+  cli::printHelpItem("attach", "Start five-step poll-chunked attach");
+  cli::printHelpItem("powerdown", "Error-reporting one-write power down");
   cli::printHelpItem("addr [0x44|0x45|0x46]", "Show or set target I2C address");
   cli::printHelpItem("pkg [pico|sot]", "Show or set package variant");
+  cli::printHelpItem("color [0|1|off|on]", "Toggle ANSI color output");
 
   cli::printHelpSection("Data");
   cli::printHelpItem("read", "Blocking one-shot read");
@@ -1934,7 +1755,13 @@ void printHelp() {
   cli::printHelpItem("poll / drdy / ready", "Check conversion ready");
   cli::printHelpItem("watch [N] [interval]", "Stream samples using current mode");
   cli::printHelpItem("watch force [N] [interval]", "Repeat forced-auto one-shots");
-  cli::printHelpItem("stop", "Stop active watch session");
+  cli::printHelpItem("stop", "Stop active watch/stress session");
+  cli::printHelpItem("job", "Show active poll-job state");
+  cli::printHelpItem("job sample|burst", "Start poll-chunked fresh read job");
+  cli::printHelpItem("job measure <r> <ct> <m> [qw]", "Start four-write config job");
+  cli::printHelpItem("job reset confirm", "Start bus-wide reset/reapply job");
+  cli::printHelpItem("job poll [1..16]", "Poll job; default 1 is owner-fair, >1 batches diagnostics");
+  cli::printHelpItem("job result|cancel", "Show cached result or cancel without I2C");
   cli::printHelpItem("readburst [force]", "Read RESULT plus FIFO history");
   cli::printHelpItem("slot <0..3>", "Read one history slot (0=newest)");
   cli::printHelpItem("sample / sampleage", "Cached sample and age");
@@ -1990,13 +1817,13 @@ void printHelp() {
   cli::printHelpItem("resetreapply", "General-call reset + re-apply");
   cli::printHelpItem("healthmon [0|1] [interval]", "Toggle health monitor (0=change-only)");
   cli::printHelpItem("verbose [0|1]", "Enable/disable verbose output");
-  cli::printHelpItem("stress [N]", "Run blocking read stress");
-  cli::printHelpItem("stress_mix [N]", "Run mixed-operation stress");
-  cli::printHelpItem("selftest", "Run safe command self-test report");
+  cli::printHelpItem("stress [N]", "Run finite cooperative sample stress");
+  cli::printHelpItem("stress_mix [N]", "Run finite cooperative mixed-operation stress");
+  cli::printHelpItem("selfcheck / selftest", "Bounded identity/config/sample/recovery checks");
 }
 
-void processCommand(const String& cmdLine) {
-  String cmd = cmdLine;
+void processCommand(const cli_shell::FixedText& cmdLine) {
+  cli_shell::FixedText cmd = cmdLine;
   cmd.trim();
   if (cmd.length() == 0) {
     return;
@@ -2004,7 +1831,92 @@ void processCommand(const String& cmdLine) {
 
   if (cmd == "help" || cmd == "?") { printHelp(); return; }
   if (cmd == "version" || cmd == "ver") { printVersionInfo(); return; }
+  if (cmd == "color") {
+    Serial.printf("  Color: %s\n", log_color_enabled() ? "ON" : "OFF");
+    return;
+  }
+  if (cmd.startsWith("color ")) {
+    bool enabled = false;
+    if (!parseBool01(cmd.substring(6), enabled)) {
+      LOGW("Usage: color [0|1|off|on]");
+      return;
+    }
+    log_set_color_enabled(enabled);
+    Serial.printf("  Color: %s\n", enabled ? "ON" : "OFF");
+    return;
+  }
   if (cmd == "scan") { bus_diag::scan(); return; }
+  if (cmd == "discover") { discoverOpt4001(); return; }
+  if (cmd == "bind") {
+    if (watchState.active) finishWatch(true);
+    if (stressState.active) finishStress(true);
+    printStatus(device.bind(makeDefaultConfig()));
+    return;
+  }
+  if (cmd == "unbind") {
+    if (watchState.active) finishWatch(true);
+    if (stressState.active) finishStress(true);
+    device.unbind();
+    LOGI("Driver transport released without I2C");
+    return;
+  }
+  if (cmd == "attach") {
+    printStatus(device.startAttach());
+    return;
+  }
+  if (cmd == "powerdown") {
+    printStatus(device.powerDown());
+    return;
+  }
+  if (cmd == "job") { printPollJobStatus(); return; }
+  if (cmd == "job sample") { printStatus(device.startReadSample()); return; }
+  if (cmd == "job burst") { printStatus(device.startReadBurst()); return; }
+  if (cmd == "job result") { printPollJobResult(); return; }
+  if (cmd == "job cancel") { printStatus(device.cancelPollJob()); return; }
+  if (cmd == "job reset confirm") {
+    LOGW("Starting bus-wide general-call reset/reapply poll job");
+    printStatus(device.startResetAndReapply());
+    return;
+  }
+  if (cmd.startsWith("job poll")) {
+    uint32_t budget = 1U;
+    if (cmd.length() > 8U &&
+        (!parseU32(cmd.substring(9), budget) || budget == 0U || budget > 16U)) {
+      LOGW("Usage: job poll [1..16]");
+      return;
+    }
+    printStatus(device.poll(millis(), static_cast<uint8_t>(budget)));
+    return;
+  }
+  if (cmd.startsWith("job measure ")) {
+    char rangeToken[16]{};
+    char modeToken[16]{};
+    unsigned ctime = 0U;
+    unsigned quickWake = device.getQuickWake() ? 1U : 0U;
+    const int parsed = std::sscanf(cmd.c_str() + 12, "%15s %u %15s %u",
+                                   rangeToken, &ctime, modeToken, &quickWake);
+    uint32_t rangeValue = 12U;
+    const bool rangeOk = std::strcmp(rangeToken, "auto") == 0 ||
+        (parseU32(cli_shell::FixedText(rangeToken), rangeValue) &&
+         rangeValue <= 8U);
+    const bool modeContinuous = std::strcmp(modeToken, "cont") == 0 ||
+                                std::strcmp(modeToken, "continuous") == 0;
+    const bool modePower = std::strcmp(modeToken, "power") == 0 ||
+                           std::strcmp(modeToken, "pd") == 0;
+    if (parsed < 3 || parsed > 4 || !rangeOk || ctime > 11U ||
+        (!modeContinuous && !modePower) || quickWake > 1U) {
+      LOGW("Usage: job measure <0..8|auto> <ctime0..11> <power|cont> [qw0|1]");
+      return;
+    }
+    printStatus(device.startConfigureMeasurement(
+        rangeValue == 12U ? OPT4001::Range::AUTO
+                          : static_cast<OPT4001::Range>(rangeValue),
+        static_cast<OPT4001::ConversionTime>(ctime),
+        modeContinuous ? OPT4001::Mode::CONTINUOUS
+                       : OPT4001::Mode::POWER_DOWN,
+        quickWake != 0U));
+    return;
+  }
   if (cmd == "init" || cmd == "begin") {
     LOGI("Initializing OPT4001...");
     if (watchState.active) {
@@ -2044,7 +1956,7 @@ void processCommand(const String& cmdLine) {
   }
   if (cmd == "pkg") { printAddressInfo(); return; }
   if (cmd.startsWith("pkg ")) {
-    String token = cmd.substring(4);
+    cli_shell::FixedText token = cmd.substring(4);
     token.trim();
     OPT4001::PackageVariant variant =
         (token == "pico" || token == "picostar") ? OPT4001::PackageVariant::PICOSTAR :
@@ -2243,11 +2155,13 @@ void processCommand(const String& cmdLine) {
     return;
   }
   if (cmd == "stop") {
-    if (!watchState.active) {
-      LOGW("Watch not active.");
+    if (!watchState.active && !stressState.active && !device.pollBusy()) {
+      LOGW("No watch, stress, or poll job is active.");
       return;
     }
-    finishWatch(true);
+    if (watchState.active) finishWatch(true);
+    if (stressState.active) finishStress(true);
+    if (device.pollBusy()) printStatus(device.cancelPollJob());
     return;
   }
   if (cmd == "watch force" || cmd.startsWith("watch force ")) {
@@ -2390,7 +2304,7 @@ void processCommand(const String& cmdLine) {
     return;
   }
   if (cmd.startsWith("raw2lux ")) {
-    String args = cmd.substring(8);
+    cli_shell::FixedText args = cmd.substring(8);
     args.trim();
     const int split = args.indexOf(' ');
     uint32_t exponent = 0;
@@ -2409,7 +2323,7 @@ void processCommand(const String& cmdLine) {
   if (cmd == "scale" || cmd == "timing") { printScale(); return; }
   if (cmd == "mode") { Serial.printf("  Mode: %s\n", modeToStr(device.getMode())); return; }
   if (cmd.startsWith("mode ")) {
-    String token = cmd.substring(5);
+    cli_shell::FixedText token = cmd.substring(5);
     token.trim();
     OPT4001::Status st =
         (token == "cont" || token == "continuous")
@@ -2431,7 +2345,7 @@ void processCommand(const String& cmdLine) {
     return;
   }
   if (cmd.startsWith("range ")) {
-    String token = cmd.substring(6);
+    cli_shell::FixedText token = cmd.substring(6);
     token.trim();
     OPT4001::Range range = OPT4001::Range::AUTO;
     if (token != "auto") {
@@ -2472,9 +2386,9 @@ void processCommand(const String& cmdLine) {
     return;
   }
   if (cmd.startsWith("measure ")) {
-    String args = cmd.substring(8);
+    cli_shell::FixedText args = cmd.substring(8);
     args.trim();
-    String parts[4];
+    cli_shell::FixedText parts[4];
     int count = 0;
     bool tooManyTokens = false;
     while (args.length() > 0) {
@@ -2593,7 +2507,7 @@ void processCommand(const String& cmdLine) {
     return;
   }
   if (cmd.startsWith("threshold raw ")) {
-    String args = cmd.substring(14);
+    cli_shell::FixedText args = cmd.substring(14);
     args.trim();
     const int split = args.indexOf(' ');
     uint32_t lowRaw = 0;
@@ -2615,7 +2529,7 @@ void processCommand(const String& cmdLine) {
     return;
   }
   if (cmd.startsWith("threshold ")) {
-    String args = cmd.substring(10);
+    cli_shell::FixedText args = cmd.substring(10);
     args.trim();
     const int split = args.indexOf(' ');
     if (split < 0) {
@@ -2669,7 +2583,7 @@ void processCommand(const String& cmdLine) {
     return;
   }
   if (cmd.startsWith("int pol ")) {
-    String token = cmd.substring(8);
+    cli_shell::FixedText token = cmd.substring(8);
     token.trim();
     OPT4001::Status st =
         (token == "low")
@@ -2684,7 +2598,7 @@ void processCommand(const String& cmdLine) {
     return;
   }
   if (cmd.startsWith("int faults ")) {
-    String token = cmd.substring(11);
+    cli_shell::FixedText token = cmd.substring(11);
     token.trim();
     OPT4001::FaultCount faults =
         (token == "1") ? OPT4001::FaultCount::FAULTS_1 :
@@ -2723,7 +2637,7 @@ void processCommand(const String& cmdLine) {
     return;
   }
   if (cmd.startsWith("int th ")) {
-    String args = cmd.substring(7);
+    cli_shell::FixedText args = cmd.substring(7);
     args.trim();
     const int split = args.indexOf(' ');
     float low = 0.0f;
@@ -2743,7 +2657,7 @@ void processCommand(const String& cmdLine) {
     return;
   }
   if (cmd.startsWith("int dir ")) {
-    String token = cmd.substring(8);
+    cli_shell::FixedText token = cmd.substring(8);
     token.trim();
     OPT4001::IntDirection direction =
         (token == "in" || token == "input") ? OPT4001::IntDirection::PIN_INPUT :
@@ -2762,7 +2676,7 @@ void processCommand(const String& cmdLine) {
     return;
   }
   if (cmd.startsWith("int cfg ")) {
-    String token = cmd.substring(8);
+    cli_shell::FixedText token = cmd.substring(8);
     token.trim();
     OPT4001::IntConfig config =
         (token == "threshold" || token == "thresh") ? OPT4001::IntConfig::THRESHOLD :
@@ -2817,7 +2731,7 @@ void processCommand(const String& cmdLine) {
     return;
   }
   if (cmd.startsWith("regs ")) {
-    String args = cmd.substring(5);
+    cli_shell::FixedText args = cmd.substring(5);
     args.trim();
     const int split = args.indexOf(' ');
     uint32_t start = 0;
@@ -2844,7 +2758,7 @@ void processCommand(const String& cmdLine) {
     return;
   }
   if (cmd.startsWith("wreg ")) {
-    String args = cmd.substring(5);
+    cli_shell::FixedText args = cmd.substring(5);
     args.trim();
     const int split = args.indexOf(' ');
     uint32_t addr = 0;
@@ -2864,7 +2778,7 @@ void processCommand(const String& cmdLine) {
     return;
   }
   if (cmd.startsWith("healthmon ")) {
-    String args = cmd.substring(10);
+    cli_shell::FixedText args = cmd.substring(10);
     args.trim();
     const int split = args.indexOf(' ');
     bool enable = false;
@@ -2904,25 +2818,25 @@ void processCommand(const String& cmdLine) {
     LOGI("Verbose mode: %s%s%s", onOffColor(verboseMode), verboseMode ? "ON" : "OFF", LOG_COLOR_RESET);
     return;
   }
-  if (cmd == "selftest") { runSelfTest(); return; }
-  if (cmd == "stress_mix") { runStressMix(50); return; }
+  if (cmd == "selfcheck" || cmd == "selftest") { runSelfTest(); return; }
+  if (cmd == "stress_mix") { startStressSession(50U, true); return; }
   if (cmd.startsWith("stress_mix ")) {
     int32_t count = 0;
-    if (!parseI32(cmd.substring(11), count) || count <= 0 || count > 100000) {
-      LOGW("Invalid count (1-100000)");
+    if (!parseI32(cmd.substring(11), count) || count <= 0 || count > 10000) {
+      LOGW("Invalid count (1-10000)");
       return;
     }
-    runStressMix(count);
+    startStressSession(static_cast<uint32_t>(count), true);
     return;
   }
-  if (cmd == "stress") { runStress(10); return; }
+  if (cmd == "stress") { startStressSession(10U, false); return; }
   if (cmd.startsWith("stress ")) {
     int32_t count = 0;
-    if (!parseI32(cmd.substring(7), count) || count <= 0 || count > 100000) {
-      LOGW("Invalid count (1-100000)");
+    if (!parseI32(cmd.substring(7), count) || count <= 0 || count > 10000) {
+      LOGW("Invalid count (1-10000)");
       return;
     }
-    runStress(count);
+    startStressSession(static_cast<uint32_t>(count), false);
     return;
   }
   LOGW("Unknown command: %s", cmd.c_str());
@@ -2964,18 +2878,17 @@ void loop() {
     healthMonitor.tick(device);
   }
   handleWatch();
-  static String inputBuffer;
-  static constexpr size_t kMaxInputLen = 128;
-  while (Serial.available()) {
-    const char c = static_cast<char>(Serial.read());
-    if (c == '\n' || c == '\r') {
-      if (inputBuffer.length() > 0) {
-        processCommand(inputBuffer);
-        inputBuffer = "";
-        cli::printPrompt();
-      }
-    } else if (inputBuffer.length() < kMaxInputLen) {
-      inputBuffer += c;
-    }
+  serviceStress();
+  static char input[cli_shell::FixedLineBuffer::CAPACITY]{};
+  const cli_shell::LineResult lineResult = cli_shell::readLine(input, sizeof(input));
+  if (lineResult == cli_shell::LineResult::READY) {
+    processCommand(cli_shell::FixedText(input));
+    cli::printPrompt();
+  } else if (lineResult == cli_shell::LineResult::TOO_LONG) {
+    LOGW("Command too long; complete line discarded");
+    cli::printPrompt();
+  } else if (lineResult == cli_shell::LineResult::OUTPUT_TOO_SMALL) {
+    LOGE("CLI output buffer too small");
+    cli::printPrompt();
   }
 }

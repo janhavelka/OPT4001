@@ -9,7 +9,8 @@ in `examples/esp_idf/basic` is a native IDF application, not an Arduino wrapper.
 - I2C: `driver/i2c_master.h` with `i2c_new_master_bus()`,
   `i2c_master_bus_add_device()`, `i2c_master_probe()`,
   `i2c_master_transmit()`, and `i2c_master_transmit_receive()`.
-- CLI input: fixed C buffer using `getchar()`.
+- CLI input: the shared fixed 192-byte line accumulator using `getchar()`;
+  overlong commands are discarded completely through the next line ending.
 - CLI polling: stdin is configured with `O_NONBLOCK` so idle diagnostic input
   does not intentionally stall the driver's periodic `tick()` call.
 - Timing/yield: `esp_timer_get_time()` and FreeRTOS task APIs through example
@@ -21,6 +22,13 @@ in `examples/esp_idf/basic` is a native IDF application, not an Arduino wrapper.
 The driver core remains framework-neutral. Hardware access is injected through
 `Config::i2cWrite`, `Config::i2cWriteRead`, optional `Config::gpioRead`,
 `Config::nowMs`, and `Config::cooperativeYield`.
+
+For a single-I2C-owner task, call bus-silent `bind()`, start `startAttach()`,
+then call `poll(nowMs, 1)` from the owner loop. The default instruction budget
+performs at most one transport callback per poll. The same job mechanism covers
+sample, FIFO burst, configuration, and reset/reapply work; `cancelPollJob()` is
+bus-silent. Driver instances require caller serialization and callbacks must
+not re-enter the same instance.
 
 ## Component Use
 
@@ -55,6 +63,9 @@ The example adapter preserves `esp_err_t` in `Status::detail`.
 `probe()` reads the full `DEVICE_ID` register pattern through this transport. A
 successful I2C read with an unexpected ID returns `DEVICE_ID_MISMATCH`; timeout,
 bus, and generic transaction failures are preserved as transport statuses.
+The example `scan` command reports ACKs only; `discover` creates bounded
+candidate handles for legal OPT4001 addresses and qualifies each response by
+DEVICE_ID before reporting a sensor.
 
 ## Example Contracts
 

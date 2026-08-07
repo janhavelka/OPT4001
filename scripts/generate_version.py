@@ -366,6 +366,43 @@ def _expected_outputs(project_root: Path) -> Dict[Path, str]:
         namespace_dir / "Version.h": _render_version_header(namespace, version),
     }
 
+    def replace_required(path: Path, pattern: str, replacement: str) -> str:
+        updated, count = re.subn(
+            pattern,
+            replacement,
+            _read_text(path),
+            count=1,
+            flags=re.MULTILINE,
+        )
+        if count != 1:
+            raise RuntimeError(f"Version metadata pattern missing from {path}")
+        return updated
+
+    idf_component = project_root / "idf_component.yml"
+    if idf_component.exists():
+        outputs[idf_component] = replace_required(
+            idf_component,
+            r'^version:\s*"[^"]+"\s*$',
+            f'version: "{version}"',
+        )
+
+    doxyfile = project_root / "Doxyfile"
+    if doxyfile.exists():
+        outputs[doxyfile] = replace_required(
+            doxyfile,
+            r'^PROJECT_NUMBER\s*=\s*"[^"]+"\s*$',
+            f'PROJECT_NUMBER         = "{version}"',
+        )
+
+    security = project_root / "SECURITY.md"
+    if security.exists():
+        major, minor, _ = _parse_semver(version)
+        outputs[security] = replace_required(
+            security,
+            r'^\|\s*\d+\.\d+\.x\s*\|\s*:white_check_mark:\s*\|$',
+            f'| {major}.{minor}.x   | :white_check_mark: |',
+        )
+
     dependency_header = _render_dependency_versions_header(project_root, namespace)
     if dependency_header is not None:
         outputs[namespace_dir / "DependencyVersions.h"] = dependency_header

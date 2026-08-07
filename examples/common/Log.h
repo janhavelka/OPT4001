@@ -21,13 +21,23 @@
 #define LOG_SERIAL Serial
 #endif
 
-#define LOG_COLOR_RESET  "\033[0m"
-#define LOG_COLOR_RED    "\033[31m"
-#define LOG_COLOR_GREEN  "\033[32m"
-#define LOG_COLOR_YELLOW "\033[33m"
-#define LOG_COLOR_BLUE   "\033[34m"
-#define LOG_COLOR_CYAN   "\033[36m"
-#define LOG_COLOR_GRAY   "\033[90m"
+inline bool& log_color_enabled_storage() {
+  static bool enabled = true;
+  return enabled;
+}
+
+inline bool log_color_enabled() { return log_color_enabled_storage(); }
+inline void log_set_color_enabled(bool enabled) {
+  log_color_enabled_storage() = enabled;
+}
+
+#define LOG_COLOR_RESET  (log_color_enabled() ? "\033[0m" : "")
+#define LOG_COLOR_RED    (log_color_enabled() ? "\033[31m" : "")
+#define LOG_COLOR_GREEN  (log_color_enabled() ? "\033[32m" : "")
+#define LOG_COLOR_YELLOW (log_color_enabled() ? "\033[33m" : "")
+#define LOG_COLOR_BLUE   (log_color_enabled() ? "\033[34m" : "")
+#define LOG_COLOR_CYAN   (log_color_enabled() ? "\033[36m" : "")
+#define LOG_COLOR_GRAY   (log_color_enabled() ? "\033[90m" : "")
 #define LOG_COLOR_RESULT(ok) ((ok) ? LOG_COLOR_GREEN : LOG_COLOR_RED)
 #define LOG_COLOR_STATE(online, failures) \
   ((online) ? (((failures) > 0U) ? LOG_COLOR_YELLOW : LOG_COLOR_GREEN) : LOG_COLOR_RED)
@@ -48,7 +58,7 @@ inline void log_begin(unsigned long baud = 115200) {
 
 // Colorize only the severity tag; keep message text in terminal default color.
 #define LOG_PRINT_WITH_TAG(tagColor, tag, fmt, ...) \
-  LOG_SERIAL.printf(tagColor "[" tag "]" LOG_COLOR_RESET " " fmt "\n", ##__VA_ARGS__)
+  LOG_SERIAL.printf("%s[" tag "]%s " fmt "\n", tagColor, LOG_COLOR_RESET, ##__VA_ARGS__)
 
 /// @brief Log error message (level >= 1)
 #define LOGE(fmt, ...) \

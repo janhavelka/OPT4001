@@ -39,6 +39,19 @@ fault/recovery evidence unless a future log captures it.
   evidence therefore remains the pinned CI run above; no new hardware claim is
   implied.
 
+### 2026-08-08 Feature-Completeness Audit (1.2.0)
+
+- SBOS993A capability/register coverage and CLI parity are recorded in
+  `docs/reports/feature-matrix-20260808.md`.
+- Official-wrapper PlatformIO native execution passes **133/133**
+  fake-transport, fixed-line-parser, and aggregate-compatibility tests.
+- Core, CLI, native-IDF boundary, public-doc, readiness-claim, generated-version,
+  and HIL-parser checks form the final non-hardware gate.
+- The strict framework-neutral native-core link, package pack/clean consumer,
+  and pinned pioarduino 55.03.311 ESP32-S2/S3 builds pass locally. Pure ESP-IDF
+  remains a CI gate when no local IDF environment is installed. No new hardware
+  claim is inferred from these build results.
+
 ## Pending Evidence
 
 | Area | Status |

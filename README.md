@@ -17,6 +17,8 @@ pattern used by the other device libraries in this workspace:
 - stable `errorName()` / `driverStateName()` strings for diagnostics shared by
   Arduino and native ESP-IDF integrations
 - no heap allocation in steady-state driver operation
+- bus-silent `bind()` / `unbind()` and instruction-budgeted `startAttach()` for
+  integration into a sole application-owned I2C task
 
 ## Current Readiness
 
@@ -94,6 +96,10 @@ are 5.5 V tolerant; that does not make the device a 5 V powered part.
   - decoded device-ID / configuration / INT-configuration helpers
   - cached settings snapshot
   - full-scale, effective-bit, resolution, and counter-delta utility helpers
+  - protocol-qualified discovery at the legal addresses, distinct from an
+    ACK-only bus scan
+  - full poll-job control, dynamic color, health monitoring, bounded selfcheck,
+    and cooperative finite stress in both example CLIs
 
 ## Installation
 
@@ -107,7 +113,7 @@ PlatformIO Core.
 Add to `platformio.ini`:
 
 The examples below intentionally use the latest published tag (`v1.0.0`). The
-audited source metadata is `1.1.1`, but this hardening change is not a formal
+audited source metadata is `1.2.0`, but this hardening change is not a formal
 release and does not create a tag.
 
 ```ini
@@ -244,6 +250,12 @@ void loop() {
 
 ## API Notes
 
+- `bind()` validates and caches callbacks/configuration without I2C.
+  `startAttach()` then performs one DEVICE_ID read and four writes through the
+  poll-job engine. With the default `poll(nowMs, 1)` budget, a sole I2C-owner
+  task sees at most one transport callback per poll.
+- `unbind()` is bus-silent. `powerDown()` is the explicit error-reporting
+  one-write shutdown. The established `end()` contract remains best-effort.
 - `begin()` validates the transport, address, package variant, and device ID, then
   applies the cached configuration.
 - The driver is not internally synchronized or ISR-safe. Call public APIs from one
@@ -252,9 +264,10 @@ void loop() {
 - Transport callbacks must not call back into the same driver instance. On a
   shared bus, the application lock must cover both the driver call and the
   callback transaction.
-- Public APIs that can perform I2C require a successful `begin()` unless their
-  header contract explicitly says otherwise. While `UNINIT`, public raw-register
-  APIs return `NOT_INITIALIZED` without touching the bus.
+- Normal tracked I2C APIs require a successful synchronous `begin()` or a
+  completed poll-chunked `startAttach()` unless their header contract says
+  otherwise. While `UNINIT`, public raw-register APIs return `NOT_INITIALIZED`
+  without touching the bus.
 - `Config.mode` accepts only `POWER_DOWN` or `CONTINUOUS`.
   One-shot measurements are started explicitly with `startConversion()` or
   `readBlocking()`.
@@ -315,7 +328,8 @@ void loop() {
   policy.
 - Poll-chunked jobs are available through `startReadBurst()`,
   `startReadSample()`, `startConfigureMeasurement()`, and
-  `startResetAndReapply()`, then `poll(nowMs, maxInstructions)`. One register
+  `startResetAndReapply()`, then `poll(nowMs, maxInstructions)`. Attachment uses
+  the same engine through `startAttach()`. One register
   read/write or one burst RESULT/FIFO block read is one instruction; CRC decode,
   lux conversion, cache updates, and delay gates do not count. `FLAGS` reads
   are explicit instructions because the register is clear-on-read.
@@ -343,7 +357,11 @@ void loop() {
   bus-wide reset is acceptable, `resetAndReapply()` is the stronger recipe.
 - `end()` is best-effort: when initialized and online it attempts a raw
   power-down write, ignores that write status, clears runtime state, and leaves
-  the driver `UNINIT`.
+  the driver `UNINIT` while keeping the validated transport/configuration bound.
+  Use `unbind()` for a bus-silent full release.
+- `cancelPollJob()` never touches I2C. It reports `CANCELLED` and marks
+  hardware/cache state dirty when confirmed configuration/reset writes may
+  already have reached the device.
 - `configureMeasurement()` applies range, conversion time, quick-wake, and the
   stable operating mode in one coherent update while still using the same cached
   config model and injected transport.
@@ -487,14 +505,17 @@ driver/bus state errors to `I2C_BUS` while preserving the raw `esp_err_t` in
 
 ### Lifecycle And Diagnostics
 
+- `bind(const Config&)`, `unbind()`, `isBound()`
 - `begin(const Config&)`
 - `tick(uint32_t nowMs)`
 - `end()`
+- `startAttach()`, `powerDown()`
 - `probe()`
 - `recover()`
 - `softReset()`
 - `resetAndReapply()`
 - `startResetAndReapply()`
+- `cancelPollJob()`
 - `readDeviceId(uint16_t&)`
 - `readDeviceId(DeviceIdInfo&)`
 - `getSettings(SettingsSnapshot&)`
@@ -564,9 +585,12 @@ lux encoding rounds to the nearest representable exponent/result value.
 
 - `examples/01_basic_bringup_cli/`
   - interactive bring-up shell
-  - scan, probe, recover, reset, reset-and-reapply, compact state view, and runtime address selection
+  - ACK scan, DEVICE_ID-qualified discovery, bind/attach/unbind, probe,
+    recover, reset/reapply, compact state view, and runtime address selection
   - decoded config / intcfg / flags / status / device-ID readback with colored health reporting
-  - one-shot reads, poll-friendly `tryread` / `trylux`, non-blocking `watch` / `stop`, burst FIFO reads, single-slot history reads, cached-sample inspection, stress, stress-mix, and selftest
+  - one-shot reads, poll-friendly `tryread` / `trylux`, non-blocking `watch` /
+    `stop`, full `job` control, burst/FIFO and slot history, cooperative finite
+    stress/stress-mix, and selfcheck
   - lux / milli-lux / micro-lux commands plus latest-register `raw`, `adc2lux`, `raw2lux`, scale / timing diagnostics, and the per-range scale table
   - threshold lux helpers, `thcalc`, `thdecode`, `threshold default`, raw threshold programming, interrupt configuration, and raw register / block access
   - measurement and interrupt convenience flows exposed directly in the shell via `measure`, `int ready`, `int fifo`, and `int th`
@@ -577,8 +601,8 @@ lux encoding rounds to the nearest representable exponent/result value.
   - colorized, sectioned command coverage matching the Arduino diagnostic
     surface: address/package profiles, blocking/poll-friendly reads, FIFO/slot
     history, watch/stop, measurement and interrupt configuration, decoded
-    status/config, threshold math, raw registers, scaling/timing, stress, and
-    selftest workflows
+    status/config, threshold math, raw registers, scaling/timing, full poll-job
+    control, cooperative stress, health monitor, color, and selfcheck workflows
   - owns its example I2C bus and intentionally does not show production
     shared-bus locking
   - no Arduino compatibility facade; parity is enforced by
@@ -590,6 +614,19 @@ lux encoding rounds to the nearest representable exponent/result value.
 
 ### CLI Notes
 
+- `scan` is ACK-only. `discover` reports only legal-address responses whose
+  full DEVICE_ID pattern matches OPT4001.
+- `bind` and `unbind` are bus-silent. `attach` schedules the five-step owner
+  job; `job poll [budget]`, `job sample`, `job burst`, `job measure`,
+  `job reset confirm`, `job result`, and `job cancel` expose every poll-job API.
+  Budgets above one are diagnostic batching; a sole-owner integration should
+  retain the default budget of one callback per owner poll.
+- Both CLIs use fixed 192-byte command storage. An overlong line is discarded
+  completely through CR/LF and cannot dispatch as a truncated command.
+- `stress` and `stress_mix` are finite cooperative sessions. Measurement work
+  uses the driver's one-callback poll budget per owner-loop service.
+- `selfcheck` (`selftest` compatibility alias) is bounded but can consume
+  clear-on-read FLAGS, perform conversions, and invoke recovery/reapply.
 - `reset` performs the datasheet's general-call reset and is therefore bus-wide.
 - `begin` is an alias for `init` / reinitialization. `intpin` reads the
   configured INT GPIO hook and applies the configured interrupt polarity.

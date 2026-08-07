@@ -13,10 +13,16 @@ MANDATORY_COMMANDS = [
     "version",
     "ver",
     "scan",
+    "discover",
+    "color",
     "verbose",
     "init",
     "begin",
     "end",
+    "bind",
+    "unbind",
+    "attach",
+    "powerdown",
     "addr",
     "pkg",
     "drv",
@@ -38,6 +44,7 @@ MANDATORY_COMMANDS = [
     "sampleage",
     "start",
     "poll",
+    "job",
     "drdy",
     "ready",
     "flags",
@@ -83,6 +90,8 @@ MANDATORY_COMMANDS = [
     "timing",
     "diag",
     "selftest",
+    "selfcheck",
+    "healthmon",
     "stress",
     "stress_mix",
     "watch",
@@ -106,6 +115,9 @@ REQUIRED_IDF_TOKENS = [
     "O_NONBLOCK",
     "fcntl(STDIN_FILENO, F_SETFL",
     "char input[",
+    "FixedLineBuffer",
+    "LineResult::TOO_LONG",
+    "complete line discarded",
 ]
 
 REQUIRED_STATUS_MAPPING_TOKENS = [
@@ -201,6 +213,19 @@ def main() -> int:
     for command in MANDATORY_COMMANDS:
         if re.search(rf'"{re.escape(command)}"', main_text) is None:
             fail(f"native CLI missing command '{command}'")
+
+    for token in (
+        "sensor.bind", "sensor.probe", "DEVICE_ID",
+        "startAttach", "startReadSample", "startReadBurst",
+        "startConfigureMeasurement", "startResetAndReapply",
+        "cancelPollJob", "startStressSession", "serviceStress",
+        "serviceHealthMonitor", "setColorEnabled",
+    ):
+        if token not in main_text:
+            fail(f"native CLI missing executable parity token '{token}'")
+
+    if re.search(r"void\s+runStress(?:Mix)?\s*\(", main_text):
+        fail("native CLI retains superseded blocking stress function")
 
     print("IDF example contract PASSED")
     return 0

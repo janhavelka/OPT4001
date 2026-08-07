@@ -9,6 +9,10 @@
 
 // Basic types
 using byte = uint8_t;
+inline constexpr uint8_t LOW = 0U;
+inline constexpr uint8_t HIGH = 1U;
+inline constexpr uint8_t INPUT_PULLUP = 2U;
+inline constexpr uint8_t OUTPUT = 3U;
 
 // Timing stubs
 inline uint32_t millis() { return 0; }
@@ -16,6 +20,9 @@ inline uint32_t micros() { return 0; }
 inline void delay(uint32_t ms) { (void)ms; }
 inline void delayMicroseconds(uint32_t us) { (void)us; }
 inline void yield() {}
+inline void pinMode(int pin, uint8_t mode) { (void)pin; (void)mode; }
+inline void digitalWrite(int pin, uint8_t value) { (void)pin; (void)value; }
+inline int digitalRead(int pin) { (void)pin; return HIGH; }
 
 // Serial stub
 class SerialClass {
@@ -26,6 +33,7 @@ public:
   void printf(const char* fmt, ...) { (void)fmt; }
   int available() { return 0; }
   int read() { return -1; }
+  void flush() {}
   operator bool() { return true; }
 };
 

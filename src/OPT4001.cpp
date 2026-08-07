@@ -176,8 +176,9 @@ private:
 // Lifecycle
 // ============================================================================
 
-Status OPT4001::begin(const Config& config) {
+Status OPT4001::bind(const Config& config) {
   _config = Config{};
+  _bound = false;
   _initialized = false;
   _driverState = DriverState::UNINIT;
   _allowOfflineI2c = false;
@@ -241,7 +242,40 @@ Status OPT4001::begin(const Config& config) {
     _config.offlineThreshold = 1;
   }
 
-  Status st = probe();
+  _bound = true;
+  return Status::Ok();
+}
+
+void OPT4001::unbind() {
+  _config = Config{};
+  _bound = false;
+  _initialized = false;
+  _driverState = DriverState::UNINIT;
+  _allowOfflineI2c = false;
+  _pollJob = PollJob::NONE;
+  _pollStep = PollStep::IDLE;
+  _lastPollStatus = Status::Ok();
+  _pollWritesApplied = 0;
+  _pollResetApplied = false;
+  _pollExecuting = false;
+  _clearHardwareConfigDirty();
+  _clearRuntimeState();
+
+  _lastOkMs = 0;
+  _lastErrorMs = 0;
+  _lastError = Status::Ok();
+  _consecutiveFailures = 0;
+  _totalFailures = 0;
+  _totalSuccess = 0;
+}
+
+Status OPT4001::begin(const Config& config) {
+  Status st = bind(config);
+  if (!st.ok()) {
+    return st;
+  }
+
+  st = probe();
   if (!st.ok()) {
     return st;
   }
@@ -308,6 +342,44 @@ void OPT4001::end() {
   _pollResetApplied = false;
   _pollExecuting = false;
   _clearRuntimeState();
+}
+
+Status OPT4001::startAttach() {
+  if (!_bound) {
+    return Status::Error(Err::NOT_BOUND, "Driver not bound");
+  }
+  if (_initialized) {
+    return Status::Error(Err::BUSY, "Driver already initialized");
+  }
+  if (_pollJob != PollJob::NONE) {
+    return Status::Error(Err::BUSY, "Poll job already active");
+  }
+
+  _pollTargetConfig = _config;
+  _pollWritesApplied = 0;
+  _pollResetApplied = false;
+  _pollJob = PollJob::ATTACH;
+  _pollStep = PollStep::READ_DEVICE_ID;
+  _lastPollStatus = _pollInProgressStatus("Attach job started");
+  return _lastPollStatus;
+}
+
+Status OPT4001::powerDown() {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver not initialized");
+  }
+  if (_pollJob != PollJob::NONE) {
+    return Status::Error(Err::BUSY, "Poll job already active");
+  }
+
+  const uint16_t configReg = _buildConfigurationRegister(Mode::POWER_DOWN);
+  Status st = _writeRegister16Tracked(cmd::REG_CONFIGURATION, configReg);
+  if (!st.ok()) {
+    return st;
+  }
+  _config.mode = Mode::POWER_DOWN;
+  _clearRuntimeState();
+  return Status::Ok();
 }
 
 // ============================================================================
@@ -422,6 +494,7 @@ Status OPT4001::readDeviceId(DeviceIdInfo& out) {
 }
 
 Status OPT4001::getSettings(SettingsSnapshot& out) const {
+  out.bound = _bound;
   out.initialized = _initialized;
   out.state = _driverState;
   out.packageVariant = _config.packageVariant;
@@ -509,6 +582,32 @@ Status OPT4001::poll(uint32_t nowMs, uint8_t maxInstructions) {
     const bool wasPollExecuting = _pollExecuting;
     _pollExecuting = true;
     switch (_pollJob) {
+      case PollJob::ATTACH:
+        if (_pollStep == PollStep::READ_DEVICE_ID) {
+          if (remaining == 0U) {
+            st = _pollInProgressStatus("Poll instruction budget exhausted");
+            break;
+          }
+          uint16_t deviceId = 0;
+          st = _readRegister16Raw(cmd::REG_DEVICE_ID, deviceId);
+          --remaining;
+          if (!st.ok()) {
+            st = _finishPollJob(st);
+            break;
+          }
+          st = _validateDeviceId(deviceId);
+          if (!st.ok()) {
+            st = _finishPollJob(st);
+            break;
+          }
+          _pollStep = PollStep::WRITE_THRESHOLD_L;
+        }
+        if (_pollJob != PollJob::NONE && remaining > 0U) {
+          st = _pollConfigJob(nowMs, remaining);
+        } else if (_pollJob != PollJob::NONE) {
+          st = _pollInProgressStatus("Poll instruction budget exhausted");
+        }
+        break;
       case PollJob::READ_SAMPLE:
       case PollJob::READ_BURST:
         st = _pollReadJob(nowMs, remaining);
@@ -643,6 +742,28 @@ Status OPT4001::startResetAndReapply() {
   _pollStep = PollStep::WRITE_RESET;
   _lastPollStatus = _pollInProgressStatus("Reset and reapply job started");
   return _lastPollStatus;
+}
+
+Status OPT4001::cancelPollJob() {
+  if (_pollJob == PollJob::NONE) {
+    return Status::Ok();
+  }
+
+  const PollJob cancelledJob = _pollJob;
+  const bool configurationMayDiffer =
+      _pollWritesApplied > 0U || _pollResetApplied;
+  const Status cancelled =
+      Status::Error(Err::CANCELLED, "Poll job cancelled");
+  if (configurationMayDiffer) {
+    _markHardwareConfigDirty(cancelled);
+  }
+  if (cancelledJob == PollJob::ATTACH ||
+      (cancelledJob == PollJob::RESET_AND_REAPPLY && _pollResetApplied)) {
+    _initialized = false;
+    _driverState = DriverState::UNINIT;
+    _clearRuntimeState();
+  }
+  return _finishPollJob(cancelled);
 }
 
 Status OPT4001::conversionReady(bool& ready) {
@@ -2481,6 +2602,7 @@ Status OPT4001::_pollReadJob(uint32_t nowMs, uint8_t& remainingInstructions) {
 
 Status OPT4001::_pollConfigJob(uint32_t nowMs, uint8_t& remainingInstructions) {
   const bool resetJob = (_pollJob == PollJob::RESET_AND_REAPPLY);
+  const bool attachJob = (_pollJob == PollJob::ATTACH);
   ScopedOfflineI2cAllowance allowOfflineI2c(
       _allowOfflineI2c, resetJob || _allowOfflineI2c);
 
@@ -2546,6 +2668,11 @@ Status OPT4001::_pollConfigJob(uint32_t nowMs, uint8_t& remainingInstructions) {
       ++_pollWritesApplied;
       _config = _pollTargetConfig;
       _finishApplyConfig(nowMs);
+      if (attachJob) {
+        _initialized = true;
+        _driverState = DriverState::READY;
+        _consecutiveFailures = 0;
+      }
       return _finishPollJob(Status::Ok());
     }
 

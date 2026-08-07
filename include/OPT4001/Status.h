@@ -25,7 +25,9 @@ enum class Err : uint8_t {
   I2C_NACK_DATA,         ///< I2C data phase was not acknowledged.
   I2C_TIMEOUT,           ///< I2C transaction timed out.
   I2C_BUS,               ///< I2C bus or arbitration error.
-  OFFLINE                ///< Driver health is latched offline until recovery.
+  OFFLINE,               ///< Driver health is latched offline until recovery.
+  NOT_BOUND,             ///< No validated transport/configuration is bound.
+  CANCELLED              ///< Poll-chunked operation was cancelled by the caller.
 };
 
 /// Return a stable library-owned name for an error code.
@@ -50,6 +52,8 @@ constexpr const char* errorName(Err err) {
     case Err::I2C_TIMEOUT: return "I2C_TIMEOUT";
     case Err::I2C_BUS: return "I2C_BUS";
     case Err::OFFLINE: return "OFFLINE";
+    case Err::NOT_BOUND: return "NOT_BOUND";
+    case Err::CANCELLED: return "CANCELLED";
   }
   return "UNKNOWN_ERROR";
 }

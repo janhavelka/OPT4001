@@ -10,6 +10,7 @@
 
 #include "Arduino.h"
 #include "Wire.h"
+#include "../examples/common/CliLineBuffer.h"
 
 SerialClass Serial;
 TwoWire Wire;
@@ -407,11 +408,62 @@ void test_status_in_progress() {
   TEST_ASSERT_FALSE(st.ok());
 }
 
+void test_cli_line_buffer_trims_backspace_and_dispatches_complete_line() {
+  cli_shell::FixedLineBuffer line;
+  char output[cli_shell::FixedLineBuffer::CAPACITY]{};
+  const char input[] = "  staX\bte  \r";
+  cli_shell::LineResult result = cli_shell::LineResult::NONE;
+  for (char value : input) {
+    if (value == '\0') break;
+    result = line.push(value, output, sizeof(output));
+  }
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(cli_shell::LineResult::READY),
+                          static_cast<uint8_t>(result));
+  TEST_ASSERT_EQUAL_STRING("state", output);
+}
+
+void test_cli_line_buffer_discards_entire_overlong_line_then_recovers() {
+  cli_shell::FixedLineBuffer line;
+  char output[cli_shell::FixedLineBuffer::CAPACITY]{};
+  for (size_t i = 0; i < cli_shell::FixedLineBuffer::CAPACITY + 20U; ++i) {
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(cli_shell::LineResult::NONE),
+                            static_cast<uint8_t>(line.push('x', output, sizeof(output))));
+  }
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(cli_shell::LineResult::TOO_LONG),
+                          static_cast<uint8_t>(line.push('\n', output, sizeof(output))));
+
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(cli_shell::LineResult::NONE),
+                          static_cast<uint8_t>(line.push('i', output, sizeof(output))));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(cli_shell::LineResult::NONE),
+                          static_cast<uint8_t>(line.push('d', output, sizeof(output))));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(cli_shell::LineResult::READY),
+                          static_cast<uint8_t>(line.push('\n', output, sizeof(output))));
+  TEST_ASSERT_EQUAL_STRING("id", output);
+}
+
+void test_cli_line_buffer_handles_null_and_zero_capacity_without_ub() {
+  cli_shell::FixedLineBuffer line;
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(cli_shell::LineResult::NONE),
+                          static_cast<uint8_t>(line.push('x', nullptr, 0U)));
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(cli_shell::LineResult::OUTPUT_TOO_SMALL),
+      static_cast<uint8_t>(line.push('\n', nullptr, 0U)));
+
+  char output[1]{};
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(cli_shell::LineResult::NONE),
+                          static_cast<uint8_t>(line.push('x', output, sizeof(output))));
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(cli_shell::LineResult::OUTPUT_TOO_SMALL),
+      static_cast<uint8_t>(line.push('\n', output, sizeof(output))));
+}
+
 void test_error_names_are_complete_and_stable() {
   TEST_ASSERT_EQUAL_STRING("OK", errorName(Err::OK));
   TEST_ASSERT_EQUAL_STRING("MEASUREMENT_NOT_READY",
                            errorName(Err::CONVERSION_NOT_READY));
   TEST_ASSERT_EQUAL_STRING("OFFLINE", toString(Err::OFFLINE));
+  TEST_ASSERT_EQUAL_STRING("NOT_BOUND", errorName(Err::NOT_BOUND));
+  TEST_ASSERT_EQUAL_STRING("CANCELLED", toString(Err::CANCELLED));
   TEST_ASSERT_EQUAL_STRING("UNKNOWN_ERROR", errorName(static_cast<Err>(0xFF)));
   TEST_ASSERT_EQUAL_STRING("READY", driverStateName(DriverState::READY));
   TEST_ASSERT_EQUAL_STRING("OFFLINE", toString(DriverState::OFFLINE));
@@ -433,6 +485,62 @@ void test_config_defaults() {
   TEST_ASSERT_TRUE(cfg.burstMode);
   TEST_ASSERT_EQUAL_UINT8(0x0B, cfg.highThreshold.exponent);
   TEST_ASSERT_EQUAL_UINT16(0x0FFF, cfg.highThreshold.result);
+}
+
+void test_settings_snapshot_preserves_legacy_aggregate_member_order() {
+  // Complete pre-1.2.0 aggregate shape. New members must remain append-only so
+  // this source continues to compile and every positional value keeps meaning.
+  SettingsSnapshot legacy{
+      true,
+      DriverState::DEGRADED,
+      PackageVariant::PICOSTAR,
+      0x45U,
+      37U,
+      9U,
+      false,
+      true,
+      false,
+      true,
+      17,
+      true,
+      Range::RANGE_3,
+      ConversionTime::MS_25,
+      Mode::CONTINUOUS,
+      Mode::ONE_SHOT,
+      InterruptLatch::TRANSPARENT,
+      InterruptPolarity::ACTIVE_HIGH,
+      FaultCount::FAULTS_4,
+      IntDirection::PIN_INPUT,
+      IntConfig::FIFO_FULL,
+      false,
+      Threshold{0x02U, 0x0123U},
+      Threshold{0x07U, 0x0ABCU},
+      true,
+      true,
+      true,
+      true,
+      false,
+      1234U,
+      1200U,
+      14U,
+      0x01234567U,
+      12.5f,
+      true,
+      Status{Err::I2C_TIMEOUT, 42, "legacy aggregate"}};
+
+  TEST_ASSERT_TRUE(legacy.initialized);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::DEGRADED),
+                          static_cast<uint8_t>(legacy.state));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Range::RANGE_3),
+                          static_cast<uint8_t>(legacy.range));
+  TEST_ASSERT_EQUAL_UINT16(0x0ABCU, legacy.highThreshold.result);
+  TEST_ASSERT_FALSE(legacy.conversionReady);
+  TEST_ASSERT_EQUAL_UINT32(0x01234567U, legacy.lastAdcCodes);
+  TEST_ASSERT_FLOAT_WITHIN(0.001f, 12.5f, legacy.lastLux);
+  TEST_ASSERT_TRUE(legacy.hardwareConfigDirty);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_TIMEOUT),
+                          static_cast<uint8_t>(legacy.hardwareConfigDirtyError.code));
+  TEST_ASSERT_FALSE(legacy.bound);
 }
 
 void test_get_last_sample_before_any_read() {
@@ -995,6 +1103,213 @@ void test_read_blocking_times_out_with_stalled_clock() {
 
   st = continuousDev.readBlocking(sample, 5);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::TIMEOUT), static_cast<uint8_t>(st.code));
+}
+
+void test_bind_and_unbind_are_bus_silent() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+
+  Status st = dev.startAttach();
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::NOT_BOUND),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT32(0U, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(0U, bus.writeCalls);
+
+  st = dev.bind(makeConfig(bus));
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_TRUE(dev.isBound());
+  TEST_ASSERT_FALSE(dev.isInitialized());
+  TEST_ASSERT_EQUAL_UINT32(0U, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(0U, bus.writeCalls);
+
+  SettingsSnapshot snap;
+  TEST_ASSERT_TRUE(dev.getSettings(snap).ok());
+  TEST_ASSERT_TRUE(snap.bound);
+  TEST_ASSERT_FALSE(snap.initialized);
+
+  dev.unbind();
+  TEST_ASSERT_FALSE(dev.isBound());
+  TEST_ASSERT_FALSE(dev.isInitialized());
+  TEST_ASSERT_NULL(dev.getConfig().i2cWrite);
+  TEST_ASSERT_NULL(dev.getConfig().i2cWriteRead);
+  TEST_ASSERT_EQUAL_UINT32(0U, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(0U, bus.writeCalls);
+}
+
+void test_attach_configurable_budget_can_complete_all_five_instructions() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.bind(makeConfig(bus)).ok());
+  TEST_ASSERT_TRUE(dev.startAttach().inProgress());
+
+  const Status st = dev.poll(bus.nowMs, 5U);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_TRUE(dev.isInitialized());
+  TEST_ASSERT_EQUAL_UINT32(1U, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(4U, bus.writeCalls);
+}
+
+void test_attach_write_failures_stop_at_exact_phase_and_mark_partial_truth() {
+  for (uint32_t writePhase = 1U; writePhase <= 4U; ++writePhase) {
+    FakeBus bus;
+    OPT4001::OPT4001 dev;
+    TEST_ASSERT_TRUE(dev.bind(makeConfig(bus)).ok());
+    bus.failWriteCall = writePhase;
+    TEST_ASSERT_TRUE(dev.startAttach().inProgress());
+
+    const Status st = dev.poll(bus.nowMs, 8U);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_ERROR),
+                            static_cast<uint8_t>(st.code));
+    TEST_ASSERT_FALSE(dev.pollBusy());
+    TEST_ASSERT_FALSE(dev.isInitialized());
+    TEST_ASSERT_EQUAL_UINT32(1U, bus.readCalls);
+    TEST_ASSERT_EQUAL_UINT32(writePhase, bus.writeCalls);
+    TEST_ASSERT_EQUAL(writePhase > 1U, dev.hardwareConfigDirty());
+    TEST_ASSERT_EQUAL_UINT32(0U, dev.totalFailures());
+    TEST_ASSERT_EQUAL_UINT32(0U, dev.totalSuccess());
+  }
+}
+
+void test_attach_default_budget_uses_exactly_one_callback_per_poll() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.bind(makeConfig(bus)).ok());
+  TEST_ASSERT_TRUE(dev.startAttach().inProgress());
+
+  for (uint8_t phase = 0; phase < 5U; ++phase) {
+    const uint32_t callbacksBefore = bus.readCalls + bus.writeCalls;
+    const Status st = dev.poll(bus.nowMs);
+    TEST_ASSERT_EQUAL_UINT32(callbacksBefore + 1U,
+                             bus.readCalls + bus.writeCalls);
+    if (phase < 4U) {
+      TEST_ASSERT_TRUE(st.inProgress());
+      TEST_ASSERT_TRUE(dev.pollBusy());
+      TEST_ASSERT_FALSE(dev.isInitialized());
+    } else {
+      TEST_ASSERT_TRUE(st.ok());
+      TEST_ASSERT_FALSE(dev.pollBusy());
+      TEST_ASSERT_TRUE(dev.isInitialized());
+      TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::READY),
+                              static_cast<uint8_t>(dev.state()));
+    }
+  }
+  TEST_ASSERT_EQUAL_UINT32(1U, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(4U, bus.writeCalls);
+}
+
+void test_attach_zero_budget_and_identity_failure_are_bounded() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.bind(makeConfig(bus)).ok());
+  TEST_ASSERT_TRUE(dev.startAttach().inProgress());
+
+  Status st = dev.poll(bus.nowMs, 0);
+  TEST_ASSERT_TRUE(st.inProgress());
+  TEST_ASSERT_TRUE(dev.pollBusy());
+  TEST_ASSERT_EQUAL_UINT32(0U, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(0U, bus.writeCalls);
+
+  bus.registers[cmd::REG_DEVICE_ID] = 0;
+  st = dev.poll(bus.nowMs, 8);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::DEVICE_ID_MISMATCH),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_FALSE(dev.pollBusy());
+  TEST_ASSERT_FALSE(dev.isInitialized());
+  TEST_ASSERT_EQUAL_UINT32(1U, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(0U, bus.writeCalls);
+  TEST_ASSERT_FALSE(dev.hardwareConfigDirty());
+}
+
+void test_attach_cancel_reports_partial_config_truthfully_without_i2c() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.bind(makeConfig(bus)).ok());
+  TEST_ASSERT_TRUE(dev.startAttach().inProgress());
+
+  TEST_ASSERT_TRUE(dev.poll(bus.nowMs, 1).inProgress());
+  const uint32_t callbacksBeforeCleanCancel = bus.readCalls + bus.writeCalls;
+  Status st = dev.cancelPollJob();
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::CANCELLED),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT32(callbacksBeforeCleanCancel,
+                           bus.readCalls + bus.writeCalls);
+  TEST_ASSERT_FALSE(dev.hardwareConfigDirty());
+
+  TEST_ASSERT_TRUE(dev.startAttach().inProgress());
+  TEST_ASSERT_TRUE(dev.poll(bus.nowMs, 2).inProgress());
+  const uint32_t callbacksBeforeDirtyCancel = bus.readCalls + bus.writeCalls;
+  st = dev.cancelPollJob();
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::CANCELLED),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT32(callbacksBeforeDirtyCancel,
+                           bus.readCalls + bus.writeCalls);
+  TEST_ASSERT_TRUE(dev.hardwareConfigDirty());
+  TEST_ASSERT_FALSE(dev.isInitialized());
+  TEST_ASSERT_FALSE(dev.pollBusy());
+  TEST_ASSERT_TRUE(dev.cancelPollJob().ok());
+}
+
+void test_cancel_config_and_reset_jobs_preserves_hardware_truth() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+
+  TEST_ASSERT_TRUE(dev.startConfigureMeasurement(Range::RANGE_2,
+                                                  ConversionTime::MS_25,
+                                                  Mode::CONTINUOUS).inProgress());
+  TEST_ASSERT_TRUE(dev.poll(bus.nowMs, 1).inProgress());
+  const uint32_t callbacksBeforeConfigCancel = bus.readCalls + bus.writeCalls;
+  Status st = dev.cancelPollJob();
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::CANCELLED),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_TRUE(dev.isInitialized());
+  TEST_ASSERT_TRUE(dev.hardwareConfigDirty());
+  TEST_ASSERT_EQUAL_UINT32(callbacksBeforeConfigCancel,
+                           bus.readCalls + bus.writeCalls);
+
+  TEST_ASSERT_TRUE(dev.startResetAndReapply().inProgress());
+  TEST_ASSERT_TRUE(dev.poll(bus.nowMs, 1).inProgress());
+  const uint32_t callbacksBeforeResetCancel = bus.readCalls + bus.writeCalls;
+  st = dev.cancelPollJob();
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::CANCELLED),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_FALSE(dev.isInitialized());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::UNINIT),
+                          static_cast<uint8_t>(dev.state()));
+  TEST_ASSERT_TRUE(dev.hardwareConfigDirty());
+  TEST_ASSERT_EQUAL_UINT32(callbacksBeforeResetCancel,
+                           bus.readCalls + bus.writeCalls);
+}
+
+void test_power_down_is_error_honest_and_end_keeps_legacy_attempt() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+
+  bus.writeStatus = Status::Error(Err::I2C_BUS, "forced power-down failure", -90);
+  const uint32_t failedWriteBefore = bus.writeCalls;
+  Status st = dev.powerDown();
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::I2C_BUS),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Mode::CONTINUOUS),
+                          static_cast<uint8_t>(dev.getMode()));
+  TEST_ASSERT_EQUAL_UINT32(failedWriteBefore + 1U, bus.writeCalls);
+
+  bus.writeStatus = Status::Ok();
+  st = dev.powerDown();
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Mode::POWER_DOWN),
+                          static_cast<uint8_t>(dev.getMode()));
+  TEST_ASSERT_EQUAL_UINT16(0U,
+      static_cast<uint16_t>(bus.registers[cmd::REG_CONFIGURATION] & cmd::MASK_MODE));
+
+  const uint32_t endWriteBefore = bus.writeCalls;
+  dev.end();
+  TEST_ASSERT_EQUAL_UINT32(endWriteBefore + 1U, bus.writeCalls);
+  TEST_ASSERT_TRUE(dev.isBound());
+  TEST_ASSERT_FALSE(dev.isInitialized());
 }
 
 void test_blocking_reads_accept_full_uint32_timeout_range() {
@@ -3419,10 +3734,22 @@ int main() {
   RUN_TEST(test_status_ok);
   RUN_TEST(test_status_error);
   RUN_TEST(test_status_in_progress);
+  RUN_TEST(test_cli_line_buffer_trims_backspace_and_dispatches_complete_line);
+  RUN_TEST(test_cli_line_buffer_discards_entire_overlong_line_then_recovers);
+  RUN_TEST(test_cli_line_buffer_handles_null_and_zero_capacity_without_ub);
   RUN_TEST(test_error_names_are_complete_and_stable);
   RUN_TEST(test_config_defaults);
+  RUN_TEST(test_settings_snapshot_preserves_legacy_aggregate_member_order);
   RUN_TEST(test_get_last_sample_before_any_read);
   RUN_TEST(test_begin_rejects_missing_callbacks);
+  RUN_TEST(test_bind_and_unbind_are_bus_silent);
+  RUN_TEST(test_attach_configurable_budget_can_complete_all_five_instructions);
+  RUN_TEST(test_attach_write_failures_stop_at_exact_phase_and_mark_partial_truth);
+  RUN_TEST(test_attach_default_budget_uses_exactly_one_callback_per_poll);
+  RUN_TEST(test_attach_zero_budget_and_identity_failure_are_bounded);
+  RUN_TEST(test_attach_cancel_reports_partial_config_truthfully_without_i2c);
+  RUN_TEST(test_cancel_config_and_reset_jobs_preserves_hardware_truth);
+  RUN_TEST(test_power_down_is_error_honest_and_end_keeps_legacy_attempt);
   RUN_TEST(test_begin_rejects_one_shot_startup_mode);
   RUN_TEST(test_begin_rejects_invalid_package_address_combo);
   RUN_TEST(test_picostar_rejects_impossible_int_hook_configuration);

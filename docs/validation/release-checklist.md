@@ -28,6 +28,7 @@ python tools/check_readiness_claims.py
 python tools/check_public_api_docs.py
 python scripts/generate_version.py check
 python -m platformio test -e native
+python -m platformio run -e native_core_no_arduino
 python -m platformio run -e esp32s3dev
 python -m platformio run -e esp32s2dev
 python -m platformio pkg pack
@@ -47,6 +48,8 @@ idf.py -C examples/esp_idf/basic set-target esp32s2 build
 Before merging or tagging, verify a completed CI run for the final branch or PR:
 
 - Native tests pass.
+- Framework-neutral native core consumer compiles and links without Arduino or
+  Wire include paths.
 - Guard scripts pass.
 - PlatformIO ESP32-S3 build passes.
 - PlatformIO ESP32-S2 build passes.

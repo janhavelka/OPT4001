@@ -103,6 +103,9 @@ jobs:
       - name: Run native tests
         run: python -m platformio test -e native
 
+      - name: Compile framework-neutral core consumer
+        run: python -m platformio run -e native_core_no_arduino
+
   validate-library:
     runs-on: ubuntu-24.04
     timeout-minutes: 20

@@ -183,7 +183,7 @@ struct Config {
 
   // === Health Tracking ===
   /// Consecutive tracked I2C failures required to latch OFFLINE. A value of 0
-  /// is normalized to 1 during begin().
+  /// is normalized to 1 during bind()/begin().
   uint8_t offlineThreshold = 5;
 };
 

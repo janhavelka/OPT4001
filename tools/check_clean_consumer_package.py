@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -11,6 +12,15 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def platformio_command() -> list[str]:
+    if os.name == "nt":
+        wrapper = ROOT / "scripts" / "pio.cmd"
+        if not wrapper.is_file():
+            raise FileNotFoundError(f"PlatformIO wrapper not found: {wrapper}")
+        return [str(wrapper)]
+    return [sys.executable, "-m", "platformio"]
 
 
 def fail(message: str, output: str = "") -> int:
@@ -31,7 +41,7 @@ def run(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
 
 
 def ensure_platformio() -> bool:
-    result = run([sys.executable, "-m", "platformio", "--version"], ROOT)
+    result = run([*platformio_command(), "--version"], ROOT)
     return result.returncode == 0
 
 
@@ -48,9 +58,7 @@ def main() -> int:
 
         pack = run(
             [
-                sys.executable,
-                "-m",
-                "platformio",
+                *platformio_command(),
                 "pkg",
                 "pack",
                 "-o",
@@ -68,7 +76,7 @@ def main() -> int:
             textwrap.dedent(
                 f"""\
                 [env:native]
-                platform = native
+                platform = platformio/native@1.2.1
                 framework =
                 build_flags =
                   -std=c++17
@@ -111,7 +119,7 @@ def main() -> int:
             newline="\n",
         )
 
-        build = run([sys.executable, "-m", "platformio", "run", "-e", "native"], consumer)
+        build = run([*platformio_command(), "run", "-e", "native"], consumer)
         if build.returncode != 0:
             return fail("clean consumer build failed", build.stdout + build.stderr)
 

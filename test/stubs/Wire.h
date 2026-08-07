@@ -10,6 +10,7 @@ public:
   void begin(int sda = -1, int scl = -1) { (void)sda; (void)scl; }
   void setClock(uint32_t freq) { (void)freq; }
   void setTimeOut(uint32_t timeoutMs) { (void)timeoutMs; }
+  void end() {}
   
   void beginTransmission(uint8_t addr) { _addr = addr; _txLen = 0; }
   size_t write(uint8_t data) {

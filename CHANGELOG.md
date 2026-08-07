@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-08
+
+### Added
+
+- Bus-silent `bind()` / `unbind()` lifecycle and a five-instruction
+  `startAttach()` path for sole-owner I2C task integration.
+- Explicit error-reporting `powerDown()` and bus-silent `cancelPollJob()` with
+  partial-write dirty-state provenance.
+- DEVICE_ID-qualified `discover`, complete poll-job commands, runtime color,
+  native-IDF health monitoring, and bounded `selfcheck` parity in both CLIs.
+- Shared example-only fixed line/text storage with overlong-line discard and
+  recovery regressions.
+- SBOS993A device/core/CLI/test feature matrix in
+  `docs/reports/feature-matrix-20260808.md`.
+
+### Changed
+
+- Diagnostic `stress` and `stress_mix` are finite cooperative owner-loop
+  sessions. Measurement phases use `poll(..., 1)` so a service iteration
+  performs at most one transport callback.
+- The version generator now synchronizes `idf_component.yml`, Doxygen project
+  metadata, and the supported security branch from `library.json`.
+- CLI contracts verify help and handler visibility, fixed-buffer overflow
+  recovery, qualified discovery, owner jobs, health/color parity, and absence
+  of superseded blocking stress handlers.
+
+### Fixed
+
+- Prevented both CLIs from silently dispatching truncated overlong commands.
+- Removed Arduino command-path `String` allocation and aligned Arduino/native
+  IDF parser and diagnostic behavior.
+- Preserved the documented legacy `end()` power-down attempt while providing a
+  separate bus-silent release API instead of redefining shutdown semantics.
+
+### Validation
+
+- PlatformIO native execution passes 133 fake-transport/parser/API-compatibility
+  tests. The strict framework-neutral native-core link, package pack/clean
+  consumer, and current ESP32-S2/S3 builds pass locally. Pure-IDF CI remains to
+  run; this release does not claim new hardware validation.
+
 ## [1.1.1] - 2026-08-08
 
 ### Changed
