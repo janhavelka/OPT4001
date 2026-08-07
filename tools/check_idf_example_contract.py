@@ -140,6 +140,11 @@ FORBIDDEN_SIDE_EFFECT_PATTERNS = [
         r"\?\s*(?:std::)?printf\s*\([^;]*\)\s*:\s*printStatus\s*\([^;]*\)\s*;",
         "conditional expression mixes printf result with void printStatus",
     ),
+    (
+        r"if\s*\([^\n]+\)\s*(?:printf|printSample)\s*\([^;]*\);\s*"
+        r"printStatus\s*\(",
+        "single-line IDF output condition is misleading before printStatus",
+    ),
 ]
 
 

@@ -584,10 +584,12 @@ void processCommand(char* line) {
     bool didRead = false;
     if (strcmp(cmd, "trylux") == 0) {
       float lux = 0.0f; const auto st = device.tryReadLux(lux, didRead);
-      if (didRead) printf("Lux: %.6f\n", lux); printStatus(st);
+      if (didRead) printf("Lux: %.6f\n", lux);
+      printStatus(st);
     } else {
       OPT4001::Sample sample{}; const auto st = device.tryReadSample(sample, didRead);
-      if (didRead) printSample(sample); printStatus(st);
+      if (didRead) printSample(sample);
+      printStatus(st);
     }
     printf("Fresh sample: %s\n", didRead ? "yes" : "no");
   } else if (strcmp(cmd, "sample") == 0) {
@@ -614,7 +616,9 @@ void processCommand(char* line) {
     char* arg = nextToken(&save);
     if (arg != nullptr && strcmp(arg, "raw") == 0) {
       uint16_t raw = 0; const auto st = device.readFlagsRaw(raw);
-      if (st.ok()) printf("FLAGS raw=0x%04X\n", raw); printStatus(st); return;
+      if (st.ok()) printf("FLAGS raw=0x%04X\n", raw);
+      printStatus(st);
+      return;
     }
     if (arg != nullptr && strcmp(arg, "readyclear") == 0) {
       printStatus(device.clearConversionReadyFlag()); return;
@@ -648,7 +652,8 @@ void processCommand(char* line) {
     uint32_t slot = 0;
     if (!parseU32(nextToken(&save), slot) || slot > 3) { printUsage("slot <0..3>"); return; }
     OPT4001::Sample sample{}; const auto st = device.readSampleSlot(static_cast<uint8_t>(slot), sample);
-    if (sampleStatusHasData(st)) printSample(sample); printStatus(st);
+    if (sampleStatusHasData(st)) printSample(sample);
+    printStatus(st);
   } else if (strcmp(cmd, "cfg") == 0 || strcmp(cmd, "settings") == 0 || strcmp(cmd, "snapshot") == 0) {
     printSettings();
   } else if (strcmp(cmd, "range") == 0) {
