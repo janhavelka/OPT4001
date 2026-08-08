@@ -162,12 +162,6 @@ bool parseFaultCount(const char* text, OPT4001::FaultCount& out) {
   }
 }
 
-const char* errToStr(OPT4001::Err err) { return OPT4001::errorName(err); }
-
-const char* stateToStr(OPT4001::DriverState state) {
-  return OPT4001::driverStateName(state);
-}
-
 bool sampleStatusHasData(const OPT4001::Status& st) {
   return st.ok() || st.code == OPT4001::Err::CRC_ERROR;
 }
@@ -184,7 +178,7 @@ void printStatus(OPT4001::Status st) {
                                     ? COLOR_YELLOW
                                     : COLOR_RED;
   printf("  Status: %s%s%s (code=%u, detail=%ld)\n", color,
-         errToStr(st.code), COLOR_RESET, static_cast<unsigned>(st.code),
+         OPT4001::errorName(st.code), COLOR_RESET, static_cast<unsigned>(st.code),
          static_cast<long>(st.detail));
   if (st.msg != nullptr && st.msg[0] != '\0') printf("  Message: %s\n", st.msg);
 }
@@ -307,7 +301,8 @@ void printHealth() {
   const char* color = state == OPT4001::DriverState::READY ? COLOR_GREEN
       : state == OPT4001::DriverState::OFFLINE ? COLOR_RED : COLOR_YELLOW;
   printf("Driver: state=%s%s%s online=%s consec=%u ok=%lu fail=%lu lastOk=%lu lastErr=%lu\n",
-         color, stateToStr(state), COLOR_RESET, device.isOnline() ? "yes" : "no",
+         color, OPT4001::driverStateName(state), COLOR_RESET,
+         device.isOnline() ? "yes" : "no",
          static_cast<unsigned>(device.consecutiveFailures()),
          static_cast<unsigned long>(device.totalSuccess()),
          static_cast<unsigned long>(device.totalFailures()),
@@ -364,7 +359,7 @@ void printSettings() {
   printStatus(device.getSettings(s));
   printf("Settings: bound=%s init=%s state=%s addr=0x%02X range=%u ctime=%u mode=%u quick=%s crc=%s sample=%s age=%lu\n",
          s.bound ? "yes" : "no", s.initialized ? "yes" : "no",
-         stateToStr(s.state), s.i2cAddress,
+         OPT4001::driverStateName(s.state), s.i2cAddress,
          static_cast<unsigned>(s.range), static_cast<unsigned>(s.conversionTime),
          static_cast<unsigned>(s.mode), s.quickWake ? "yes" : "no",
          s.verifyCrc ? "yes" : "no", s.hasSample ? "yes" : "no",
@@ -430,7 +425,7 @@ void discoverOpt4001() {
       printf("  0x%02X: %sOPT4001%s (0x45 may be SOT-5X3 or PicoStar)\n",
              address, COLOR_GREEN, COLOR_RESET);
     } else if (verboseMode) {
-      printf("  0x%02X: %s\n", address, errToStr(st.code));
+      printf("  0x%02X: %s\n", address, OPT4001::errorName(st.code));
     }
     if (temporary != nullptr) {
       (void)i2c_master_bus_rm_device(temporary);
@@ -815,7 +810,7 @@ void processCommand(char* line) {
     char* op = nextToken(&save);
     if (op == nullptr) {
       printf("Poll job: %s status=%s\n", device.pollBusy() ? "ACTIVE" : "IDLE",
-             errToStr(device.lastPollStatus().code));
+             OPT4001::errorName(device.lastPollStatus().code));
     } else if (strcmp(op, "sample") == 0) {
       printStatus(device.startReadSample());
     } else if (strcmp(op, "burst") == 0) {

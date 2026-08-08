@@ -1,8 +1,7 @@
 # Driver Contracts
 
-This document keeps durable integration contracts in one place. Prompt-by-prompt
-audit reports were removed from `docs/`; git history is the record for those
-implementation passes.
+This document keeps the durable driver and application-integration contracts in
+one place. Dated audit evidence is indexed separately under `docs/reports/`.
 
 ## Lifecycle And Health
 

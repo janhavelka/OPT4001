@@ -13,7 +13,6 @@ REQUIRED_COMMON = [
     "Log.h",
     "I2cTransport.h",
     "I2cScanner.h",
-    "CommandHandler.h",
     "TransportAdapter.h",
     "BusDiag.h",
     "CliShell.h",
@@ -212,6 +211,9 @@ def main() -> int:
             fail(f"{cli_name} CLI must not allocate Arduino String for command parsing")
         if re.search(r"void\s+runStress(?:Mix)?\s*\(", source):
             fail(f"{cli_name} CLI retains superseded blocking stress implementation")
+        for local_mapping in ("errToStr", "stateToStr", "errToString", "stateToString"):
+            if re.search(rf"\b{local_mapping}\s*\(", source):
+                fail(f"{cli_name} CLI retains duplicate enum-name helper '{local_mapping}'")
 
     if "snap.bound" not in arduino_text or "s.bound" not in idf_text:
         fail("both settings commands must expose bus-binding state")

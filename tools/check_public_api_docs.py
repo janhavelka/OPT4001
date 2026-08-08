@@ -41,6 +41,15 @@ HEADER_TOKENS = {
         "bus-wide",
         "low <= high",
         "sampleCounterDelta",
+        "driverStateName",
+        "driverState()",
+        "isOnline()",
+        "lastOkMs()",
+        "lastErrorMs()",
+        "lastError()",
+        "consecutiveFailures()",
+        "totalFailures()",
+        "totalSuccess()",
     ],
     "include/OPT4001/Config.h": [
         "must honor",
@@ -60,6 +69,8 @@ HEADER_TOKENS = {
         "CRC_ERROR",
         "I2C_TIMEOUT",
         "BUSY",
+        "errorName",
+        "toString",
     ],
 }
 

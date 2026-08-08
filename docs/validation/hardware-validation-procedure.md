@@ -34,7 +34,10 @@ validation claims until observed evidence is committed.
 
 Run and record:
 
-```bash
+On Windows, all PlatformIO commands below must use `scripts\pio.cmd`; it selects
+the existing VS Code-managed PlatformIO installation.
+
+```powershell
 python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
 python tools/hil_opt4001_runner.py --parser-self-test
@@ -44,10 +47,11 @@ python tools/check_version_header_contract.py
 python tools/check_readiness_claims.py
 python tools/check_public_api_docs.py
 python scripts/generate_version.py check
-python -m platformio test -e native
-python -m platformio run -e esp32s3dev
-python -m platformio run -e esp32s2dev
-python -m platformio pkg pack
+.\scripts\pio.cmd test -e native
+.\scripts\pio.cmd run -e native_core_no_arduino
+.\scripts\pio.cmd run -e esp32s3dev
+.\scripts\pio.cmd run -e esp32s2dev
+.\scripts\pio.cmd pkg pack
 idf.py -C examples/esp_idf/basic set-target esp32s3 build
 idf.py -C examples/esp_idf/basic set-target esp32s2 build
 ```

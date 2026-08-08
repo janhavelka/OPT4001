@@ -42,7 +42,32 @@ README_REQUIRED = [
     "readLatestSample()",
     "readBurst()",
     "hardware/cache state",
+    "native_core_no_arduino",
+    "check_clean_consumer_package.py",
+    "naming-audit-20260808.md",
+    ".\\scripts\\pio.cmd test -e native",
 ]
+
+FORBIDDEN_REPOSITORY_PATHS = (
+    "docs/prompts",
+    "docs/reports/hil-validation-COM8-20260629.md",
+    "examples/common/CommandHandler.h",
+)
+
+CURRENT_INSTRUCTION_SURFACES = (
+    "README.md",
+    "CONTRIBUTING.md",
+    "docs/validation/hardware-validation-procedure.md",
+    "docs/validation/release-checklist.md",
+    "docs/validation/validation-status.md",
+)
+
+FORBIDDEN_WINDOWS_PIO_COMMANDS = (
+    "python -m platformio",
+    "`pio run",
+    "`pio test",
+    "`pio pkg",
+)
 
 CI_REQUIRED = [
     "python tools/check_core_timing_guard.py",
@@ -76,6 +101,16 @@ def read_rel(path: str) -> str:
 
 
 def main() -> int:
+    for rel in FORBIDDEN_REPOSITORY_PATHS:
+        if (ROOT / rel).exists():
+            fail(f"obsolete repository artifact still present: {rel}")
+
+    for rel in CURRENT_INSTRUCTION_SURFACES:
+        text = read_rel(rel)
+        for token in FORBIDDEN_WINDOWS_PIO_COMMANDS:
+            if token in text:
+                fail(f"{rel} bypasses the required Windows PlatformIO wrapper: {token}")
+
     for rel in CLAIM_SURFACES:
         text = read_rel(rel)
         lowered = text.lower()

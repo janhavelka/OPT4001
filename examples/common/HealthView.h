@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 
+#include "OPT4001/OPT4001.h"
 #include "examples/common/Log.h"
 
 namespace health_view {
@@ -40,18 +41,9 @@ inline const char* successRateColor(float pct) {
   return colorRed();
 }
 
-inline const char* stateToString(int state) {
-  switch (state) {
-    case 0: return "UNINIT";
-    case 1: return "READY";
-    case 2: return "DEGRADED";
-    case 3: return "OFFLINE";
-    default: return "UNKNOWN";
-  }
-}
-
-inline const char* stateColor(int state, bool online, uint8_t consecutiveFailures) {
-  if (state == 0) {
+inline const char* stateColor(OPT4001::DriverState state, bool online,
+                              uint8_t consecutiveFailures) {
+  if (state == OPT4001::DriverState::UNINIT) {
     return colorYellow();
   }
   return LOG_COLOR_STATE(online, consecutiveFailures);
@@ -59,15 +51,17 @@ inline const char* stateColor(int state, bool online, uint8_t consecutiveFailure
 
 template <typename DriverT>
 struct Snapshot {
-  int state = 0;
+  OPT4001::DriverState state = OPT4001::DriverState::UNINIT;
   bool online = false;
+  bool hardwareConfigDirty = false;
   uint8_t consecutiveFailures = 0;
   uint32_t totalFailures = 0;
   uint32_t totalSuccess = 0;
 
   void capture(const DriverT& driver) {
-    state = static_cast<int>(driver.state());
+    state = driver.state();
     online = driver.isOnline();
+    hardwareConfigDirty = driver.hardwareConfigDirty();
     consecutiveFailures = driver.consecutiveFailures();
     totalFailures = driver.totalFailures();
     totalSuccess = driver.totalSuccess();
@@ -78,18 +72,21 @@ template <typename DriverT>
 inline void printHealthView(const DriverT& driver) {
   Snapshot<DriverT> snap;
   snap.capture(driver);
-  const uint32_t total = snap.totalSuccess + snap.totalFailures;
+  const uint64_t total = static_cast<uint64_t>(snap.totalSuccess) + snap.totalFailures;
   const float pct = (total > 0U)
                         ? (100.0f * static_cast<float>(snap.totalSuccess) /
                            static_cast<float>(total))
                         : 0.0f;
 
-  Serial.printf("Health: state=%s%s%s online=%s%s%s consecFail=%s%u%s ok=%s%lu%s fail=%s%lu%s rate=%s%.1f%%%s\n",
+  Serial.printf("Health: state=%s%s%s online=%s%s%s dirty=%s%s%s consec=%s%u%s ok=%s%lu%s fail=%s%lu%s rate=%s%.1f%%%s\n",
                 stateColor(snap.state, snap.online, snap.consecutiveFailures),
-                stateToString(snap.state),
+                OPT4001::driverStateName(snap.state),
                 colorReset(),
                 boolColor(snap.online),
                 snap.online ? "true" : "false",
+                colorReset(),
+                snap.hardwareConfigDirty ? colorYellow() : colorGreen(),
+                snap.hardwareConfigDirty ? "true" : "false",
                 colorReset(),
                 failureColor(static_cast<uint32_t>(snap.consecutiveFailures)),
                 static_cast<unsigned>(snap.consecutiveFailures),
@@ -113,10 +110,10 @@ inline void printHealthDiff(const Snapshot<DriverT>& before,
   if (before.state != after.state) {
     Serial.printf("  State: %s%s%s -> %s%s%s\n",
                   stateColor(before.state, before.online, before.consecutiveFailures),
-                  stateToString(before.state),
+                  OPT4001::driverStateName(before.state),
                   colorReset(),
                   stateColor(after.state, after.online, after.consecutiveFailures),
-                  stateToString(after.state),
+                  OPT4001::driverStateName(after.state),
                   colorReset());
     changed = true;
   }
@@ -128,6 +125,12 @@ inline void printHealthDiff(const Snapshot<DriverT>& before,
                   boolColor(after.online),
                   after.online ? "true" : "false",
                   colorReset());
+    changed = true;
+  }
+  if (before.hardwareConfigDirty != after.hardwareConfigDirty) {
+    Serial.printf("  Dirty: %s -> %s\n",
+                  before.hardwareConfigDirty ? "true" : "false",
+                  after.hardwareConfigDirty ? "true" : "false");
     changed = true;
   }
   if (before.consecutiveFailures != after.consecutiveFailures) {

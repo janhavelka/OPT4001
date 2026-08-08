@@ -1,4 +1,4 @@
-version: "1.2.0"
+version: "1.2.1"
 description: "Production-oriented OPT4001 ambient light sensor driver with framework-neutral core."
 license: "MIT"
 url: "https://github.com/janhavelka/OPT4001"

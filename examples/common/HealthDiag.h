@@ -1,9 +1,6 @@
 /**
  * @file HealthDiag.h
- * @brief Verbose health diagnostic helpers for OPT4001 examples.
- *
- * Provides detailed logging of driver health state, counters, and
- * state transitions for debugging and monitoring.
+ * @brief Periodic health monitor for the OPT4001 Arduino example.
  *
  * NOT part of the library API. Example-only.
  */
@@ -13,262 +10,58 @@
 #include <Arduino.h>
 
 #include "OPT4001/OPT4001.h"
-#include "OPT4001/Status.h"
+#include "examples/common/HealthView.h"
 #include "examples/common/Log.h"
 
 namespace diag {
 
-/**
- * @brief Convert DriverState enum to human-readable string.
- */
-inline const char* stateToString(OPT4001::DriverState state) {
-  return OPT4001::driverStateName(state);
-}
-
-/**
- * @brief Convert Err enum to human-readable string.
- */
-inline const char* errToString(OPT4001::Err err) {
-  return OPT4001::errorName(err);
-}
-
-/**
- * @brief Get state color indicator for terminal output.
- */
-inline const char* stateColor(OPT4001::DriverState state) {
-  switch (state) {
-    case OPT4001::DriverState::READY:    return LOG_COLOR_GREEN;
-    case OPT4001::DriverState::DEGRADED: return LOG_COLOR_YELLOW;
-    case OPT4001::DriverState::OFFLINE:  return LOG_COLOR_RED;
-    case OPT4001::DriverState::UNINIT:   return LOG_COLOR_YELLOW;
-    default:                              return LOG_COLOR_RESET;
-  }
-}
-
-inline const char* colorReset() { return LOG_COLOR_RESET; }
-
-inline const char* boolColor(bool value) {
-  return value ? LOG_COLOR_GREEN : LOG_COLOR_RED;
-}
-
-inline const char* successRateColor(float pct) {
-  if (pct >= 99.9f) return LOG_COLOR_GREEN;
-  if (pct >= 80.0f) return LOG_COLOR_YELLOW;
-  return LOG_COLOR_RED;
-}
-
-inline const char* failureCountColor(uint32_t failures) {
-  if (failures == 0U) return LOG_COLOR_GREEN;
-  if (failures < 3U) return LOG_COLOR_YELLOW;
-  return LOG_COLOR_RED;
-}
-
-inline const char* successCountColor(uint32_t successes) {
-  return (successes > 0U) ? LOG_COLOR_GREEN : LOG_COLOR_GRAY;
-}
-
-inline const char* totalFailureColor(uint32_t failures) {
-  return (failures == 0U) ? LOG_COLOR_GREEN : LOG_COLOR_RED;
-}
-
-/**
- * @brief Print a compact one-line health summary.
- */
-inline void printHealthOneLine(OPT4001::OPT4001& driver) {
-  OPT4001::DriverState st = driver.state();
-  LOGI("Health: state=%s%s%s online=%s%s%s consecFail=%s%u%s ok=%s%lu%s fail=%s%lu%s",
-       stateColor(st), stateToString(st), colorReset(),
-       boolColor(driver.isOnline()), driver.isOnline() ? "true" : "false", colorReset(),
-       failureCountColor(driver.consecutiveFailures()), driver.consecutiveFailures(), colorReset(),
-       successCountColor(driver.totalSuccess()), (unsigned long)driver.totalSuccess(), colorReset(),
-       totalFailureColor(driver.totalFailures()), (unsigned long)driver.totalFailures(), colorReset());
-}
-
-/**
- * @brief Print detailed verbose health diagnostics.
- */
-inline void printHealthVerbose(OPT4001::OPT4001& driver) {
-  OPT4001::DriverState st = driver.state();
-  OPT4001::Status lastErr = driver.lastError();
-  uint32_t now = millis();
-
-  const bool online = driver.isOnline();
-  const uint32_t totalSuccess = driver.totalSuccess();
-  const uint32_t totalFailures = driver.totalFailures();
-  uint32_t total = totalSuccess + totalFailures;
-  float successRate = (total > 0) ? (100.0f * totalSuccess / total) : 0.0f;
-
-  LOG_SERIAL.println();
-  LOGI("=== Driver Health ===");
-  LOGI("  State: %s%s%s", stateColor(st), stateToString(st), colorReset());
-  LOGI("  Online: %s%s%s", boolColor(online), online ? "true" : "false", colorReset());
-  LOGI("  Consecutive failures: %s%u%s",
-       failureCountColor(driver.consecutiveFailures()),
-       driver.consecutiveFailures(),
-       colorReset());
-  LOGI("  Total success: %s%lu%s",
-       successCountColor(totalSuccess),
-       (unsigned long)totalSuccess,
-       colorReset());
-  LOGI("  Total failures: %s%lu%s",
-       totalFailureColor(totalFailures),
-       (unsigned long)totalFailures,
-       colorReset());
-  LOGI("  Success rate: %s%.1f%%%s", successRateColor(successRate), successRate, colorReset());
-
-  LOGI("=== Timestamps ===");
-
-  uint32_t lastOk = driver.lastOkMs();
-  uint32_t lastFail = driver.lastErrorMs();
-
-  if (lastOk > 0) {
-    LOGI("  Last success: %lu ms ago (at %lu ms)",
-         (unsigned long)(now - lastOk), (unsigned long)lastOk);
-  } else {
-    LOGI("  Last success: never");
-  }
-
-  if (lastFail > 0) {
-    LOGI("  Last failure: %lu ms ago (at %lu ms)",
-         (unsigned long)(now - lastFail), (unsigned long)lastFail);
-  } else {
-    LOGI("  Last failure: never");
-  }
-
-  LOGI("=== Last Error ===");
-
-  if (lastErr.ok()) {
-    LOGI("  Last error: %snone%s", LOG_COLOR_GREEN, colorReset());
-  } else {
-    LOGI("  Code: %s%s%s", LOG_COLOR_RED, errToString(lastErr.code), colorReset());
-    LOGI("  Detail: %ld", (long)lastErr.detail);
-    LOGI("  Message: %s", lastErr.msg ? lastErr.msg : "(null)");
-  }
-  LOG_SERIAL.println();
-}
-
-/**
- * @brief Health snapshot for before/after comparison.
- */
-struct HealthSnapshot {
-  OPT4001::DriverState state;
-  uint8_t consecutiveFailures;
-  uint32_t totalSuccess;
-  uint32_t totalFailures;
-  uint32_t timestamp;
-
-  void capture(OPT4001::OPT4001& driver) {
-    state = driver.state();
-    consecutiveFailures = driver.consecutiveFailures();
-    totalSuccess = driver.totalSuccess();
-    totalFailures = driver.totalFailures();
-    timestamp = millis();
-  }
-};
-
-/**
- * @brief Compare two snapshots and print differences.
- */
-inline void printHealthDiff(const HealthSnapshot& before, const HealthSnapshot& after) {
-  bool changed = false;
-
-  if (before.state != after.state) {
-    LOGI("  State: %s%s%s -> %s%s%s",
-         stateColor(before.state), stateToString(before.state), colorReset(),
-         stateColor(after.state), stateToString(after.state), colorReset());
-    changed = true;
-  }
-
-  if (before.consecutiveFailures != after.consecutiveFailures) {
-    const bool improved = after.consecutiveFailures < before.consecutiveFailures;
-    const char* color = improved ? LOG_COLOR_GREEN : LOG_COLOR_RED;
-    LOGI("  ConsecFail: %s%u -> %u%s",
-         color,
-         before.consecutiveFailures,
-         after.consecutiveFailures,
-         colorReset());
-    changed = true;
-  }
-
-  if (before.totalSuccess != after.totalSuccess) {
-    LOGI("  TotalOK: %lu -> %s%lu (+%lu)%s",
-         (unsigned long)before.totalSuccess,
-         LOG_COLOR_GREEN,
-         (unsigned long)after.totalSuccess,
-         (unsigned long)(after.totalSuccess - before.totalSuccess),
-         colorReset());
-    changed = true;
-  }
-
-  if (before.totalFailures != after.totalFailures) {
-    LOGI("  TotalFail: %lu -> %s%lu (+%lu)%s",
-         (unsigned long)before.totalFailures,
-         LOG_COLOR_RED,
-         (unsigned long)after.totalFailures,
-         (unsigned long)(after.totalFailures - before.totalFailures),
-         colorReset());
-    changed = true;
-  }
-
-  if (!changed) {
-    LOGI("  (no changes)");
-  }
-}
-
-/**
- * @brief Continuously monitor health with periodic logging.
- * Call from loop() for real-time monitoring.
- */
+/** Periodically print health or print immediately when state/counters change. */
 class HealthMonitor {
 public:
   /**
-   * @brief Initialize monitor with logging interval.
-   * @param intervalMs How often to log (0 = only on change)
+   * @param intervalMs Periodic reporting interval; zero reports changes only.
    */
-  void begin(uint32_t intervalMs = 1000) {
+  void begin(uint32_t intervalMs = 1000U) {
     _intervalMs = intervalMs;
-    _lastLogMs = 0;
+    _lastLogMs = 0U;
     _lastState = OPT4001::DriverState::UNINIT;
-    _lastConsecFail = 0;
+    _lastConsecutiveFailures = 0U;
   }
 
   /**
-   * @brief Check and optionally log health changes.
-   * @param driver Driver instance to monitor
-   * @param forceLog If true, always log even if no change
+   * @param driver Driver whose cache-only health accessors are sampled.
+   * @param forceLog Print even when no tracked value or interval changed.
    */
-  void tick(OPT4001::OPT4001& driver, bool forceLog = false) {
-    uint32_t now = millis();
-    OPT4001::DriverState currentState = driver.state();
-    uint8_t currentFail = driver.consecutiveFailures();
+  void tick(const OPT4001::OPT4001& driver, bool forceLog = false) {
+    const uint32_t nowMs = millis();
+    const OPT4001::DriverState currentState = driver.state();
+    const uint8_t currentFailures = driver.consecutiveFailures();
+    const bool stateChanged = currentState != _lastState;
+    const bool failuresChanged = currentFailures != _lastConsecutiveFailures;
+    const bool intervalElapsed =
+        _intervalMs > 0U && static_cast<uint32_t>(nowMs - _lastLogMs) >= _intervalMs;
 
-    bool stateChanged = (currentState != _lastState);
-    bool failChanged = (currentFail != _lastConsecFail);
-    bool intervalElapsed = (_intervalMs > 0 && (now - _lastLogMs >= _intervalMs));
-    bool printSummary = stateChanged || failChanged || intervalElapsed || forceLog;
-
-    if (printSummary) {
-      if (stateChanged) {
-        LOGI("[HEALTH] State transition: %s%s%s -> %s%s%s",
-             stateColor(_lastState), stateToString(_lastState), colorReset(),
-             stateColor(currentState), stateToString(currentState), colorReset());
-      }
-
-      if (printSummary) {
-        printHealthOneLine(driver);
-      }
-
-      _lastState = currentState;
-      _lastConsecFail = currentFail;
-      _lastLogMs = now;
+    if (!stateChanged && !failuresChanged && !intervalElapsed && !forceLog) {
+      return;
     }
+
+    if (stateChanged) {
+      LOGI("[HEALTH] State transition: %s -> %s",
+           OPT4001::driverStateName(_lastState),
+           OPT4001::driverStateName(currentState));
+    }
+    printHealthView(driver);
+
+    _lastState = currentState;
+    _lastConsecutiveFailures = currentFailures;
+    _lastLogMs = nowMs;
   }
 
 private:
-  uint32_t _intervalMs = 1000;
-  uint32_t _lastLogMs = 0;
+  uint32_t _intervalMs = 1000U;
+  uint32_t _lastLogMs = 0U;
   OPT4001::DriverState _lastState = OPT4001::DriverState::UNINIT;
-  uint8_t _lastConsecFail = 0;
+  uint8_t _lastConsecutiveFailures = 0U;
 };
 
 }  // namespace diag

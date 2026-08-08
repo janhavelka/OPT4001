@@ -23,11 +23,16 @@ The matching PDFs in `reference/` are retained as vendor source material.
 
 ## Validation
 
-- `reports/source-audit-20260807.md` - 2026-08-07 authoritative
-  source/datasheet/CLI findings, fixes, bounded-loop review, workspace parity,
-  and open HIL/release gates.
+- [Feature-completeness matrix](reports/feature-matrix-20260808.md) - SBOS993A
+  capability-to-core/CLI/test coverage and deliberately transport-owned items.
+- [Naming and repository-hygiene audit](reports/naming-audit-20260808.md) -
+  evidence-based public/private naming rubric, compatibility decisions, and
+  obsolete-code/artifact removals.
+- [Historical source audit](reports/source-audit-20260807.md) - dated
+  source/datasheet/CLI findings and the validation evidence captured in that
+  earlier pass.
 - [Validation status](validation/validation-status.md) - current evidence and
-  pending hardware/ESP-IDF evidence.
+  pending physical evidence.
 - [Hardware validation procedure](validation/hardware-validation-procedure.md)
   - repeatable hardware/HIL procedure and command sequences.
 - [Release checklist](validation/release-checklist.md) - local checks, CI,

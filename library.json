@@ -1,6 +1,6 @@
 {
   "name": "OPT4001",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Production-oriented OPT4001 ambient light sensor driver with framework-neutral core",
   "keywords": [
     "opt4001",
@@ -53,7 +53,6 @@
       ".idea",
       "docs/doxygen",
       "hil_logs",
-      "prompts",
       "test",
       "tools",
       "*.tar.gz"

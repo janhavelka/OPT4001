@@ -435,7 +435,7 @@ Status OPT4001::softReset() {
 
   const uint8_t payload[1] = {cmd::GENERAL_CALL_RESET};
   ScopedOfflineI2cAllowance allowOfflineI2c(_allowOfflineI2c, true);
-  Status st = _i2cWriteTrackedTo(cmd::GENERAL_CALL_ADDRESS, payload, sizeof(payload));
+  Status st = _i2cWriteTrackedAddr(cmd::GENERAL_CALL_ADDRESS, payload, sizeof(payload));
   if (!st.ok()) {
     return st;
   }
@@ -454,7 +454,7 @@ Status OPT4001::resetAndReapply() {
   const Config savedConfig = _config;
   const uint8_t payload[1] = {cmd::GENERAL_CALL_RESET};
   ScopedOfflineI2cAllowance allowOfflineI2c(_allowOfflineI2c, true);
-  Status st = _i2cWriteTrackedTo(cmd::GENERAL_CALL_ADDRESS, payload, sizeof(payload));
+  Status st = _i2cWriteTrackedAddr(cmd::GENERAL_CALL_ADDRESS, payload, sizeof(payload));
   if (!st.ok()) {
     return st;
   }
@@ -2240,7 +2240,7 @@ Status OPT4001::_i2cWriteReadRaw(const uint8_t* txBuf, size_t txLen,
                               _config.i2cUser);
 }
 
-Status OPT4001::_i2cWriteRawTo(uint8_t addr, const uint8_t* buf, size_t len) {
+Status OPT4001::_i2cWriteRawAddr(uint8_t addr, const uint8_t* buf, size_t len) {
   if (_config.i2cWrite == nullptr) {
     return Status::Error(Err::INVALID_CONFIG, "I2C write callback missing");
   }
@@ -2252,7 +2252,7 @@ Status OPT4001::_i2cWriteRawTo(uint8_t addr, const uint8_t* buf, size_t len) {
 }
 
 Status OPT4001::_i2cWriteRaw(const uint8_t* buf, size_t len) {
-  return _i2cWriteRawTo(_config.i2cAddress, buf, len);
+  return _i2cWriteRawAddr(_config.i2cAddress, buf, len);
 }
 
 Status OPT4001::_i2cWriteReadTracked(const uint8_t* txBuf, size_t txLen,
@@ -2284,14 +2284,14 @@ Status OPT4001::_i2cWriteTracked(const uint8_t* buf, size_t len) {
   return _updateHealth(st);
 }
 
-Status OPT4001::_i2cWriteTrackedTo(uint8_t addr, const uint8_t* buf, size_t len) {
+Status OPT4001::_i2cWriteTrackedAddr(uint8_t addr, const uint8_t* buf, size_t len) {
   if (_initialized && _driverState == DriverState::OFFLINE && !_allowOfflineI2c) {
     return offlineStatus();
   }
   if (_pollJob != PollJob::NONE && !_pollExecuting) {
     return Status::Error(Err::BUSY, "Poll job already active");
   }
-  Status st = _i2cWriteRawTo(addr, buf, len);
+  Status st = _i2cWriteRawAddr(addr, buf, len);
   if (st.code == Err::INVALID_CONFIG || st.code == Err::INVALID_PARAM) {
     return st;
   }
@@ -2688,7 +2688,7 @@ Status OPT4001::_pollResetAndReapplyJob(uint32_t nowMs,
     if (_pollStep == PollStep::WRITE_RESET) {
       const uint8_t payload[1] = {cmd::GENERAL_CALL_RESET};
       ScopedOfflineI2cAllowance allowOfflineI2c(_allowOfflineI2c, true);
-      Status st = _i2cWriteTrackedTo(cmd::GENERAL_CALL_ADDRESS, payload, sizeof(payload));
+      Status st = _i2cWriteTrackedAddr(cmd::GENERAL_CALL_ADDRESS, payload, sizeof(payload));
       --remainingInstructions;
       if (!st.ok()) {
         return _finishPollJob(st);
@@ -2840,26 +2840,6 @@ void OPT4001::_markFreshSampleConsumedAt(const Sample& sample, uint32_t nowMs) {
     _conversionStarted = false;
     _pendingMode = Mode::POWER_DOWN;
   }
-}
-
-Status OPT4001::_markConversionReadyByRegisterPoll() {
-  uint16_t configReg = 0;
-  Status st = _readRegister16Tracked(cmd::REG_CONFIGURATION, configReg);
-  if (!st.ok()) {
-    return st;
-  }
-
-  const Mode hardwareMode =
-      static_cast<Mode>((configReg & cmd::MASK_MODE) >> cmd::BIT_MODE);
-  if (hardwareMode != Mode::POWER_DOWN) {
-    return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
-  }
-
-  _conversionStarted = false;
-  _conversionReady = true;
-  _sampleAvailable = true;
-  _pendingMode = Mode::POWER_DOWN;
-  return Status::Ok();
 }
 
 uint16_t OPT4001::_buildConfigurationRegister(Mode mode) const {

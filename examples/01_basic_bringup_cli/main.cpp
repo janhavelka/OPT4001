@@ -85,14 +85,6 @@ void serviceStress();
 void startStressSession(uint32_t count, bool mixed);
 void finishStress(bool cancelled);
 
-const char* errToStr(OPT4001::Err err) {
-  return OPT4001::errorName(err);
-}
-
-const char* stateToStr(OPT4001::DriverState state) {
-  return OPT4001::driverStateName(state);
-}
-
 const char* modeToStr(OPT4001::Mode mode) {
   switch (mode) {
     case OPT4001::Mode::POWER_DOWN: return "POWER_DOWN";
@@ -412,7 +404,7 @@ void discoverOpt4001() {
                     address, LOG_COLOR_GREEN, LOG_COLOR_RESET);
     } else if (verboseMode) {
       Serial.printf("  0x%02X: %s%s%s\n", address, LOG_COLOR_GRAY,
-                    errToStr(st.code), LOG_COLOR_RESET);
+                    OPT4001::errorName(st.code), LOG_COLOR_RESET);
     }
   }
   if (!found) {
@@ -424,7 +416,7 @@ void discoverOpt4001() {
 void printStatus(const OPT4001::Status& st) {
   Serial.printf("  Status: %s%s%s (code=%u, detail=%ld)\n",
                 LOG_COLOR_RESULT(st.ok()),
-                errToStr(st.code),
+                OPT4001::errorName(st.code),
                 LOG_COLOR_RESET,
                 static_cast<unsigned>(st.code),
                 static_cast<long>(st.detail));
@@ -469,7 +461,7 @@ void printDriverHealth() {
   const uint32_t now = millis();
   const uint32_t totalOk = device.totalSuccess();
   const uint32_t totalFail = device.totalFailures();
-  const uint32_t total = totalOk + totalFail;
+  const uint64_t total = static_cast<uint64_t>(totalOk) + totalFail;
   const float successRate = (total > 0U)
                                 ? (100.0f * static_cast<float>(totalOk) / static_cast<float>(total))
                                 : 0.0f;
@@ -480,7 +472,7 @@ void printDriverHealth() {
   Serial.println("=== Driver Health ===");
   Serial.printf("  State: %s%s%s\n",
                 stateColor(st, online, device.consecutiveFailures()),
-                stateToStr(st),
+                OPT4001::driverStateName(st),
                 LOG_COLOR_RESET);
   Serial.printf("  Online: %s%s%s\n",
                 online ? LOG_COLOR_GREEN : LOG_COLOR_RED,
@@ -528,7 +520,7 @@ void printDriverHealth() {
   if (!lastErr.ok()) {
     Serial.printf("  Error code: %s%s%s\n",
                   LOG_COLOR_RED,
-                  errToStr(lastErr.code),
+                  OPT4001::errorName(lastErr.code),
                   LOG_COLOR_RESET);
     Serial.printf("  Error detail: %ld\n", static_cast<long>(lastErr.detail));
     if (lastErr.msg && lastErr.msg[0]) {
@@ -894,7 +886,7 @@ void printSnapshot() {
   Serial.printf("  Initialized: %s\n", log_bool_str(snap.initialized));
   Serial.printf("  State: %s%s%s\n",
                 stateColor(snap.state, online, 0),
-                stateToStr(snap.state),
+                OPT4001::driverStateName(snap.state),
                 LOG_COLOR_RESET);
   Serial.printf("  Package / address: %s / 0x%02X\n",
                 packageToStr(snap.packageVariant),
@@ -1498,41 +1490,41 @@ void runSelfTest() {
       device.totalSuccess() == succBefore &&
       device.totalFailures() == failBefore &&
       device.consecutiveFailures() == consBefore;
-  reportCheck("probe responds", pst.ok(), pst.ok() ? "" : errToStr(pst.code));
+  reportCheck("probe responds", pst.ok(), pst.ok() ? "" : OPT4001::errorName(pst.code));
   reportCheck("probe no-health-side-effects", probeHealthUnchanged, "");
 
   uint16_t didRaw = 0;
   OPT4001::Status st = device.readDeviceId(didRaw);
-  reportCheck("readDeviceId(raw)", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("readDeviceId(raw)", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
   if (st.ok()) {
     reportCheck("device id raw expected", didRaw == OPT4001::cmd::DEVICE_ID_RESET, "");
   }
 
   OPT4001::DeviceIdInfo did;
   st = device.readDeviceId(did);
-  reportCheck("readDeviceId(decoded)", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("readDeviceId(decoded)", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
   if (st.ok()) {
     reportCheck("device id matches", did.matchesExpected, "");
   }
 
   uint16_t cfgRaw = 0;
   st = device.readConfiguration(cfgRaw);
-  reportCheck("readConfiguration(raw)", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("readConfiguration(raw)", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
 
   OPT4001::ConfigurationInfo cfgInfo;
   st = device.readConfiguration(cfgInfo);
-  reportCheck("readConfiguration(decoded)", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("readConfiguration(decoded)", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
   if (st.ok()) {
     reportCheck("configuration decode valid", cfgInfo.valid, "");
   }
 
   uint16_t intCfgRaw = 0;
   st = device.readIntConfiguration(intCfgRaw);
-  reportCheck("readIntConfiguration(raw)", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("readIntConfiguration(raw)", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
 
   OPT4001::IntConfigurationInfo intInfo;
   st = device.readIntConfiguration(intInfo);
-  reportCheck("readIntConfiguration(decoded)", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("readIntConfiguration(decoded)", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
   if (st.ok()) {
     reportCheck("intcfg decode valid", intInfo.valid, "");
     reportCheck("intcfg fixed pattern valid", intInfo.fixedPatternValid, "");
@@ -1540,17 +1532,17 @@ void runSelfTest() {
 
   uint8_t regBlock[8] = {};
   st = device.readRegisters(OPT4001::cmd::REG_RESULT, regBlock, sizeof(regBlock));
-  reportCheck("readRegisters(0x00,8)", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("readRegisters(0x00,8)", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
 
   OPT4001::Threshold low;
   OPT4001::Threshold high;
   st = device.getThresholds(low, high);
-  reportCheck("getThresholds", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("getThresholds", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
 
   float lowLux = 0.0f;
   float highLux = 0.0f;
   st = device.getThresholdsLux(lowLux, highLux);
-  reportCheck("getThresholdsLux", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("getThresholdsLux", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
   reportCheck("scale helpers sane",
               device.getCurrentFullScaleLux() > 0.0f &&
                   device.getCurrentResolutionLux() > 0.0f &&
@@ -1567,7 +1559,8 @@ void runSelfTest() {
 
   OPT4001::Sample sample;
   st = device.readBlocking(sample, BLOCKING_READ_TIMEOUT_MS);
-  reportCheck("readBlocking", sampleStatusHasData(st), sampleStatusHasData(st) ? "" : errToStr(st.code));
+  reportCheck("readBlocking", sampleStatusHasData(st),
+              sampleStatusHasData(st) ? "" : OPT4001::errorName(st.code));
   if (sampleStatusHasData(st)) {
     reportCheck("sample lux non-negative", sample.lux >= 0.0f, "");
     const float helperLux = device.adcCodesToLux(sample.adcCodes);
@@ -1580,7 +1573,8 @@ void runSelfTest() {
 
     OPT4001::Threshold encodedThreshold;
     OPT4001::Status helperSt = device.luxToThreshold(sample.lux, encodedThreshold);
-    reportCheck("luxToThreshold", helperSt.ok(), helperSt.ok() ? "" : errToStr(helperSt.code));
+    reportCheck("luxToThreshold", helperSt.ok(),
+                helperSt.ok() ? "" : OPT4001::errorName(helperSt.code));
     if (helperSt.ok()) {
       reportCheck("threshold helper packs 12-bit result", encodedThreshold.result <= 0x0FFFu, "");
       reportCheck("threshold roundtrip sane", device.thresholdToLux(encodedThreshold) >= 0.0f, "");
@@ -1593,7 +1587,8 @@ void runSelfTest() {
            ? device.tryReadSample(trySample, didRead)
            : OPT4001::Status::Error(
                  OPT4001::Err::TIMEOUT, "tryReadSample readiness failed");
-  reportCheck("tryReadSample", st.ok() || sampleStatusWarn(st), st.ok() || sampleStatusWarn(st) ? "" : errToStr(st.code));
+  reportCheck("tryReadSample", st.ok() || sampleStatusWarn(st),
+              st.ok() || sampleStatusWarn(st) ? "" : OPT4001::errorName(st.code));
   reportCheck("tryReadSample returned data", didRead, "");
 
   float tryLux = -1.0f;
@@ -1602,12 +1597,13 @@ void runSelfTest() {
            ? device.tryReadLux(tryLux, didRead)
            : OPT4001::Status::Error(
                  OPT4001::Err::TIMEOUT, "tryReadLux readiness failed");
-  reportCheck("tryReadLux", st.ok() || sampleStatusWarn(st), st.ok() || sampleStatusWarn(st) ? "" : errToStr(st.code));
+  reportCheck("tryReadLux", st.ok() || sampleStatusWarn(st),
+              st.ok() || sampleStatusWarn(st) ? "" : OPT4001::errorName(st.code));
   reportCheck("tryReadLux returned data", didRead && tryLux >= 0.0f, "");
 
   OPT4001::Sample cached;
   st = device.getLastSample(cached);
-  reportCheck("getLastSample", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("getLastSample", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
   if (st.ok()) {
     reportCheck("sample timestamp set", device.sampleTimestampMs() > 0U, "");
     reportCheck("sample age sane", device.sampleAgeMs(millis()) < 60000U, "");
@@ -1618,14 +1614,16 @@ void runSelfTest() {
            ? device.readSampleSlot(0, slot0)
            : OPT4001::Status::Error(
                  OPT4001::Err::TIMEOUT, "readSampleSlot readiness failed");
-  reportCheck("readSampleSlot(0)", sampleStatusHasData(st), sampleStatusHasData(st) ? "" : errToStr(st.code));
+  reportCheck("readSampleSlot(0)", sampleStatusHasData(st),
+              sampleStatusHasData(st) ? "" : OPT4001::errorName(st.code));
 
   OPT4001::BurstFrame frame;
   st = waitForFreshSampleReady(OPT4001::Mode::ONE_SHOT)
            ? device.readBurst(frame)
            : OPT4001::Status::Error(
                  OPT4001::Err::TIMEOUT, "readBurst readiness failed");
-  reportCheck("readBurst", sampleStatusHasData(st), sampleStatusHasData(st) ? "" : errToStr(st.code));
+  reportCheck("readBurst", sampleStatusHasData(st),
+              sampleStatusHasData(st) ? "" : OPT4001::errorName(st.code));
   if (sampleStatusHasData(st)) {
     reportCheck("burst counter delta sane",
                 device.sampleCounterDelta(frame.fifo0.counter, frame.newest.counter) <
@@ -1635,10 +1633,11 @@ void runSelfTest() {
 
   uint16_t flagsRaw = 0;
   st = device.readFlagsRaw(flagsRaw);
-  reportCheck("readFlagsRaw", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("readFlagsRaw", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
 
   st = device.configureMeasurement(baseRange, baseTime, baseMode, baseQuickWake);
-  reportCheck("configureMeasurement(baseline)", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("configureMeasurement(baseline)", st.ok(),
+              st.ok() ? "" : OPT4001::errorName(st.code));
   reportCheck("configureMeasurement roundtrip",
               device.getRange() == baseRange &&
                   device.getConversionTime() == baseTime &&
@@ -1647,12 +1646,13 @@ void runSelfTest() {
               "");
 
   st = device.restoreDefaultThresholds();
-  reportCheck("restoreDefaultThresholds", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("restoreDefaultThresholds", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
   if (st.ok()) {
     OPT4001::Threshold defaultLow;
     OPT4001::Threshold defaultHigh;
     OPT4001::Status thresholdSt = device.getThresholds(defaultLow, defaultHigh);
-    reportCheck("default thresholds readable", thresholdSt.ok(), thresholdSt.ok() ? "" : errToStr(thresholdSt.code));
+    reportCheck("default thresholds readable", thresholdSt.ok(),
+                thresholdSt.ok() ? "" : OPT4001::errorName(thresholdSt.code));
     if (thresholdSt.ok()) {
       reportCheck("default low threshold matches reset",
                   packThresholdRaw(defaultLow) == OPT4001::cmd::THRESHOLD_L_RESET,
@@ -1663,44 +1663,47 @@ void runSelfTest() {
     }
   }
   st = device.setThresholds(baseLowThreshold, baseHighThreshold);
-  reportCheck("restore original thresholds", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("restore original thresholds", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
 
   st = device.enableConversionReadyInterrupt();
-  reportCheck("enableConversionReadyInterrupt", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("enableConversionReadyInterrupt", st.ok(),
+              st.ok() ? "" : OPT4001::errorName(st.code));
   reportCheck("verify intcfg=EVERY_CONVERSION",
               device.getIntDirection() == OPT4001::IntDirection::PIN_OUTPUT &&
                   device.getIntConfig() == OPT4001::IntConfig::EVERY_CONVERSION,
               "");
 
   st = device.enableFifoFullInterrupt();
-  reportCheck("enableFifoFullInterrupt", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("enableFifoFullInterrupt", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
   reportCheck("verify intcfg=FIFO_FULL",
               device.getIntDirection() == OPT4001::IntDirection::PIN_OUTPUT &&
                   device.getIntConfig() == OPT4001::IntConfig::FIFO_FULL,
               "");
 
   st = device.enableThresholdInterruptLux(lowLux, highLux);
-  reportCheck("enableThresholdInterruptLux", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("enableThresholdInterruptLux", st.ok(),
+              st.ok() ? "" : OPT4001::errorName(st.code));
   reportCheck("verify intcfg=THRESHOLD",
               device.getIntDirection() == OPT4001::IntDirection::PIN_OUTPUT &&
                   device.getIntConfig() == OPT4001::IntConfig::THRESHOLD,
               "");
 
   st = device.setThresholds(baseLowThreshold, baseHighThreshold);
-  reportCheck("restore thresholds after INT presets", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("restore thresholds after INT presets", st.ok(),
+              st.ok() ? "" : OPT4001::errorName(st.code));
   st = device.setIntDirection(baseIntDirection);
-  reportCheck("restore int direction", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("restore int direction", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
   st = device.setIntConfig(baseIntConfig);
-  reportCheck("restore int config", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("restore int config", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
 
   st = device.clearConversionReadyFlag();
-  reportCheck("clearConversionReadyFlag", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("clearConversionReadyFlag", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
 
   st = device.clearFlags();
-  reportCheck("clearFlags", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("clearFlags", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
 
   st = device.recover();
-  reportCheck("recover", st.ok(), st.ok() ? "" : errToStr(st.code));
+  reportCheck("recover", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
   reportCheck("isOnline", device.isOnline(), "");
 
   Serial.printf("Selfcheck result: pass=%s%lu%s fail=%s%lu%s skip=%s%lu%s\n",
@@ -1712,7 +1715,7 @@ void runSelfTest() {
 void printPollJobStatus() {
   Serial.printf("  Poll job: %s status=%s\n",
                 device.pollBusy() ? "ACTIVE" : "IDLE",
-                errToStr(device.lastPollStatus().code));
+                OPT4001::errorName(device.lastPollStatus().code));
 }
 
 void printPollJobResult() {

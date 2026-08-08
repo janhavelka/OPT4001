@@ -7,7 +7,8 @@ Thank you for considering contributing to this project!
 1. Fork the repository
 2. Create a feature branch: `git checkout -b feature/my-feature`
 3. Make your changes
-4. Ensure examples build: `pio run -e esp32s3dev -e esp32s2dev`
+4. On Windows, ensure examples build through the repository wrapper:
+   `.\scripts\pio.cmd run -e esp32s3dev -e esp32s2dev`
 5. Commit with a clear message: `git commit -m "feat: add X"`
 6. Push and open a Pull Request
 

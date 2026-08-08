@@ -617,11 +617,11 @@ private:
   // === Transport Wrappers ===
   Status _i2cWriteReadRaw(const uint8_t* txBuf, size_t txLen,
                           uint8_t* rxBuf, size_t rxLen);
-  Status _i2cWriteRawTo(uint8_t addr, const uint8_t* buf, size_t len);
+  Status _i2cWriteRawAddr(uint8_t addr, const uint8_t* buf, size_t len);
   Status _i2cWriteRaw(const uint8_t* buf, size_t len);
   Status _i2cWriteReadTracked(const uint8_t* txBuf, size_t txLen,
                               uint8_t* rxBuf, size_t rxLen);
-  Status _i2cWriteTrackedTo(uint8_t addr, const uint8_t* buf, size_t len);
+  Status _i2cWriteTrackedAddr(uint8_t addr, const uint8_t* buf, size_t len);
   Status _i2cWriteTracked(const uint8_t* buf, size_t len);
 
   // === Register Access ===
@@ -654,7 +654,6 @@ private:
   void _cacheSampleAt(const Sample& sample, uint32_t nowMs);
   void _cacheSample(const Sample& sample);
   void _markFreshSampleConsumedAt(const Sample& sample, uint32_t nowMs);
-  Status _markConversionReadyByRegisterPoll();
   uint16_t _buildConfigurationRegister(Mode mode) const;
   uint16_t _buildConfigurationRegister(const Config& config, Mode mode) const;
   uint16_t _buildIntConfigurationRegister() const;

@@ -16,7 +16,10 @@ of truth; `include/OPT4001/Version.h` is generated from it and committed.
 
 Run and record:
 
-```bash
+On Windows, all PlatformIO commands below must use `scripts\pio.cmd`; it selects
+the existing VS Code-managed PlatformIO installation.
+
+```powershell
 python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
 python tools/hil_opt4001_runner.py --parser-self-test
@@ -27,11 +30,11 @@ python tools/check_clean_consumer_package.py
 python tools/check_readiness_claims.py
 python tools/check_public_api_docs.py
 python scripts/generate_version.py check
-python -m platformio test -e native
-python -m platformio run -e native_core_no_arduino
-python -m platformio run -e esp32s3dev
-python -m platformio run -e esp32s2dev
-python -m platformio pkg pack
+.\scripts\pio.cmd test -e native
+.\scripts\pio.cmd run -e native_core_no_arduino
+.\scripts\pio.cmd run -e esp32s3dev
+.\scripts\pio.cmd run -e esp32s2dev
+.\scripts\pio.cmd pkg pack
 ```
 
 Remove any generated `OPT4001-*.tar.gz` artifact after package validation.

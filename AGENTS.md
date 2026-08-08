@@ -32,7 +32,7 @@ src/                      - Implementation (.cpp)
 examples/
   01_*/
   common/                 - Example-only helpers (Log.h, BoardConfig.h,
-                            I2cTransport.h, I2cScanner.h, CommandHandler.h)
+                            I2cTransport.h, I2cScanner.h, CliLineBuffer.h)
 test/                     - Native/unit tests
 platformio.ini
 library.json

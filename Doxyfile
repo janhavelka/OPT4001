@@ -2,7 +2,7 @@
 # Generated and maintained for unified API documentation.
 
 PROJECT_NAME           = "OPT4001"
-PROJECT_NUMBER         = "1.2.0"
+PROJECT_NUMBER         = "1.2.1"
 PROJECT_BRIEF          = "Framework-neutral OPT4001 driver API documentation"
 OUTPUT_DIRECTORY       = docs/doxygen
 CREATE_SUBDIRS         = NO
@@ -38,6 +38,9 @@ INPUT                  = README.md \
                          docs/README.md \
                          docs/integration/esp-idf.md \
                          docs/integration/driver-contracts.md \
+                         docs/reports/feature-matrix-20260808.md \
+                         docs/reports/naming-audit-20260808.md \
+                         docs/reports/source-audit-20260807.md \
                          docs/validation/hardware-validation-procedure.md \
                          docs/validation/release-checklist.md \
                          docs/validation/validation-status.md \

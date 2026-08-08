@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-08-08
+
+### Changed
+
+- Aligned private transport-address helpers and example health/status output
+  with the stable library-owned naming used by mature workspace I2C drivers.
+- Reduced example-only health and CLI helpers to the paths exercised by the
+  diagnostic applications, while retaining typed dirty-state visibility.
+- Replaced completed implementation prompts and an empty NOT-RUN HIL report
+  with durable feature, naming, integration, and validation documentation.
+
+### Fixed
+
+- Removed an unreachable private readiness helper whose power-down inference
+  was not part of the driver's hardware-evidence freshness path.
+- Removed the unused legacy example command parser, avoiding a second parser
+  with silent truncation semantics beside the bounded shared line buffer.
+- Updated current validation evidence, CI links, commands, generated metadata,
+  and Doxygen inputs without claiming physical validation.
+- Kept example health-rate formatting correct when two saturated lifetime
+  counters would overflow a 32-bit intermediate.
+
+### Validation
+
+- Static framework, CLI, native-IDF, public-doc, version, readiness, package,
+  and HIL-parser contracts pass; native fake-transport tests remain 133/133.
+- The framework-neutral native consumer, clean packed-library consumer,
+  pioarduino 55.03.311 ESP32-S2/S3 builds, and pure ESP-IDF v6.0.1 CI baseline
+  pass. Hardware, optical, INT, FIFO timing/order, address-strap, and injected
+  electrical-fault evidence remain open.
+
 ## [1.2.0] - 2026-08-08
 
 ### Added
@@ -45,8 +76,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - PlatformIO native execution passes 133 fake-transport/parser/API-compatibility
   tests. The strict framework-neutral native-core link, package pack/clean
-  consumer, and current ESP32-S2/S3 builds pass locally. Pure-IDF CI remains to
-  run; this release does not claim new hardware validation.
+  consumer, current ESP32-S2/S3 builds, and pure ESP-IDF v6.0.1 CI pass; this
+  release does not claim new hardware validation.
 
 ## [1.1.1] - 2026-08-08
 

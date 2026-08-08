@@ -34,11 +34,11 @@ or INT/FIFO/address-pin/fault-recovery validation.
 | Core portability | `tools/check_core_timing_guard.py` enforces no Arduino/ESP-IDF framework APIs in `include/` or `src/`. |
 | Public contracts | `tools/check_public_api_docs.py` checks lifecycle, freshness, FIFO CRC, dirty-state, blocking, INT/FLAGS, and transport documentation tokens. |
 | Claims/metadata | `tools/check_readiness_claims.py` checks unsupported readiness claims, CI guard coverage, and supported-version metadata. |
-| Native behavior | `python -m platformio test -e native` runs fake-transport unit coverage. |
-| Arduino ESP32 builds | `python -m platformio run -e esp32s3dev` and `python -m platformio run -e esp32s2dev` build the Arduino diagnostic example. |
-| Packaging | `python -m platformio pkg pack` verifies PlatformIO package metadata. |
+| Native behavior | `.\scripts\pio.cmd test -e native` runs fake-transport unit coverage through the required Windows wrapper. |
+| Arduino ESP32 builds | `.\scripts\pio.cmd run -e esp32s3dev` and `.\scripts\pio.cmd run -e esp32s2dev` build the Arduino diagnostic example. |
+| Packaging | `.\scripts\pio.cmd pkg pack` verifies PlatformIO package metadata. |
 | ESP-IDF static contract | `tools/check_idf_example_contract.py` verifies the native IDF example boundary and command coverage. |
-| Pure ESP-IDF builds | [GitHub Actions run 31218427198](https://github.com/janhavelka/OPT4001/actions/runs/31218427198) passed for ESP32-S2 and ESP32-S3 with ESP-IDF v6.0.1. |
+| Pure ESP-IDF builds | [GitHub Actions run 31227037444](https://github.com/janhavelka/OPT4001/actions/runs/31227037444) passed for ESP32-S2 and ESP32-S3 with ESP-IDF v6.0.1. |
 
 ### Pending Validation Matrix
 
@@ -113,7 +113,7 @@ PlatformIO Core.
 Add to `platformio.ini`:
 
 The examples below intentionally use the latest published tag (`v1.0.0`). The
-audited source metadata is `1.2.0`, but this hardening change is not a formal
+audited source metadata is `1.2.1`, but this hardening change is not a formal
 release and does not create a tag.
 
 ```ini
@@ -455,8 +455,8 @@ nibble. When verification is disabled, the sample status is `OK` and
 
 Numeric and CRC vector verification uses:
 
-```bash
-python -m platformio test -e native
+```powershell
+.\scripts\pio.cmd test -e native
 ```
 
 ### Sample Freshness
@@ -669,6 +669,10 @@ lux encoding rounds to the nearest representable exponent/result value.
 - `docs/integration/esp-idf.md` - ESP-IDF component and example boundary.
 - `docs/integration/driver-contracts.md` - lifecycle, health, freshness,
   poll-job, dirty-state, numeric, and CRC contracts.
+- `docs/reports/feature-matrix-20260808.md` - SBOS993A feature/API/CLI/test
+  coverage and deliberate controller-owned boundaries.
+- `docs/reports/naming-audit-20260808.md` - mature-peer naming rubric,
+  compatibility decisions, and repository-hygiene evidence.
 - `docs/reference/OPT4001_datasheet.md` - register map, timing notes, formulas,
   and behavior summary.
 - `docs/reference/AN_light_detection.md` - threshold and light-detection notes.
@@ -701,17 +705,19 @@ lux encoding rounds to the nearest representable exponent/result value.
 
 ## Validation
 
-```bash
+```powershell
 python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
 python tools/hil_opt4001_runner.py --parser-self-test
 python tools/test_hil_opt4001_runner_parser.py
 python tools/check_idf_example_contract.py
 python tools/check_version_header_contract.py
+python tools/check_clean_consumer_package.py
 python tools/check_readiness_claims.py
 python tools/check_public_api_docs.py
 python scripts/generate_version.py check
 .\scripts\pio.cmd test -e native
+.\scripts\pio.cmd run -e native_core_no_arduino
 .\scripts\pio.cmd run -e esp32s3dev
 .\scripts\pio.cmd run -e esp32s2dev
 .\scripts\pio.cmd pkg pack
@@ -731,7 +737,7 @@ idf.py -C examples/esp_idf/basic set-target esp32s2 build
 
 The static IDF contract check does not replace a real `idf.py` build. Local
 validation could not run because ESP-IDF was not available on `PATH`; captured
-CI run `31218427198` passed the native example for ESP32-S2 and ESP32-S3 using
+CI run `31227037444` passed the native example for ESP32-S2 and ESP32-S3 using
 ESP-IDF v6.0.1.
 
 ### Optional Hardware-In-Loop Runner

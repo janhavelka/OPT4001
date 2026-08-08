@@ -16,41 +16,28 @@ fault/recovery evidence unless a future log captures it.
 | Public contracts | `tools/check_public_api_docs.py` |
 | Readiness wording and metadata | `tools/check_readiness_claims.py` |
 | Version header | `scripts/generate_version.py check` and `tools/check_version_header_contract.py` |
-| Native behavior | `python -m platformio test -e native` |
-| Arduino ESP32 builds | `python -m platformio run -e esp32s3dev` and `python -m platformio run -e esp32s2dev` |
+| Native behavior | `.\scripts\pio.cmd test -e native` passes 133/133 fake-transport, parser, and compatibility tests through the required Windows wrapper. |
+| Framework-neutral consumer | `.\scripts\pio.cmd run -e native_core_no_arduino` compiles and links without Arduino include paths. |
+| Arduino ESP32 builds | `.\scripts\pio.cmd run -e esp32s3dev` and `.\scripts\pio.cmd run -e esp32s2dev` |
 | Package import | `tools/check_clean_consumer_package.py` |
 | ESP-IDF static boundary | `tools/check_idf_example_contract.py` |
-| Pure ESP-IDF builds | [GitHub Actions run 31218427198](https://github.com/janhavelka/OPT4001/actions/runs/31218427198) passed for ESP32-S2 and ESP32-S3 with ESP-IDF v6.0.1. |
+| Pure ESP-IDF builds | [GitHub Actions run 31227037444](https://github.com/janhavelka/OPT4001/actions/runs/31227037444) passed for ESP32-S2 and ESP32-S3 with ESP-IDF v6.0.1. |
 
-### 2026-08-08 Second-Pass Build Matrix
+### 2026-08-08 Current Audit Evidence (1.2.1)
 
-- Native fake-transport suite: **121/121 passed** through
-  `.\scripts\pio.cmd test -e native`.
-- Arduino diagnostic CLI: ESP32-S3 and ESP32-S2 builds passed with pinned
-  pioarduino `55.03.311`, Arduino `3.3.11`, and ESP-IDF library package
-  `5.5.5`.
-- Packed-library consumer and `pio pkg pack` checks passed using the
-  VS Code-managed PlatformIO Core selected by `scripts/pio.cmd`; artifacts were
-  written outside the repository.
-- Static core, CLI, IDF-boundary, public-doc, readiness, generated-version,
-  Doxygen, HIL-parser, and strict host syntax gates passed. HIL parser tests
-  passed **15/15**.
-- No local `idf.py` installation was available. Pure ESP-IDF target compiler
-  evidence therefore remains the pinned CI run above; no new hardware claim is
-  implied.
-
-### 2026-08-08 Feature-Completeness Audit (1.2.0)
-
-- SBOS993A capability/register coverage and CLI parity are recorded in
+- SBOS993A capability/register coverage and CLI parity remain recorded in
   `docs/reports/feature-matrix-20260808.md`.
+- Mature-peer naming, compatibility decisions, and proven code/artifact cleanup
+  are recorded in `docs/reports/naming-audit-20260808.md`.
 - Official-wrapper PlatformIO native execution passes **133/133**
-  fake-transport, fixed-line-parser, and aggregate-compatibility tests.
-- Core, CLI, native-IDF boundary, public-doc, readiness-claim, generated-version,
-  and HIL-parser checks form the final non-hardware gate.
+  fake-transport, fixed-line-parser, and aggregate-compatibility tests; HIL
+  parser tests pass **15/15** without opening a serial port.
+- Core, CLI, native-IDF boundary, public-doc, readiness-claim,
+  generated-version, whitespace, and Doxygen gates pass.
 - The strict framework-neutral native-core link, package pack/clean consumer,
-  and pinned pioarduino 55.03.311 ESP32-S2/S3 builds pass locally. Pure ESP-IDF
-  remains a CI gate when no local IDF environment is installed. No new hardware
-  claim is inferred from these build results.
+  and pinned pioarduino 55.03.311 ESP32-S2/S3 builds pass locally. No local
+  `idf.py` installation is available, so the pure ESP-IDF compiler evidence is
+  the pinned CI run above. No physical claim is inferred from build results.
 
 ## Pending Evidence
 
@@ -86,7 +73,7 @@ Fill these fields before running hardware or HIL tests.
 | Logic analyzer model/sample rate |  |
 | Pass/fail notes |  |
 
-No hardware validation was run in the 2026-06-02 hardening session because board,
-package, operator, serial, optical, INT capture, and fault-test metadata were
-not provided. No serial/HIL logs were captured.
+No hardware validation is recorded because board, package, operator, serial,
+optical, INT-capture, and fault-fixture evidence has not been provided. No
+serial/HIL transcript is presented as completed evidence.
 
