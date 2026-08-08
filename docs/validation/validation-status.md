@@ -23,12 +23,15 @@ fault/recovery evidence unless a future log captures it.
 | ESP-IDF static boundary | `tools/check_idf_example_contract.py` |
 | Pure ESP-IDF builds | [GitHub Actions run 31227037444](https://github.com/janhavelka/OPT4001/actions/runs/31227037444) passed for ESP32-S2 and ESP32-S3 with ESP-IDF v6.0.1. |
 
-### 2026-08-08 Current Audit Evidence (1.2.1)
+### 2026-08-08 Current Audit Evidence (1.2.2)
 
 - SBOS993A capability/register coverage and CLI parity remain recorded in
   `docs/reports/feature-matrix-20260808.md`.
 - Mature-peer naming, compatibility decisions, and proven code/artifact cleanup
   are recorded in `docs/reports/naming-audit-20260808.md`.
+- Invalid `Err` and `DriverState` name fallbacks now use the cross-library
+  `"UNKNOWN"` spelling; native coverage asserts every valid name and invalid
+  casts without changing enum values or valid diagnostic strings.
 - Official-wrapper PlatformIO native execution passes **133/133**
   fake-transport, fixed-line-parser, and aggregate-compatibility tests; HIL
   parser tests pass **15/15** without opening a serial port.

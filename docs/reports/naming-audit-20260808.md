@@ -1,7 +1,7 @@
 # OPT4001 Naming And Repository-Hygiene Audit
 
 Audit date: 2026-08-08
-Target version: 1.2.1
+Target version: 1.2.2
 
 This audit compares OPT4001 with six clean, mature I2C libraries in the local
 `Projects/` workspace. The peers were inspected read-only: PCA9555 3.0.2,
@@ -18,8 +18,8 @@ cosmetic uniformity.
 | Concern | Mature-peer convention | OPT4001 decision |
 | --- | --- | --- |
 | Fallible result | `Err` plus `Status { code, detail, msg }`; allocation-free static messages | Retain the existing public `Err` and `Status` contract. |
-| Enum names | A stable error-name helper is common but spelling varies (`errorName`, `errName`, or no helper) | Retain `errorName(Err)` and `toString(Err)`. They are already the clearest complete contract. |
-| Driver state | Usually `DriverState::{UNINIT, READY, DEGRADED, OFFLINE}` | Retain the existing append-only four-state enum and `driverStateName()` / `toString()` helpers. |
+| Enum names | A stable error-name helper is common but spelling varies (`errorName`, `errName`, or no helper); current mature helpers use `"UNKNOWN"` for invalid casts | Retain `errorName(Err)` and `toString(Err)`, and use the shared `"UNKNOWN"` fallback without changing valid enum names. |
+| Driver state | Usually `DriverState::{UNINIT, READY, DEGRADED, OFFLINE}` with `"UNKNOWN"` for an invalid cast | Retain the existing append-only four-state enum and `driverStateName()` / `toString()` helpers; align only the invalid fallback. |
 | Health access | `state()`, often `driverState()`, `isOnline()`, timestamps, last error, consecutive and lifetime counters | OPT4001 already exposes `state()`, `driverState()`, `isOnline()`, `lastOkMs()`, `lastErrorMs()`, `lastError()`, `consecutiveFailures()`, `totalFailures()`, and `totalSuccess()`. No alias or rename is needed. |
 | Lifecycle | `begin()`, `end()`, `probe()`, `recover()`; non-owning designs may add `bind()` / `unbind()` | Retain all existing methods. `end()` keeps its compatibility power-down attempt; `unbind()` is the explicit bus-silent release path. |
 | Transport internals | `_i2cWriteReadRaw`, `_i2cWriteRaw`, `_i2cWriteReadTracked`, `_i2cWriteTracked`, `_updateHealth` | Retain these private layers. Address-override helpers use the unambiguous private suffix `Addr`; there is no public API change. |
@@ -38,6 +38,18 @@ The only helper renames are private `_i2cWriteRawTo()` and
 `_i2cWriteTrackedTo()` to `_i2cWriteRawAddr()` and
 `_i2cWriteTrackedAddr()`. They identify the address override directly and do
 not affect source or binary consumers of the public headers.
+
+The follow-up audit aligned invalid `Err` and `DriverState` name fallbacks from
+the OPT-specific `"UNKNOWN_ERROR"` / `"UNKNOWN_STATE"` spellings to the shared
+`"UNKNOWN"` convention used by SCD41, TCA9548A, PCA9555, and newer mature peer
+helpers. Every valid enum name and numeric value is unchanged. Native coverage
+now asserts every valid error/state name plus invalid casts. Private
+`_recordFailure()` remains intentionally named and structured like INA3221's
+semantic-failure health path. The general health documentation now explicitly
+includes the `recover()` identity-mismatch case instead of incorrectly saying
+that counters contain only transport outcomes. The raw/tracked/address/config/
+poll helper vocabulary already matches the peer rubric, so no cosmetic
+internal rename is justified.
 
 ## Proven Cleanup
 

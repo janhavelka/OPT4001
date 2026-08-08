@@ -13,7 +13,8 @@ HEADER_TOKENS = {
         "Transport callbacks must not",
         "NOT_INITIALIZED",
         "OFFLINE",
-        "Health tracking counts only tracked transport outcomes",
+        "Health tracking counts tracked transport outcomes",
+        "device-identity mismatch observed by `recover()`",
         "begin()",
         "bind(const Config& config)",
         "without touching I2C",
@@ -74,6 +75,11 @@ HEADER_TOKENS = {
     ],
 }
 
+FORBIDDEN_TOKENS = {
+    "include/OPT4001/OPT4001.h": ["UNKNOWN_STATE"],
+    "include/OPT4001/Status.h": ["UNKNOWN_ERROR"],
+}
+
 
 def fail(msg: str) -> None:
     print(f"Public API docs check FAILED: {msg}")
@@ -89,6 +95,9 @@ def main() -> int:
         for token in tokens:
             if token not in text:
                 fail(f"{rel} missing documentation token: {token}")
+        for token in FORBIDDEN_TOKENS.get(rel, []):
+            if token in text:
+                fail(f"{rel} restored obsolete enum fallback: {token}")
 
     print("Public API docs check PASSED")
     return 0

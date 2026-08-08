@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-08-08
+
+### Changed
+
+- Aligned invalid `Err` and `DriverState` display-name fallbacks with the
+  cross-library `"UNKNOWN"` convention used by mature workspace I2C drivers.
+  Valid enum values, numeric ordering, names, and all driver behavior remain
+  unchanged.
+- Re-audited public status, lifecycle, health, dirty-state, and private
+  raw/tracked/address/config/poll naming against mature peers. Existing names
+  remain the compatible shared vocabulary; no cosmetic API or internal rename
+  was added.
+
+### Fixed
+
+- Corrected the public health description to include the deliberately counted
+  `recover()` device-identity mismatch instead of claiming that every health
+  failure originates in a tracked transport wrapper.
+
+### Validation
+
+- Expanded native name-helper coverage to every valid error/state plus invalid
+  casts, and added a static guard against restoring the old OPT-specific
+  fallback spellings.
+- Source/build validation remains non-hardware evidence; optical, INT, FIFO,
+  address-strap, and injected-fault gates remain open.
+
 ## [1.2.1] - 2026-08-08
 
 ### Changed

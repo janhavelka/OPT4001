@@ -32,7 +32,7 @@ enum class Err : uint8_t {
 
 /// Return a stable library-owned name for an error code.
 /// @param err Error code to describe.
-/// @return Static storage; invalid enum values return `"UNKNOWN_ERROR"`.
+/// @return Static storage; invalid enum values return `"UNKNOWN"`.
 constexpr const char* errorName(Err err) {
   switch (err) {
     case Err::OK: return "OK";
@@ -55,12 +55,12 @@ constexpr const char* errorName(Err err) {
     case Err::NOT_BOUND: return "NOT_BOUND";
     case Err::CANCELLED: return "CANCELLED";
   }
-  return "UNKNOWN_ERROR";
+  return "UNKNOWN";
 }
 
 /// Cross-library alias for `errorName()`.
 /// @param err Error code to describe.
-/// @return Static storage; invalid enum values return `"UNKNOWN_ERROR"`.
+/// @return Static storage; invalid enum values return `"UNKNOWN"`.
 constexpr const char* toString(Err err) { return errorName(err); }
 
 /// Status structure returned by all fallible operations.

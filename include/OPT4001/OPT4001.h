@@ -22,7 +22,7 @@ enum class DriverState : uint8_t {
 
 /// Return a stable library-owned name for a driver state.
 /// @param state Driver state to describe.
-/// @return Static storage; invalid enum values return `"UNKNOWN_STATE"`.
+/// @return Static storage; invalid enum values return `"UNKNOWN"`.
 constexpr const char* driverStateName(DriverState state) {
   switch (state) {
     case DriverState::UNINIT: return "UNINIT";
@@ -30,12 +30,12 @@ constexpr const char* driverStateName(DriverState state) {
     case DriverState::DEGRADED: return "DEGRADED";
     case DriverState::OFFLINE: return "OFFLINE";
   }
-  return "UNKNOWN_STATE";
+  return "UNKNOWN";
 }
 
 /// Cross-library alias for `driverStateName()`.
 /// @param state Driver state to describe.
-/// @return Static storage; invalid enum values return `"UNKNOWN_STATE"`.
+/// @return Static storage; invalid enum values return `"UNKNOWN"`.
 constexpr const char* toString(DriverState state) { return driverStateName(state); }
 
 /// Decoded measurement sample from RESULT/FIFO registers.
@@ -287,11 +287,12 @@ public:
   }
 
   // === Health Tracking ===
-  /// Health tracking counts only tracked transport outcomes after initialization.
-  /// Validation errors, precondition failures, and `probe()` do not count as
-  /// transport health failures. A tracked success resets consecutive failures
-  /// and moves `DEGRADED`/`OFFLINE` back to `READY`. Counters saturate at
-  /// `UINT32_MAX`; timestamps use `Config::nowMs` when available, otherwise 0.
+  /// Health tracking counts tracked transport outcomes after initialization and
+  /// an explicit device-identity mismatch observed by `recover()`. Validation
+  /// errors, precondition failures, and diagnostic `probe()` outcomes do not
+  /// count. A tracked success resets consecutive failures and moves
+  /// `DEGRADED`/`OFFLINE` back to `READY`. Counters saturate at `UINT32_MAX`;
+  /// timestamps use `Config::nowMs` when available, otherwise 0.
   uint32_t lastOkMs() const { return _lastOkMs; }
   uint32_t lastErrorMs() const { return _lastErrorMs; }
   Status lastError() const { return _lastError; }

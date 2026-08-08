@@ -113,7 +113,7 @@ PlatformIO Core.
 Add to `platformio.ini`:
 
 The examples below intentionally use the latest published tag (`v1.0.0`). The
-audited source metadata is `1.2.1`, but this hardening change is not a formal
+audited source metadata is `1.2.2`, but this hardening change is not a formal
 release and does not create a tag.
 
 ```ini
