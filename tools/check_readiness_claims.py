@@ -84,6 +84,7 @@ CI_REQUIRED = [
     "PLATFORMIO_CORE_VERSION: \"6.1.19\"",
     "runs-on: ubuntu-24.04",
     "espressif/esp-idf-ci-action@9d38657f3d789ca759b2b37aaf5ceffbc42c4f0d",
+    "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     "idf.py set-target ${{ matrix.target }} build",
 ]
 

@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   diagnostic applications, while retaining typed dirty-state visibility.
 - Replaced completed implementation prompts and an empty NOT-RUN HIL report
   with durable feature, naming, integration, and validation documentation.
+- Updated the fully pinned CI artifact uploader to its Node 24-based release,
+  removing the deprecated Node 20 runtime annotation.
 
 ### Fixed
 
