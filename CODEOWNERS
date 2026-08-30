@@ -1,11 +1,8 @@
 # CODEOWNERS - Define who reviews what
 # See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# GitHub only resolves an email owner when that address is attached to an account
+# with write access, so use the username. Add path-specific rules when a second
+# reviewer exists; today they would all name the same person as the wildcard.
 
-# Default owner for everything
-* info@thymos.cz
-
-# Public API requires careful review
-/include/ info@thymos.cz
-
-# CI configuration
-/.github/ info@thymos.cz
+* @janhavelka

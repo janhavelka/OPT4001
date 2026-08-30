@@ -5,9 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## Unreleased
 
-## [1.2.2] - 2026-08-08
+### Fixed
+
+- `getConversionTimeUs()` / `getConversionTimeMs()` now apply the
+  `isValidConversionTime()` guard their documentation already promised, instead of
+  indexing a 12-entry table unchecked.
+- `selfcheck` in the Arduino example no longer restores a threshold window it never
+  successfully read. A failed initial `getThresholds()` left the locals
+  default-constructed, so the restore wrote `0x0000`/`0x0000` over the device's
+  configured window while the run still displayed as passing.
+- `config write <hex>` in the Arduino example accepts `Err::IN_PROGRESS` as the
+  success it is; `writeConfiguration()` returns it when the written MODE selects a
+  one-shot, and the CLI previously reported that as a failure and skipped the readback.
+- Corrected public documentation that contradicted the implementation:
+  `Sample::crcValid` is always computed regardless of `Config::verifyCrc`,
+  `consecutiveFailures()` saturates at `UINT8_MAX` rather than `UINT32_MAX`, and the
+  class-level `OFFLINE` exception list omitted `probe()`, `startResetAndReapply()`
+  and `poll()`.
+- Corrected `docs/reference/OPT4001_datasheet.md` against SBOS993A: the CRC section
+  described `X[3:0]` as a zero-syndrome when it is the expected CRC nibble, the
+  PicoStar pin table was labelled Bottom View where Figure 6-1 is Top View, and the
+  SOT-5X3 resolution table reproduced a vendor arithmetic typo (`47.344`, now
+  `57.344`, annotated as a deviation from the printed source).
+- The packaged library no longer ships the vendor reference PDFs; `pkg pack` output
+  drops from roughly 10 MB to 0.13 MB.
+
+### Removed
+
+- Dead code: an unreachable `lsb > 0.0f` branch in `luxToThreshold()` that also hid
+  the range check; `examples/common/TransportAdapter.h`, an alias namespace nothing
+  included; and roughly 110 lines in `scripts/generate_version.py` copied from an
+  unrelated project and gated on the checkout being named `tunnelmonitor`.
+- Documentation and tooling left over from an agent-driven hardening campaign:
+  `docs/reports/` (three dated audit reports), `docs/validation/validation-status.md`,
+  `tools/check_readiness_claims.py` and `tools/check_public_api_docs.py`. The latter
+  two pinned exact README headings, a GitHub Actions run number, dated report
+  filenames and exact Doxygen phrasing, which made honest documentation edits fail CI.
+
+### Added
+
+- `tools/check_ci_action_pins.py`, preserving the one durable guard that lived inside
+  the removed `check_readiness_claims.py`: every GitHub Action must be pinned to a
+  full commit SHA.
+- `AUDIT-FINDINGS.md`, a work list of the audited defects that were too large to fix
+  in place, each with a concrete proposal. Delete it when the items are closed.
+
+## 1.2.2 - 2026-08-08
 
 ### Changed
 
@@ -26,15 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `recover()` device-identity mismatch instead of claiming that every health
   failure originates in a tracked transport wrapper.
 
-### Validation
-
-- Expanded native name-helper coverage to every valid error/state plus invalid
-  casts, and added a static guard against restoring the old OPT-specific
-  fallback spellings.
-- Source/build validation remains non-hardware evidence; optical, INT, FIFO,
-  address-strap, and injected-fault gates remain open.
-
-## [1.2.1] - 2026-08-08
+## 1.2.1 - 2026-08-08
 
 ### Changed
 
@@ -58,16 +95,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Kept example health-rate formatting correct when two saturated lifetime
   counters would overflow a 32-bit intermediate.
 
-### Validation
-
-- Static framework, CLI, native-IDF, public-doc, version, readiness, package,
-  and HIL-parser contracts pass; native fake-transport tests remain 133/133.
-- The framework-neutral native consumer, clean packed-library consumer,
-  pioarduino 55.03.311 ESP32-S2/S3 builds, and pure ESP-IDF v6.0.1 CI baseline
-  pass. Hardware, optical, INT, FIFO timing/order, address-strap, and injected
-  electrical-fault evidence remain open.
-
-## [1.2.0] - 2026-08-08
+## 1.2.0 - 2026-08-08
 
 ### Added
 
@@ -101,14 +129,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserved the documented legacy `end()` power-down attempt while providing a
   separate bus-silent release API instead of redefining shutdown semantics.
 
-### Validation
-
-- PlatformIO native execution passes 133 fake-transport/parser/API-compatibility
-  tests. The strict framework-neutral native-core link, package pack/clean
-  consumer, current ESP32-S2/S3 builds, and pure ESP-IDF v6.0.1 CI pass; this
-  release does not claim new hardware validation.
-
-## [1.1.1] - 2026-08-08
+## 1.1.1 - 2026-08-08
 
 ### Changed
 
@@ -138,15 +159,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed Arduino burst, slot-0, milli-lux, and micro-lux commands that consumed
   the fresh token in a priming read before the requested operation.
 
-### Validation
-
-- Added native regressions for overflow rejection, non-burst register windows,
-  wide blocking timeouts, retained timeout state, poll-job cache admission,
-  invalid sample exponents, and threshold quantization boundaries.
-- This patch remains source/build validation only; hardware, optical, INT,
-  address-strap, FIFO-timing, and injected-fault gates remain open.
-
-## [1.1.0] - 2026-08-07
+## 1.1.0 - 2026-08-07
 
 ### Added
 
@@ -191,14 +204,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Corrected native ESP-IDF conversion-time parsing so `ctime 0..11` maps to the
   enum values shown by the CLI rather than ambiguous rounded millisecond values.
 
-### Validation
-
-- Source/datasheet audit and open HIL gates are recorded in
-  `docs/reports/source-audit-20260807.md`.
-- GitHub Actions run `31218427198` passed native tests, package/contract gates,
-  Arduino ESP32-S2/S3 builds, and pure ESP-IDF v6.0.1 ESP32-S2/S3 builds.
-
-## [1.0.0] - 2026-06-03
+## 1.0.0 - 2026-06-03
 
 ### Added
 
@@ -268,22 +274,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Marked hardware/cache dirty state after partial multi-register write failures
   and cleared it only after successful reapply or recovery.
 
-### Validation
-
-- `python tools/check_core_timing_guard.py` passed.
-- `python tools/check_cli_contract.py` passed.
-- `python tools/check_idf_example_contract.py` passed.
-- `python tools/check_version_header_contract.py` passed.
-- `python tools/check_readiness_claims.py` passed.
-- `python tools/check_public_api_docs.py` passed.
-- `python scripts/generate_version.py check` passed.
-- `python -m platformio test -e native` passed with 96/96 native
-  fake-transport tests.
-- `python -m platformio run -e esp32s3dev` passed.
-- `python -m platformio run -e esp32s2dev` passed.
-- `python -m platformio pkg pack` passed; generated package artifact was
-  removed after validation.
-
 ### Known Limitations
 
 - No completed real-device smoke, optical reference, address-pin matrix, INT
@@ -298,7 +288,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optical compensation remains application-specific and should be characterized
   with the final product enclosure/window and reference meter setup.
 
-[Unreleased]: https://github.com/janhavelka/OPT4001/compare/v1.1.1...HEAD
-[1.1.1]: https://github.com/janhavelka/OPT4001/compare/v1.1.0...v1.1.1
-[1.1.0]: https://github.com/janhavelka/OPT4001/compare/v1.0.0...v1.1.0
-[1.0.0]: https://github.com/janhavelka/OPT4001/releases/tag/v1.0.0

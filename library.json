@@ -52,6 +52,7 @@
       ".vscode",
       ".idea",
       "docs/doxygen",
+      "docs/reference/*.pdf",
       "hil_logs",
       "test",
       "tools",

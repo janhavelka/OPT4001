@@ -132,7 +132,10 @@
 
 ## 3. Pin Configuration
 
-### PicoStar™ (YMN) — 4-Pin, Bottom View
+### PicoStar™ (YMN) — 4-Pin, Top View
+
+Pin numbering below is the **top view** (SBOS993A Figure 6-1). The *optical sensing
+area* faces the opposite side — that is what "bottom-facing sensor" refers to.
 
 | Pin | Name | Type | Description |
 |---|---|---|---|
@@ -519,12 +522,14 @@ For SOT-5X3, substitute 4375 for 3125.
 
 ### CRC Calculation
 
-The 4-bit CRC in register 0x01 (bits[3:0]) is verified using syndrome bits X[0]–X[3]. Define:
+The 4-bit CRC in register 0x01 (bits[3:0]) is computed from the sample fields. Define:
 - `E[3:0]` = EXPONENT
 - `R[19:0]` = MANTISSA = (RESULT_MSB << 8) + RESULT_LSB
 - `C[3:0]` = COUNTER
 
-Syndrome equations (all should equal 0 if no transmission error):
+`X[3:0]` is the **expected CRC nibble** (SBOS993A page 26, Figure 8-14 "Register 01
+Field Descriptions"). These equations contain no `CRC[n]` terms — `X` is the value
+the device should have transmitted, not a syndrome that evaluates to zero:
 
 ```
 X[0] = XOR(E[3:0], R[19:0], C[3:0])       // XOR of all 28 bits (overall parity)
@@ -533,7 +538,10 @@ X[2] = XOR(C[3], R[3], R[7], R[11], R[15], R[19], E[3])
 X[3] = XOR(R[3], R[11], R[19])
 ```
 
-**Verification:** Compute X[0]–X[3] from the received EXPONENT, MANTISSA, COUNTER, and CRC. If all four syndrome bits are 0, the data is error-free. If any are non-zero, a transmission error occurred.
+**Verification:** compute `X[3:0]` from the received EXPONENT, MANTISSA and COUNTER
+and compare it with the received CRC nibble. Equal means no detected transmission
+error; unequal means a transmission error occurred. This is exactly what
+`OPT4001::_computeCrcNibble()` implements.
 
 ### Sample Counter
 
@@ -723,9 +731,9 @@ Full-scale lux per EXPONENT: 459 | 918 | 1835 | 3670 | 7340 | 14680 | 29360 | 58
 
 | CT Reg | Conv Time | Eff. Bits | EXP 0 | EXP 1 | EXP 2 | EXP 3 | EXP 4 | EXP 5 | EXP 6 | EXP 7 | EXP 8 |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| 0 | 600 µs | 9 | 896 m | 1.792 | 3.584 | 7.168 | 14.336 | 28.672 | 47.344 | 114.688 | 229.376 |
-| 1 | 1 ms | 10 | 448 m | 896 m | 1.792 | 3.584 | 7.168 | 14.336 | 28.672 | 47.344 | 114.688 |
-| 2 | 1.8 ms | 11 | 224 m | 448 m | 896 m | 1.792 | 3.584 | 7.168 | 14.336 | 28.672 | 47.344 |
+| 0 | 600 µs | 9 | 896 m | 1.792 | 3.584 | 7.168 | 14.336 | 28.672 | 57.344 | 114.688 | 229.376 |
+| 1 | 1 ms | 10 | 448 m | 896 m | 1.792 | 3.584 | 7.168 | 14.336 | 28.672 | 57.344 | 114.688 |
+| 2 | 1.8 ms | 11 | 224 m | 448 m | 896 m | 1.792 | 3.584 | 7.168 | 14.336 | 28.672 | 57.344 |
 | 3 | 3.4 ms | 12 | 112 m | 224 m | 448 m | 896 m | 1.792 | 3.584 | 7.168 | 14.336 | 28.672 |
 | 4 | 6.5 ms | 13 | 56 m | 112 m | 224 m | 448 m | 896 m | 1.792 | 3.584 | 7.168 | 14.336 |
 | 5 | 12.7 ms | 14 | 28 m | 56 m | 112 m | 224 m | 448 m | 896 m | 1.792 | 3.584 | 7.168 |
@@ -737,6 +745,11 @@ Full-scale lux per EXPONENT: 459 | 918 | 1835 | 3670 | 7340 | 14680 | 29360 | 58
 | 11 | 800 ms | 20 | 437.5 µ | 0.875 m | 1.75 m | 3.5 m | 7 m | 14 m | 28 m | 56 m | 112 m |
 
 All resolution values are in **lux**. Suffix: µ = micro-lux, m = milli-lux, plain number = lux. LSBs below effective resolution are zero-padded.
+
+> **Vendor typo corrected:** TI Table 8-6 prints `47.344` on the EXP 6 diagonal.
+> The value consistent with `437.5 µlux × 2^(20 − effective bits) × 2^EXP` — and with
+> the neighbouring `28.672` / `114.688` entries — is `57.344`, which is what this
+> table and `OPT4001::getRangeResolutionLux()` use.
 
 ---
 
@@ -800,10 +813,13 @@ POWER_DOWN → write OPERATING_MODE=1 or 2 → CONVERTING
   evidence proves otherwise.
 - The checked-in OPT4001 PDFs do not document an SMBus PEC byte or PEC enable
   register.
-- The result-register CRC is documented through XOR/syndrome equations. The
-  checked-in datasheet text does not name a standard CRC polynomial.
+- The result-register CRC is documented only as four XOR generator equations
+  (Figure 8-14). The datasheet names no standard CRC polynomial.
 - PicoStar/YMN has no INT pin in the datasheet pin table. INT behavior is
   SOT-5X3/DTS-only for this driver.
+- SBOS993A Figure 6-2 is captioned "DTS Package, 6-Pin USON" while its own
+  Table 6-2 lists 8 pins. The 8-pin table is the correct one and is what this
+  summary reproduces.
 
 ### 32-bit Data Types Required
 
@@ -815,13 +831,15 @@ The lux calculation involves:
 
 ### Register 0x0B Fixed Pattern
 
-Bits [15:5] of register 0x0B must always equal **1024 (0x400)**. When writing to this register:
+The FIELD value of bits [15:5] must always be **1024 (0x400)**. In the full 16-bit
+register image that field sits at bit 5, so `0x400 << 5 == 0x8000`:
+
 ```c
 uint16_t reg0b = 0x8000 | (int_dir << 4) | (int_cfg << 2) | (0 << 1) | i2c_burst;
-// 0x8000 = fixed bit 15 set, rest of fixed pattern = 0x400 << 5... 
-// Actually the reset value is 0x8011, and the fixed pattern spans bits 15:5 = 0x400
 ```
-Read-modify-write: read register, modify only bits 4:0, write back.
+
+That is consistent with the reset value `0x8011` (`0x8011 & 0xFFE0 == 0x8000`).
+Either write the full image as above, or read-modify-write only bits [4:0].
 
 ### Overload Detection
 

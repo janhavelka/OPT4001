@@ -1,7 +1,8 @@
 # Driver Contracts
 
 This document keeps the durable driver and application-integration contracts in
-one place. Dated audit evidence is indexed separately under `docs/reports/`.
+one place. Per-method contracts live as Doxygen comments in
+`include/OPT4001/OPT4001.h`.
 
 ## Lifecycle And Health
 

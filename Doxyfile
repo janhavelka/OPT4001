@@ -38,12 +38,8 @@ INPUT                  = README.md \
                          docs/README.md \
                          docs/integration/esp-idf.md \
                          docs/integration/driver-contracts.md \
-                         docs/reports/feature-matrix-20260808.md \
-                         docs/reports/naming-audit-20260808.md \
-                         docs/reports/source-audit-20260807.md \
                          docs/validation/hardware-validation-procedure.md \
                          docs/validation/release-checklist.md \
-                         docs/validation/validation-status.md \
                          docs/reference/OPT4001_datasheet.md \
                          docs/reference/AN_light_detection.md \
                          docs/reference/AN_high_speed_resolution.md \

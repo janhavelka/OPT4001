@@ -13,6 +13,9 @@ OPT4001-*.tar.gz
 package.tgz
 build/
 managed_components/
+sdkconfig
+sdkconfig.old
+dependencies.lock
 docs/doxygen/
 
 # Python (for scripts/)

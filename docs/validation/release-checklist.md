@@ -22,13 +22,12 @@ the existing VS Code-managed PlatformIO installation.
 ```powershell
 python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
+python tools/check_ci_action_pins.py
 python tools/hil_opt4001_runner.py --parser-self-test
 python tools/test_hil_opt4001_runner_parser.py
 python tools/check_idf_example_contract.py
 python tools/check_version_header_contract.py
 python tools/check_clean_consumer_package.py
-python tools/check_readiness_claims.py
-python tools/check_public_api_docs.py
 python scripts/generate_version.py check
 .\scripts\pio.cmd test -e native
 .\scripts\pio.cmd run -e native_core_no_arduino
@@ -65,18 +64,14 @@ Before merging or tagging, verify a completed CI run for the final branch or PR:
 
 - README install instructions are current for PlatformIO, manual use, and
   ESP-IDF component use.
-- Readiness wording separates captured evidence from pending hardware evidence.
-- `docs/validation/validation-status.md` reflects current evidence.
 - `docs/validation/hardware-validation-procedure.md` matches the CLI examples.
-- Public API docs and readiness guards pass.
-- Do not claim real-device, optical, INT, FIFO timing/order, fault-path,
-  address-matrix, or pure ESP-IDF build evidence without captured logs.
+- `CHANGELOG.md` has an entry for every user-visible change.
 
-## Hardware Evidence
+## Hardware
 
-Hardware validation remains pending until a completed log is added with board,
-package, wiring, firmware, serial, optical, INT, FIFO, address, and
-fault/recovery evidence as applicable.
+If the release changes measurement, freshness, INT, FIFO, or recovery behaviour,
+run the board procedure in `docs/validation/hardware-validation-procedure.md` and
+attach the transcript to the release.
 
 ## Tag
 

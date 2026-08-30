@@ -2,10 +2,6 @@
 
 ## PlatformIO
 
-Before editing, fetch remotes and fast-forward the newest intended working
-branch to its upstream. Stop and report dirty, divergent, or conflicted state;
-never overwrite work to force a sync.
-
 On Windows, use `.\scripts\pio.cmd <arguments>`; it selects the current user's
 VS Code-managed installation. Never install another PlatformIO Core; if the
 wrapper cannot find it, stop and report the missing installation.
@@ -30,10 +26,15 @@ include/OPT4001/          - Public API headers only (Doxygen)
   Version.h               - Auto-generated (do not edit)
 src/                      - Implementation (.cpp)
 examples/
-  01_*/
+  01_basic_bringup_cli/   - Arduino diagnostic CLI
+  esp_idf/basic/          - native ESP-IDF diagnostic CLI
   common/                 - Example-only helpers (Log.h, BoardConfig.h,
-                            I2cTransport.h, I2cScanner.h, CliLineBuffer.h)
+                            I2cTransport.h, I2cScanner.h, CliLineBuffer.h,
+                            CliShell.h, CliStyle.h, CliText.h, BusDiag.h,
+                            HealthView.h, HealthDiag.h, BuildConfig.h)
 test/                     - Native/unit tests
+tools/                    - Repository contract checkers and the HIL runner
+docs/                     - Integration, reference, and validation material
 platformio.ini
 library.json
 README.md
@@ -245,6 +246,5 @@ Release steps:
 - Numeric helpers must validate exponent/mantissa/threshold ranges and must not perform undefined shifts.
 - Multi-register configuration paths must either avoid partial hardware/cache divergence or expose a dirty/resync-required state.
 - The current Arduino and ESP-IDF CLIs are diagnostic/bring-up examples unless they clearly demonstrate production bus management.
-- Do not claim hardware validation, optical validation, interrupt validation, address-pin validation, FIFO validation, or pure ESP-IDF validation without captured evidence.
+- Do not claim hardware, optical, interrupt, address-pin, or FIFO validation without captured evidence; native tests use a fake transport and prove source behaviour only.
 - Preserve dirty user changes. Never revert unrelated work unless the user explicitly asks.
-- After each hardening prompt: run checks, update a report, commit, push/sync if possible, and stop.

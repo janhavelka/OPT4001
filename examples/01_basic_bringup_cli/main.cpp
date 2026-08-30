@@ -1538,6 +1538,10 @@ void runSelfTest() {
   OPT4001::Threshold high;
   st = device.getThresholds(low, high);
   reportCheck("getThresholds", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
+  // getThresholds() leaves low/high untouched on failure, so they would still be
+  // the default-constructed 0/0. Restoring those would silently destroy the
+  // device's configured threshold window.
+  const bool thresholdsCaptured = st.ok();
 
   float lowLux = 0.0f;
   float highLux = 0.0f;
@@ -1662,8 +1666,14 @@ void runSelfTest() {
                   "");
     }
   }
-  st = device.setThresholds(baseLowThreshold, baseHighThreshold);
-  reportCheck("restore original thresholds", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
+  if (thresholdsCaptured) {
+    st = device.setThresholds(baseLowThreshold, baseHighThreshold);
+    reportCheck("restore original thresholds", st.ok(),
+                st.ok() ? "" : OPT4001::errorName(st.code));
+  } else {
+    reportCheck("restore original thresholds", false,
+                "skipped: original thresholds were never read");
+  }
 
   st = device.enableConversionReadyInterrupt();
   reportCheck("enableConversionReadyInterrupt", st.ok(),
@@ -1688,9 +1698,14 @@ void runSelfTest() {
                   device.getIntConfig() == OPT4001::IntConfig::THRESHOLD,
               "");
 
-  st = device.setThresholds(baseLowThreshold, baseHighThreshold);
-  reportCheck("restore thresholds after INT presets", st.ok(),
-              st.ok() ? "" : OPT4001::errorName(st.code));
+  if (thresholdsCaptured) {
+    st = device.setThresholds(baseLowThreshold, baseHighThreshold);
+    reportCheck("restore thresholds after INT presets", st.ok(),
+                st.ok() ? "" : OPT4001::errorName(st.code));
+  } else {
+    reportCheck("restore thresholds after INT presets", false,
+                "skipped: original thresholds were never read");
+  }
   st = device.setIntDirection(baseIntDirection);
   reportCheck("restore int direction", st.ok(), st.ok() ? "" : OPT4001::errorName(st.code));
   st = device.setIntConfig(baseIntConfig);
@@ -2060,7 +2075,9 @@ void processCommand(const cli_shell::FixedText& cmdLine) {
     }
     OPT4001::Status st = device.writeConfiguration(static_cast<uint16_t>(value));
     printStatus(st);
-    if (st.ok()) {
+    // writeConfiguration() returns IN_PROGRESS when the written MODE selects a
+    // one-shot; that is a documented success, not a failure.
+    if (st.ok() || st.inProgress()) {
       printConfigurationInfo();
     }
     return;

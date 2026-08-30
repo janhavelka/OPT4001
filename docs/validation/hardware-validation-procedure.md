@@ -1,7 +1,8 @@
 # OPT4001 Hardware Validation Procedure
 
-Status: procedure only. This document does not claim that hardware validation
-has been completed.
+A repeatable procedure for bringing up an OPT4001 board and capturing evidence
+for the behaviour the native tests cannot prove: optical response, INT pulses,
+FIFO timing, address straps, and fault/recovery paths.
 
 ## Session Record
 
@@ -40,12 +41,11 @@ the existing VS Code-managed PlatformIO installation.
 ```powershell
 python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
+python tools/check_ci_action_pins.py
 python tools/hil_opt4001_runner.py --parser-self-test
 python tools/test_hil_opt4001_runner_parser.py
 python tools/check_idf_example_contract.py
 python tools/check_version_header_contract.py
-python tools/check_readiness_claims.py
-python tools/check_public_api_docs.py
 python scripts/generate_version.py check
 .\scripts\pio.cmd test -e native
 .\scripts\pio.cmd run -e native_core_no_arduino

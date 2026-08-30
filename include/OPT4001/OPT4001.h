@@ -187,9 +187,10 @@ struct SettingsSnapshot {
 /// or `startAttach()` unless explicitly documented otherwise. They return
 /// `Err::NOT_INITIALIZED` without
 /// touching the bus when the driver is `UNINIT`. When health state is `OFFLINE`,
-/// normal public I2C APIs return `Err::OFFLINE` without bus access; `recover()`,
-/// `softReset()`, and `resetAndReapply()` are the explicit recovery/reset
-/// exceptions.
+/// normal public I2C APIs return `Err::OFFLINE` without bus access. The explicit
+/// exceptions that still touch the bus while `OFFLINE` are `probe()`,
+/// `recover()`, `softReset()`, `resetAndReapply()`, `startResetAndReapply()`,
+/// and `poll()` while it drives that reset job.
 class OPT4001 {
 public:
   OPT4001() = default;
@@ -291,7 +292,8 @@ public:
   /// an explicit device-identity mismatch observed by `recover()`. Validation
   /// errors, precondition failures, and diagnostic `probe()` outcomes do not
   /// count. A tracked success resets consecutive failures and moves
-  /// `DEGRADED`/`OFFLINE` back to `READY`. Counters saturate at `UINT32_MAX`;
+  /// `DEGRADED`/`OFFLINE` back to `READY`. Lifetime counters saturate at
+  /// `UINT32_MAX` and `consecutiveFailures()` saturates at `UINT8_MAX`;
   /// timestamps use `Config::nowMs` when available, otherwise 0.
   uint32_t lastOkMs() const { return _lastOkMs; }
   uint32_t lastErrorMs() const { return _lastErrorMs; }
@@ -364,8 +366,9 @@ public:
   /// the selected CRC policy. `CRC_ERROR` means at least one decoded slot failed
   /// CRC verification; inspect each slot's `crcValid`/`crc` fields. After a
   /// successful register transfer, all four slots are decoded and populated.
-  /// When CRC verification is disabled, slot `crcValid` remains false and CRC
-  /// mismatches do not change the aggregate status.
+  /// `crcValid` is always computed, whatever `Config::verifyCrc` is set to; when
+  /// verification is disabled, a CRC mismatch simply does not change the
+  /// aggregate status.
   Status readBurst(BurstFrame& out);
   /// Read one slot from the 4-deep history window: 0 = newest RESULT, 1 = FIFO0,
   /// 2 = FIFO1, 3 = FIFO2. Slot 0 consumes freshness; slots 1-3 are direct FIFO

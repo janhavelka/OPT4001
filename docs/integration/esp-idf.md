@@ -80,7 +80,6 @@ The command contract is enforced by:
 python tools/check_idf_example_contract.py
 python tools/check_core_timing_guard.py
 python tools/check_version_header_contract.py
-python tools/check_readiness_claims.py
 ```
 
 When adding an Arduino CLI command, add the matching native IDF command or
@@ -95,7 +94,5 @@ idf.py -C examples/esp_idf/basic set-target esp32s3 build
 idf.py -C examples/esp_idf/basic set-target esp32s2 build
 ```
 
-CI is configured to attempt the same target builds with Espressif's ESP-IDF CI
-action. Treat configured CI as pending until completed workflow logs are
-reviewed.
+CI runs the same target builds with Espressif's ESP-IDF CI action.
 

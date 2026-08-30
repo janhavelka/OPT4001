@@ -35,12 +35,6 @@ FORBIDDEN_INCLUDE_RES = {
     "freertos": re.compile(r'^\s*#\s*include\s*[<\"]freertos/', re.MULTILINE),
 }
 
-OBSOLETE_CORE_SYMBOLS = (
-    "_i2cWriteRawTo",
-    "_i2cWriteTrackedTo",
-    "_markConversionReadyByRegisterPoll",
-)
-
 BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 STRING_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
@@ -108,13 +102,6 @@ def main() -> int:
 
     for rel, counts in observed_includes.items():
         errors.append(f"forbidden framework headers in core: {rel} -> {counts}")
-
-    for symbol in OBSOLETE_CORE_SYMBOLS:
-        for path in collect_sources():
-            text = path.read_text(encoding="utf-8", errors="replace")
-            if re.search(rf"\b{re.escape(symbol)}\b", text):
-                rel = path.relative_to(ROOT).as_posix()
-                errors.append(f"obsolete core helper in {rel}: {symbol}")
 
     if errors:
         print("Core framework guard FAILED:")

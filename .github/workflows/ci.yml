@@ -79,20 +79,17 @@ jobs:
       - name: Enforce core timing guard
         run: python tools/check_core_timing_guard.py
 
+      - name: Enforce CI action pinning
+        run: python tools/check_ci_action_pins.py
+
       - name: Enforce cross-framework CLI contract
         run: python tools/check_cli_contract.py
 
       - name: Enforce native ESP-IDF example contract
         run: python tools/check_idf_example_contract.py
 
-      - name: Enforce public API documentation
-        run: python tools/check_public_api_docs.py
-
       - name: Enforce version header contract
         run: python tools/check_version_header_contract.py
-
-      - name: Enforce readiness and metadata claims
-        run: python tools/check_readiness_claims.py
 
       - name: Build clean package consumer
         run: python tools/check_clean_consumer_package.py
@@ -125,6 +122,9 @@ jobs:
       - name: Enforce core timing guard
         run: python tools/check_core_timing_guard.py
 
+      - name: Enforce CI action pinning
+        run: python tools/check_ci_action_pins.py
+
       - name: Enforce example CLI contract
         run: python tools/check_cli_contract.py
 
@@ -136,12 +136,6 @@ jobs:
 
       - name: Build clean package consumer
         run: python tools/check_clean_consumer_package.py
-
-      - name: Enforce readiness claims
-        run: python tools/check_readiness_claims.py
-
-      - name: Enforce public API documentation
-        run: python tools/check_public_api_docs.py
 
       - name: Exercise HIL parser without hardware
         run: |

@@ -13,7 +13,6 @@ REQUIRED_COMMON = [
     "Log.h",
     "I2cTransport.h",
     "I2cScanner.h",
-    "TransportAdapter.h",
     "BusDiag.h",
     "CliShell.h",
     "CliLineBuffer.h",

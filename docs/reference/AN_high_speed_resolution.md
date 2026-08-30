@@ -1,20 +1,28 @@
 # Application Note: The Value of a High-Speed, High-Resolution Light Sensor
 
-> **Source:** Texas Instruments SBOA566 (February 2023)  
-> **Relevance:** Application context for OPT4001 — use cases that drive driver feature requirements.
+> **Source:** Texas Instruments SBOA566 (February 2023)
+> **Relevance:** Use-case context only. This is a two-page brief that never
+> mentions the OPT4001 and contains no numeric specification of any kind — no
+> conversion times, no resolutions, no register data. Nothing here can be used
+> as a source for a driver decision; use
+> [OPT4001_datasheet.md](OPT4001_datasheet.md) for every number.
 
 ---
 
-## Key Takeaways
+## What The Source Actually Says
 
-- High-speed conversion (600 µs–800 ms range) is critical for **display brightness control** — slow sensors cause visible brightness lag when transitioning between environments (e.g., entering/exiting buildings or tunnels).
-- High resolution enables operation **behind dark cover glass** — the attenuated light still produces measurable readings thanks to µlux-level sensitivity.
-- **Camera applications** benefit from fast ALS for correct exposure before the first frame; high resolution enables placement behind darker glass for aesthetics.
-- **Automotive safety** is a primary driver: tunnel entry/exit creates rapid light changes requiring fast response to adjust display brightness and headlights.
+- Fast conversion matters for **display brightness control**: a slow sensor
+  causes visible brightness lag when the ambient level changes abruptly, such as
+  entering or leaving a building.
+- High resolution enables operation **behind dark cover glass**, because the
+  attenuated light still produces a measurable reading.
+- **Camera applications** need a fast ALS to get exposure right before the first
+  frame; high resolution allows darker, more aesthetic glass.
+- **Automotive safety** is the headline case: tunnel entry and exit create rapid
+  light changes that require fast display-brightness and headlight response.
 
-## Relevance to Implementation
+## Relevance To This Driver
 
-- Driver should expose **all 12 conversion time settings** to let applications optimize for speed vs. resolution.
-- **Auto-range mode** is essential for applications with large dynamic range (e.g., outdoor to indoor transitions spanning orders of magnitude).
-- One-shot mode with fast conversion times enables **power-efficient, on-demand** measurements for battery-powered display devices.
-- No additional implementation details — this is a use-case overview document.
+These use cases are the reason the driver exposes the full conversion-time range
+and auto-range mode rather than fixing a single operating point, and why one-shot
+modes exist for battery-powered, on-demand measurement.

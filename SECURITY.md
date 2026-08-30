@@ -2,9 +2,13 @@
 
 ## Supported Versions
 
+<!-- The supported row is generated from library.json by
+     scripts/generate_version.py. Do not hand-edit it. -->
+
 | Version | Supported          |
 | ------- | ------------------ |
 | 1.2.x   | :white_check_mark: |
+| 1.1.x   | :x:                |
 | 1.0.x   | :x:                |
 | < 1.0   | :x:                |
 
@@ -20,7 +24,7 @@ If you discover a security vulnerability within this library, please follow resp
    - Potential impact
    - Any suggested fixes (optional)
 
-We will acknowledge receipt within 48 hours and aim to provide a fix or mitigation within 14 days for critical issues.
+This is a single-maintainer project, so response is best-effort. Expect an acknowledgement of receipt before any fix, and please do not disclose publicly until a fix or mitigation is available.
 
 ## Scope
 

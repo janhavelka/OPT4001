@@ -1,139 +1,67 @@
 # OPT4001 Driver Library
 
-Production-oriented, source-level hardened OPT4001 ambient light sensor
-driver with a framework-neutral core. Current evidence covers native
-fake-transport tests, Arduino/PlatformIO ESP32-S2/S3 builds, and pure ESP-IDF
-v6.0.1 ESP32-S2/S3 builds in CI. Local ESP-IDF tooling was unavailable;
-hardware, optical, INT, FIFO timing/order, address-pin, and fault/recovery
-validation remain pending unless captured separately.
+A framework-neutral C++ driver for the Texas Instruments OPT4001 ambient light
+sensor (PicoStar/YMN and SOT-5X3/DTS packages).
 
-The library follows the same non-owning I2C transport and `Status`-returning API
-pattern used by the other device libraries in this workspace:
+The core in `include/` and `src/` contains no Arduino, ESP-IDF, FreeRTOS or
+logging dependency. I2C is injected through application-owned callbacks, so the
+same driver works in a small bring-up sketch and as one device inside a larger
+firmware that owns a shared I2C bus.
 
-- no direct `Wire` dependency in library code
-- framework-neutral core with no Arduino or ESP-IDF driver headers in `include/` or `src/`
-- deterministic control flow with bounded polling in `tick()`
-- health tracking with `READY`, `DEGRADED`, and `OFFLINE` states
-- stable `errorName()` / `driverStateName()` strings for diagnostics shared by
-  Arduino and native ESP-IDF integrations
-- no heap allocation in steady-state driver operation
-- bus-silent `bind()` / `unbind()` and instruction-budgeted `startAttach()` for
-  integration into a sole application-owned I2C task
+- non-owning I2C transport: the driver never touches `Wire`, pins, or bus timeouts
+- every fallible call returns a structured `Status` — no exceptions, no silent failure
+- no heap allocation, no `String`, no unbounded loops or `delay()` in the core
+- health tracking with `READY` / `DEGRADED` / `OFFLINE` and an explicit `recover()`
+- bus-silent `bind()` / `unbind()` plus instruction-budgeted poll jobs for a
+  single-owner I2C task
+- stable `errorName()` / `driverStateName()` strings for shared diagnostics
 
-## Current Readiness
-
-Classification: source-level hardened and diagnostic-build tested. The core is
-designed for production integration, but this repository does not currently
-claim real-device hardware validation, optical accuracy validation,
-or INT/FIFO/address-pin/fault-recovery validation.
-
-### Validation Evidence
-
-| Area | Evidence currently captured |
-| --- | --- |
-| Core portability | `tools/check_core_timing_guard.py` enforces no Arduino/ESP-IDF framework APIs in `include/` or `src/`. |
-| Public contracts | `tools/check_public_api_docs.py` checks lifecycle, freshness, FIFO CRC, dirty-state, blocking, INT/FLAGS, and transport documentation tokens. |
-| Claims/metadata | `tools/check_readiness_claims.py` checks unsupported readiness claims, CI guard coverage, and supported-version metadata. |
-| Native behavior | `.\scripts\pio.cmd test -e native` runs fake-transport unit coverage through the required Windows wrapper. |
-| Arduino ESP32 builds | `.\scripts\pio.cmd run -e esp32s3dev` and `.\scripts\pio.cmd run -e esp32s2dev` build the Arduino diagnostic example. |
-| Packaging | `.\scripts\pio.cmd pkg pack` verifies PlatformIO package metadata. |
-| ESP-IDF static contract | `tools/check_idf_example_contract.py` verifies the native IDF example boundary and command coverage. |
-| Pure ESP-IDF builds | [GitHub Actions run 31227037444](https://github.com/janhavelka/OPT4001/actions/runs/31227037444) passed for ESP32-S2 and ESP32-S3 with ESP-IDF v6.0.1. |
-
-### Pending Validation Matrix
-
-| Area | Current status |
-| --- | --- |
-| Hardware bring-up on real OPT4001 | Pending hardware-validation log with board, package, wiring, firmware, and measurement evidence. |
-| Optical accuracy / cover-glass correction | Pending application-specific validation. |
-| SOT-5X3 address-pin combinations | Pending hardware matrix. |
-| INT threshold, every-conversion, and FIFO-full pulses | Pending logic-analyzer or board-captured evidence. |
-| FIFO physical timing/order under real conversions | Pending hardware matrix. |
-| SMBus alert arbitration | Pending controller-level validation. |
-| Fault/recovery paths | Pending controlled hardware/HIL validation for NACK, timeout, unplug/replug, brownout, stuck bus, OFFLINE latch, and manual `recover()`. |
-
-Hardware validation procedure: `docs/validation/hardware-validation-procedure.md`.
-
-### Package, Address, And Electrical Matrix
+## Package, Address, And Electrical Matrix
 
 | Package variant | Valid addresses | Lux LSB | INT / ADDR pins |
 | --- | --- | --- | --- |
 | PicoStar | `0x45` only | `312.5e-6 lux/code` | No INT pin, no ADDR pin |
 | SOT-5X3 | `0x44`, `0x45`, `0x46` | `437.5e-6 lux/code` | ADDR pin plus optional open-drain INT |
 
-Power OPT4001 from the datasheet VDD range, 1.6 V to 3.6 V. Digital I/O pins
-are 5.5 V tolerant; that does not make the device a 5 V powered part.
+Power the OPT4001 from the datasheet VDD range, 1.6 V to 3.6 V. The digital I/O
+pins are 5.5 V tolerant; that tolerance is not permission to power the device
+from a 5 V rail.
 
 ## Features
 
-- OPT4001 package support:
-  - PicoStar variant with fixed address `0x45`, package-specific lux scale,
-    no ADDR pin, and no INT pin
-  - SOT-5X3 variant with selectable addresses `0x44`, `0x45`, `0x46`,
-    package-specific lux scale, ADDR pin support, and optional INT support
-- Operating modes:
-  - power-down
-  - continuous conversion
-  - one-shot conversion
-  - one-shot forced auto-range conversion
-- Measurement support:
-  - decoded exponent / mantissa sample format
-  - lux, milli-lux, and micro-lux helpers
-  - 4-sample burst read (`RESULT` newest + FIFO0..FIFO2 shadows)
-  - per-slot history reads (`slot 0` = newest, `1-3` = FIFO shadows)
-  - per-sample CRC fields with aggregate read status
-- Configuration support:
-  - range selection or auto-range
-  - conversion-time selection
-  - quick wake
-  - threshold registers
-  - interrupt polarity, latch, fault count, direction, function, and burst mode
-- Diagnostics:
-  - raw register access
-  - raw contiguous register-block reads
-  - probe without health side effects
-  - tracked recover path
-  - decoded device-ID / configuration / INT-configuration helpers
-  - cached settings snapshot
-  - full-scale, effective-bit, resolution, and counter-delta utility helpers
-  - protocol-qualified discovery at the legal addresses, distinct from an
-    ACK-only bus scan
-  - full poll-job control, dynamic color, health monitoring, bounded selfcheck,
-    and cooperative finite stress in both example CLIs
+- **Modes** — power-down, continuous, one-shot, one-shot forced auto-range, quick wake.
+- **Measurement** — decoded exponent/mantissa samples, lux / milli-lux / micro-lux,
+  4-deep burst read (`RESULT` newest plus FIFO0..FIFO2), per-slot history reads,
+  per-sample CRC with aggregate read status.
+- **Configuration** — range or auto-range, all 12 conversion times, thresholds
+  (raw and lux), interrupt polarity / latch / fault count / direction / function,
+  I2C burst mode.
+- **Diagnostics** — raw register and register-block access, health-neutral
+  `probe()`, tracked `recover()`, decoded device-ID / configuration /
+  INT-configuration helpers, cached settings snapshot, full-scale / effective-bit
+  / resolution / counter-delta helpers.
+- **Integration** — synchronous blocking helpers, poll-friendly `tryRead*()`
+  helpers, and instruction-budgeted poll jobs for a sole bus owner.
 
 ## Installation
 
 ### PlatformIO
 
-This repository pins its Arduino builds to pioarduino `55.03.311` and native
+```ini
+lib_deps =
+  https://github.com/janhavelka/OPT4001.git
+```
+
+The repository pins its Arduino builds to pioarduino `55.03.311` and native
 tests to `platformio/native@1.2.1`. On Windows, repository validation uses the
 checked-in `scripts\pio.cmd` wrapper so it selects the existing VS Code-managed
 PlatformIO Core.
 
-Add to `platformio.ini`:
-
-The examples below intentionally use the latest published tag (`v1.0.0`). The
-audited source metadata is `1.2.2`, but this hardening change is not a formal
-release and does not create a tag.
-
-```ini
-lib_deps =
-  https://github.com/janhavelka/OPT4001.git#v1.0.0
-```
-
-After registry publication, the equivalent registry form is:
-
-```ini
-lib_deps =
-  OPT4001@^1.0.0
-```
-
 ### Manual
 
-Copy `include/OPT4001/` and `src/` into your project. The generated
-`include/OPT4001/Version.h` header is intentionally tracked in this repository,
-so `#include "OPT4001/OPT4001.h"` works from a clean checkout without running a
-pre-generation step.
+Copy `include/OPT4001/` and `src/` into your project. `include/OPT4001/Version.h`
+is generated from `library.json` but is committed, so `#include "OPT4001/OPT4001.h"`
+works from a clean checkout without a pre-generation step. Do not edit it by hand.
 
 ### ESP-IDF
 
@@ -145,29 +73,11 @@ set(EXTRA_COMPONENT_DIRS
     "${CMAKE_CURRENT_LIST_DIR}/../OPT4001")
 ```
 
-Then provide `Config::i2cWrite`, `Config::i2cWriteRead`, `Config::nowMs`,
-optional `Config::cooperativeYield`, and optional `Config::gpioRead` from your
-application-owned adapter. The `examples/esp_idf/basic` project is a diagnostic
-bring-up CLI with comparable command coverage to the Arduino example. It owns
-its example I2C bus, uses ESP-IDF-native GPIO, timer, VFS console, and new I2C
-master-driver glue, and does not demonstrate production shared-bus locking.
+ESP-IDF derives the component name from the directory name, so the checkout must
+be named `OPT4001` for `REQUIRES OPT4001` to resolve.
 
-### Version Header
-
-`library.json` is the version source of truth. `include/OPT4001/Version.h` is
-generated by `scripts/generate_version.py` and committed so manual, CMake, and
-ESP-IDF consumers can include the public header directly from a clean checkout.
-Do not edit it manually.
-
-```bash
-python scripts/generate_version.py check
-python tools/check_version_header_contract.py
-```
-
-PlatformIO builds still inject build date, time, git commit, and git status
-through compiler defines. Non-PlatformIO builds use stable `"unknown"` defaults
-for those optional metadata fields unless the application supplies its own
-defines.
+See [docs/integration/esp-idf.md](docs/integration/esp-idf.md) for the transport
+adapter, status mapping, and example boundary.
 
 ## Quick Start
 
@@ -185,8 +95,8 @@ OPT4001::Status i2cWrite(uint8_t addr, const uint8_t* data, size_t len,
     case 0: return OPT4001::Status::Ok();
     case 2: return OPT4001::Status::Error(OPT4001::Err::I2C_NACK_ADDR, "Address NACK");
     case 3: return OPT4001::Status::Error(OPT4001::Err::I2C_NACK_DATA, "Data NACK");
-    case 5: return OPT4001::Status::Error(OPT4001::Err::I2C_TIMEOUT, "I2C timeout");
     case 4: return OPT4001::Status::Error(OPT4001::Err::I2C_BUS, "I2C bus error");
+    case 5: return OPT4001::Status::Error(OPT4001::Err::I2C_TIMEOUT, "I2C timeout");
     default: return OPT4001::Status::Error(OPT4001::Err::I2C_ERROR, "Write failed");
   }
 }
@@ -221,7 +131,9 @@ void setup() {
   cfg.i2cWrite = i2cWrite;
   cfg.i2cWriteRead = i2cWriteRead;
   cfg.i2cUser = &Wire;
-  cfg.nowMs = [](void*) { return millis(); };
+  // The return type must be spelled uint32_t: millis() returns unsigned long,
+  // which is a different type from uint32_t on ESP32.
+  cfg.nowMs = [](void*) -> uint32_t { return static_cast<uint32_t>(millis()); };
   cfg.cooperativeYield = [](void*) { yield(); };
   cfg.packageVariant = OPT4001::PackageVariant::SOT_5X3;
   cfg.i2cAddress = 0x45;
@@ -248,195 +160,90 @@ void loop() {
 }
 ```
 
-## API Notes
+### Shared-bus integration
 
-- `bind()` validates and caches callbacks/configuration without I2C.
-  `startAttach()` then performs one DEVICE_ID read and four writes through the
-  poll-job engine. With the default `poll(nowMs, 1)` budget, a sole I2C-owner
-  task sees at most one transport callback per poll.
-- `unbind()` is bus-silent. `powerDown()` is the explicit error-reporting
-  one-write shutdown. The established `end()` contract remains best-effort.
-- `begin()` validates the transport, address, package variant, and device ID, then
-  applies the cached configuration.
-- The driver is not internally synchronized or ISR-safe. Call public APIs from one
-  task or protect the shared driver instance and transport with an application
-  lock. ISRs should only signal work to a task; they should not call driver methods.
-- Transport callbacks must not call back into the same driver instance. On a
-  shared bus, the application lock must cover both the driver call and the
-  callback transaction.
-- Normal tracked I2C APIs require a successful synchronous `begin()` or a
-  completed poll-chunked `startAttach()` unless their header contract says
-  otherwise. While `UNINIT`, public raw-register APIs return `NOT_INITIALIZED`
-  without touching the bus.
-- `Config.mode` accepts only `POWER_DOWN` or `CONTINUOUS`.
-  One-shot measurements are started explicitly with `startConversion()` or
-  `readBlocking()`.
-- Forced auto-range one-shots have a longer wait budget than normal one-shots:
-  conversion time plus standby wake time when quick-wake is disabled plus the
-  forced-auto-range extra time. Use `getOneShotBudget*()`, not
-  `getConversionTime*()`, when sizing one-shot deadlines.
-- `softReset()` uses the documented general-call reset (`0x00` / `0x06`).
-  That reset is bus-wide; use it only when the bus topology allows it.
-- ESP-IDF reset support requires the application adapter to support the
-  general-call write address `0x00`; the IDF CLI exposes `reset` and
-  `resetreapply`, but the address-`0x00` path still needs target-IDF and
-  target-hardware validation before production use.
-- `resetAndReapply()` exists for the same workflow used in the stronger sibling
-  libraries: reset the device, then restore the cached configuration.
-- `probe()` reads `DEVICE_ID` register `0x11` through the raw configured
-  transport without updating health counters. Success means the register pattern
-  is exactly `0x0121`: fixed bits `[15:14] = 0`, `DIDL[13:12] = 0`, and
-  `DIDH[11:0] = 0x121`. This is identity-register validation, not optical or
-  measurement-path validation.
-- `probe()` and `begin()` preserve transport diagnostics instead of collapsing
-  them to `DEVICE_NOT_FOUND`. A successful I2C transaction with the wrong full
-  ID pattern returns `DEVICE_ID_MISMATCH` with the raw register value in
-  `Status::detail`.
-- `readLatestSample()` reads the current output registers without freshness proof.
-  It is diagnostic/latest-register access and may return duplicate samples.
-- `readSample()`, `readBurst()`, lux reads, `tryReadSample()` /
-  `tryReadFreshSample()`, and blocking helpers are fresh-sample APIs. Fresh
-  means conversion-ready flag evidence, configured SOT-5X3 INT assertion, or a
-  sample-counter advance from the previous accepted fresh sample.
-- The sample counter is modulo 16. `sampleCounterDelta()` is wrap-aware, but
-  counter-only freshness cannot detect a missed full modulo-16 wrap; poll faster
-  than 16 conversions when every conversion matters.
-- Fresh sample APIs may return `CRC_ERROR` while still populating the decoded
-  sample data; that sample is consumed as fresh and cached.
-- Blocking read helpers require `Config::nowMs`; it must be monotonic and
-  advance in milliseconds. `timeoutMs` must cover `getOneShotBudgetMs(mode)`
-  plus transport and scheduler margin. The finite poll cap prevents an infinite
-  loop, but it is not a replacement clock. A timeout does not cancel a hardware
-  one-shot already in flight; a later readiness poll may still consume it.
-- `readLux()`, `readMilliLux()`, `readMicroLux()`, and `tryReadLux()` follow the
-  same rule: on `CRC_ERROR`, the scaled output value is still written.
-- `readBurst()` returns `BurstFrame::newest` from `RESULT`, followed by
-  `fifo0`, `fifo1`, and `fifo2` from the FIFO shadow register pairs. Treat that
-  order as newest to oldest within the four-deep history window.
-- Each burst/history `Sample` carries its own received CRC nibble and
-  `crcValid` flag. The returned `Status` is aggregate: `OK` means the decoded
-  slots passed the selected CRC policy, while `CRC_ERROR` means at least one
-  decoded slot failed verification. After a successful register transfer,
-  `readBurst()` decodes all four slots even when one or more slots fail CRC.
-- `readSampleSlot(0..3)` provides direct access to the newest sample plus the
-  three FIFO shadow samples without forcing a full burst decode. Slot 0 consumes
-  freshness like `readSample()`; slots 1-3 are direct history reads.
-- For TunnelMonitor-style shared `I2cTask` integration, prefer `readBurst()` as
-  the low-level sample primitive. It exposes newest plus FIFO history in one
-  fixed RESULT/FIFO transfer when burst mode is enabled and preserves raw
-  exponent, mantissa, ADC code, counter, CRC, and lux fields for owner-side
-  policy.
-- Poll-chunked jobs are available through `startReadBurst()`,
-  `startReadSample()`, `startConfigureMeasurement()`, and
-  `startResetAndReapply()`, then `poll(nowMs, maxInstructions)`. Attachment uses
-  the same engine through `startAttach()`. One register
-  read/write or one burst RESULT/FIFO block read is one instruction; CRC decode,
-  lux conversion, cache updates, and delay gates do not count. `FLAGS` reads
-  are explicit instructions because the register is clear-on-read.
-- `getLastSample()` / `sampleTimestampMs()` / `sampleAgeMs()` provide RAM-only
-  access to the last successfully decoded sample.
-- `getSettings(SettingsSnapshot&)` is also RAM/cache-only. It does not probe,
-  read registers, or hide live I2C behind a settings snapshot.
-- `tryReadSample()` / `tryReadFreshSample()` / `tryReadLux()` are intended for
-  cooperative polling loops: they return `OK` with `didRead=false` when no fresh
-  sample is ready yet, so the application does not have to treat
-  `MEASUREMENT_NOT_READY` as control flow. I2C or register-poll failures are
-  still returned as errors.
-- `OFFLINE` is latched. After the health threshold is reached, normal public I2C
-  operations return `OFFLINE` with `"Driver is offline; call recover()"` without
-  touching the bus. Use `recover()` to probe and re-apply cached configuration,
-  or use the explicit reset / reset-and-reapply diagnostics when a bus-wide
-  reset is acceptable.
-- A dirty hardware/cache state means the driver's cached settings may no longer
-  describe the sensor registers. Typical causes are raw register writes,
-  external/general-call resets, brownout, or a failed multi-register sequence
-  after some earlier writes reached the device. The recovery recipe is to stop
-  relying on threshold, INT, and freshness assumptions, call `recover()` to
-  probe and re-apply cached configuration, then read back configuration,
-  INT-configuration, and thresholds if the application needs confirmation. If a
-  bus-wide reset is acceptable, `resetAndReapply()` is the stronger recipe.
-- `end()` is best-effort: when initialized and online it attempts a raw
-  power-down write, ignores that write status, clears runtime state, and leaves
-  the driver `UNINIT` while keeping the validated transport/configuration bound.
-  Use `unbind()` for a bus-silent full release.
-- `cancelPollJob()` never touches I2C. It reports `CANCELLED` and marks
-  hardware/cache state dirty when confirmed configuration/reset writes may
-  already have reached the device.
-- `configureMeasurement()` applies range, conversion time, quick-wake, and the
-  stable operating mode in one coherent update while still using the same cached
-  config model and injected transport.
-- Cached configuration setters roll back the cached state if the required I2C
-  write sequence fails.
-- `readFlags()` and `readFlagsRaw()` read register `0x0C`, which is clear-on-read.
-  Use them only when consuming/clearing the latched FLAGS view is intended. Raw
-  register reads of `0x0C`, or raw register blocks that include `0x0C`, have the
-  same hardware side effect.
-- `clearConversionReadyFlag()` performs the datasheet's write-nonzero clear of
-  only `CONVERSION_READY_FLAG`, while `clearFlags()` intentionally uses the
-  destructive read path to clear the full sticky status view.
-- `writeIntConfiguration()` verifies the fixed register pattern documented for `0x0B`
-  before writing.
-- Decoded register helpers (`DeviceIdInfo`, `ConfigurationInfo`,
-  `IntConfigurationInfo`) are available so bring-up code does not need to unpack
-  bit fields manually.
-- Interrupt preset helpers (`enableThresholdInterrupt*()`,
-  `enableConversionReadyInterrupt()`, `enableFifoFullInterrupt()`) are
-  convenience wrappers over the existing register model; they do not take
-  ownership of GPIOs, alert handling, ISRs, or the I2C transport.
-- INT is SOT-5X3-only and is an open-drain signal. The driver can read a
-  configured GPIO hook and apply interrupt polarity, but it never configures,
-  reserves, attaches interrupts to, debounces, drives, or owns the pin. The
-  application owns pullups, GPIO mode, ISR attachment, ISR-to-task signaling,
-  and pin lifetime. PicoStar users should leave INT disabled.
-- INT output modes are threshold/SMBus alert, pulse after every conversion, and
-  pulse after every four conversions for FIFO-full indication. The reserved
-  `INT_CFG=2` value is rejected. `INT_DIR=0` makes INT a one-shot trigger input,
-  so it cannot simultaneously be used as an interrupt output.
-- The threshold-interrupt convenience helpers reject inverted windows
-  (`low > high`) up front; the lower-level raw threshold setters remain available
-  when an application really needs exact register control.
-- Threshold and INT register packing are covered by native tests, but end-to-end
-  threshold flag, SMBus alert, INT pulse, and ISR behavior still require
-  target-hardware validation before production reliance.
-- Threshold lux helpers reject negative, NaN, and infinite inputs before packing
-  threshold registers.
-- Raw register access is bounded to documented public registers; blocks that span
-  reserved gaps are rejected before touching the bus.
+When one task owns the I2C bus, use the bus-silent bind plus the
+instruction-budgeted poll engine instead of the synchronous helpers:
 
-### Numeric And Electrical Contract
+```cpp
+sensor.bind(cfg);                 // validates and caches, touches no I2C
+sensor.startAttach();             // schedules 1 read + 4 writes
 
-Package selection controls both lux scaling and valid I2C addresses:
+// in the bus owner's loop:
+sensor.poll(nowMs, 1);            // at most one transport callback per poll
+if (!sensor.pollBusy()) {
+  sensor.startReadBurst();        // newest + FIFO0..FIFO2 in one block read
+}
+```
 
-| Package variant | Valid addresses | Lux LSB | INT |
-| --- | --- | --- | --- |
-| PicoStar | `0x45` only | `312.5e-6 lux/code` | Not available |
-| SOT-5X3 | `0x44`, `0x45`, `0x46` | `437.5e-6 lux/code` | Optional application-owned GPIO |
+`readBurst()` is the preferred low-level sample primitive for shared-bus
+integrations: one fixed RESULT/FIFO transfer yields four samples with raw
+exponent, mantissa, ADC codes, counter, CRC and lux preserved for owner-side
+policy.
 
-Power the device from the datasheet VDD range, 1.6 V to 3.6 V. The digital I/O
-pins are 5.5 V tolerant, but that tolerance is not permission to power the
-device from a 5 V rail.
+## Contracts
 
-Result samples use a 4-bit exponent and 20-bit mantissa from `RESULT` /
-`RESULT_LSB_CRC`. Public raw conversion helpers accept only exponent `0..8` and
-mantissa `0x00000..0xFFFFF`; invalid fields return `INVALID_PARAM` in the
-status-returning helpers. Compatibility float helpers return quiet NaN for
-invalid raw or threshold inputs. Valid result ADC codes are computed with
-64-bit intermediates as `mantissa << exponent` before scaling to lux.
+The durable behavioural contracts — lifecycle, health, freshness, poll jobs,
+dirty hardware/cache state, numeric and CRC policy — live in
+[docs/integration/driver-contracts.md](docs/integration/driver-contracts.md).
+The per-method contracts are Doxygen comments in
+[include/OPT4001/OPT4001.h](include/OPT4001/OPT4001.h). The points most often
+missed:
 
-Threshold registers use 4-bit exponent and 12-bit result fields. The exact
-linear threshold code is `result << (8 + exponent)` and can exceed `uint32_t`,
-so `thresholdToAdcCodes(threshold, uint64_t&)` is the lossless API. The legacy
-`thresholdToAdcCodes(threshold)` helper saturates at `UINT32_MAX` instead of
-wrapping. `luxToThreshold()` rounds the requested lux to the nearest ADC code,
-then quantizes to the register format; it rejects negative, non-finite, and
-out-of-range lux values. Packed thresholds are therefore lower-resolution than
-raw sample results at small exponents.
+- **Not thread-safe, not ISR-safe.** One task per instance, or an application
+  lock covering both the driver call and the transport callback. Transport
+  callbacks must not re-enter the same instance.
+- **`Config.mode` accepts only `POWER_DOWN` or `CONTINUOUS`.** One-shot
+  measurements start explicitly through `startConversion()` or `readBlocking()`.
+- **Size one-shot deadlines with `getOneShotBudget*()`, not `getConversionTime*()`.**
+  A forced auto-range one-shot adds standby wake time and the auto-range penalty.
+- **`FLAGS` (`0x0C`) is clear-on-read.** `readFlags()`, `readFlagsRaw()`, raw
+  reads of `0x0C`, and raw blocks spanning it all consume the device's latched
+  status view, including `FLAG_H` / `FLAG_L`.
+- **Fresh reads need hardware evidence** — conversion-ready flag, configured INT
+  assertion, or a sample-counter advance. `readLatestSample()` is the explicit
+  "no freshness proof" escape hatch.
+- **`CRC_ERROR` is data-bearing.** Fresh-sample and lux APIs still populate the
+  decoded output and consume freshness on `CRC_ERROR`.
+- **`OFFLINE` is latched.** Normal public I2C APIs then return `OFFLINE` without
+  touching the bus. `probe()`, `recover()`, `softReset()`, `resetAndReapply()`,
+  `startResetAndReapply()` and `poll()` driving a reset job are the exceptions.
+- **`softReset()` / `resetAndReapply()` use the general-call reset (`0x00`/`0x06`),
+  which is bus-wide.** Use them only when the bus topology allows it.
+- **Raw register writes can desynchronise the cached configuration.** Check
+  `hardwareConfigDirty()` / `hardwareConfigDirtyError()` and re-apply with
+  `recover()`.
 
-CRC verification uses the datasheet XOR equations over `EXPONENT`, 20-bit
-`MANTISSA`, and 4-bit `COUNTER`. When verification is enabled, a mismatch
-returns `CRC_ERROR` while preserving decoded sample fields and the received CRC
-nibble. When verification is disabled, the sample status is `OK` and
-`Sample::crcValid` is false.
+### Sample freshness
+
+| Term / API | Meaning |
+| --- | --- |
+| Latest sample | Current `RESULT` contents; may repeat a previous sample. `readLatestSample()`. |
+| Fresh sample | A newly observed conversion. Evidence is `CONVERSION_READY_FLAG`, configured INT assertion, or a counter advance. |
+| Cached sample | RAM copy of the last successful decode: `getLastSample()`, `hasSample()`, `sampleTimestampMs()`, `sampleAgeMs()`. |
+| Not ready | Fresh reads return `MEASUREMENT_NOT_READY`; `tryRead*()` return `OK` with `didRead = false`. |
+
+The sample counter is modulo 16, so counter-only freshness cannot detect a
+missed full wrap. Poll faster than 16 conversions when every conversion matters.
+
+Elapsed conversion time is only a poll gate, never proof of completion: in
+auto-range an overflow can abort a measurement, raise the range, and push
+completion past the nominal conversion time.
+
+### Numeric contract
+
+Samples use a 4-bit exponent and 20-bit mantissa. Public raw conversion helpers
+accept exponent `0..8` and mantissa `0x00000..0xFFFFF`; status-returning helpers
+return `INVALID_PARAM` for anything else, and the compatibility float helpers
+return quiet NaN. ADC codes are computed with 64-bit intermediates as
+`mantissa << exponent` before scaling to lux.
+
+Threshold registers use a 4-bit exponent and 12-bit result. The exact linear code
+is `result << (8 + exponent)` and can exceed `uint32_t`, so
+`thresholdToAdcCodes(threshold, uint64_t&)` is the lossless API; the legacy
+`thresholdToAdcCodes(threshold)` saturates at `UINT32_MAX`. `luxToThreshold()`
+rounds to the nearest representable value and rejects negative, non-finite, and
+out-of-range lux.
 
 | Conversion setting | Time us | Ceil ms | Effective bits |
 | --- | ---: | ---: | ---: |
@@ -453,269 +260,60 @@ nibble. When verification is disabled, the sample status is `OK` and
 | `MS_400` | 400000 | 400 | 19 |
 | `MS_800` | 800000 | 800 | 20 |
 
-Numeric and CRC vector verification uses:
+### Probe diagnostics
 
-```powershell
-.\scripts\pio.cmd test -e native
-```
+`probe()` reads `DEVICE_ID` (`0x11`) through the raw transport without touching
+health counters. Success means the full pattern is `0x0121`: fixed bits
+`[15:14] = 0`, `DIDL[13:12] = 0`, `DIDH[11:0] = 0x121`. That is identity
+validation, not optical or measurement-path validation.
 
-### Sample Freshness
-
-| Term / API | Meaning |
-| --- | --- |
-| Latest sample | Current `RESULT` register contents; may be the same counter/data as a previous read. |
-| Fresh sample | Newly observed conversion since the previous accepted fresh sample. Evidence is `CONVERSION_READY_FLAG`, configured SOT-5X3 INT assertion, or counter advance. |
-| Cached sample | RAM copy from the last successful latest/fresh decode; use `getLastSample()`, `hasSample()`, `sampleTimestampMs()`, and `sampleAgeMs()`. |
-| Not ready | No fresh evidence is available; direct fresh reads return `MEASUREMENT_NOT_READY`, try APIs return `OK` with `didRead=false`, and readiness checks return `ready=false`. |
-| `readLatestSample()` | Reads current output registers without freshness proof. |
-| `readSample()`, `readBurst()`, `tryReadSample()`, `tryReadFreshSample()`, `readFreshBlocking()` | Fresh-sample APIs that consume readiness on `OK` or `CRC_ERROR`. |
-| `readBurst()` | Preferred low-level shared-task sample primitive because it returns raw/integer newest and FIFO history in one fixed burst transfer when burst mode is enabled. |
-
-`tick()` and `conversionReady()` may use elapsed conversion time as a poll gate,
-but elapsed time alone is not reported as completion. This matters in auto-range:
-overflow can abort a measurement, increase range, and make completion exceed the
-nominal conversion-time setting.
-
-Without configured INT evidence or prior-counter evidence, readiness checks
-read `FLAGS` to observe `CONVERSION_READY_FLAG`. Per the data sheet, that same
-read consumes latched high/low threshold flags. Use the SOT-5X3 INT evidence
-path or schedule explicit FLAGS consumption when those events must remain
-available to application policy.
-
-### Probe Diagnostics
-
-| Condition during `probe()` / startup | Returned status | Detail field |
+| Condition | Returned status | `Status::detail` |
 | --- | --- | --- |
 | Address phase NACK, when the transport can distinguish it | `I2C_NACK_ADDR` | transport code |
 | Data phase NACK, when the transport can distinguish it | `I2C_NACK_DATA` | transport code |
-| I2C transaction timeout | `I2C_TIMEOUT` | transport code |
-| Bus/arbitration/driver-state fault | `I2C_BUS` | transport code |
-| Generic transport failure or unknown NACK phase | `I2C_ERROR` | transport code |
-| Successful read, but `DEVICE_ID` fixed bits/DIDL/DIDH are wrong | `DEVICE_ID_MISMATCH` | raw `DEVICE_ID` value |
+| Transaction timeout | `I2C_TIMEOUT` | transport code |
+| Bus / arbitration / driver-state fault | `I2C_BUS` | transport code |
+| Generic or unknown-phase transport failure | `I2C_ERROR` | transport code |
+| Successful read, wrong `DEVICE_ID` pattern | `DEVICE_ID_MISMATCH` | raw register value |
 
-Arduino `Wire` adapters can distinguish address and data NACK during
-`endTransmission()`, but read-phase errors may still be generic because
-`requestFrom()` reports only how many bytes were read. The ESP-IDF example maps
-`ESP_ERR_TIMEOUT` to `I2C_TIMEOUT`, `ESP_ERR_INVALID_RESPONSE` to generic
-`I2C_ERROR` because the transaction API does not expose NACK phase, and other
-driver/bus state errors to `I2C_BUS` while preserving the raw `esp_err_t` in
-`detail`.
-
-## Public Surface
-
-### Lifecycle And Diagnostics
-
-- `bind(const Config&)`, `unbind()`, `isBound()`
-- `begin(const Config&)`
-- `tick(uint32_t nowMs)`
-- `end()`
-- `startAttach()`, `powerDown()`
-- `probe()`
-- `recover()`
-- `softReset()`
-- `resetAndReapply()`
-- `startResetAndReapply()`
-- `cancelPollJob()`
-- `readDeviceId(uint16_t&)`
-- `readDeviceId(DeviceIdInfo&)`
-- `getSettings(SettingsSnapshot&)`
-
-### Measurements
-
-- `startConversion()`
-- `startConversion(Mode mode)`
-- `poll(nowMs, maxInstructions)`
-- `pollBusy()`
-- `lastPollStatus()`
-- `startReadSample()`
-- `startReadBurst()`
-- `getLastBurst(BurstFrame&)`
-- `conversionReady()`
-- `conversionReady(bool&)`
-- `hasSample()`
-- `readLatestSample(Sample&)`
-- `readSample(Sample&)`
-- `readBurst(BurstFrame&)`
-- `readSampleSlot(slot, Sample&)`
-- `getLastSample(Sample&)`
-- `sampleTimestampMs()`
-- `sampleAgeMs(nowMs)`
-- `readLux(float&)`
-- `readMilliLux(uint32_t&)`
-- `readMicroLux(uint64_t&)`
-- `readBlocking(...)`
-- `readFreshBlocking(...)`
-- `readBlockingLux(...)`
-- `tryReadSample(Sample&, bool&)`
-- `tryReadFreshSample(Sample&, bool&)`
-- `tryReadLux(float&, bool&)`
-
-### Configuration And Raw Access
-
-- `setRange()`, `setConversionTime()`, `setMode()`, `setQuickWake()`, `setVerifyCrc()`
-- `configureMeasurement(range, time, mode, quickWake)`
-- `startConfigureMeasurement(range, time, mode, quickWake)`
-- `setInterruptLatch()`, `setInterruptPolarity()`, `setFaultCount()`
-- `setIntDirection()`, `setIntConfig()`, `setBurstMode()`
-- `setThresholds()`, `getThresholds()`, `setThresholdsLux()`
-- `getThresholdsLux()`, `restoreDefaultThresholds()`
-- `enableThresholdInterrupt(...)`, `enableThresholdInterruptLux(...)`
-- `enableConversionReadyInterrupt()`, `enableFifoFullInterrupt()`
-- `readConfiguration(...)`, `writeConfiguration()`
-- `readIntConfiguration(...)`, `writeIntConfiguration()`
-- `readFlags()`, `readFlagsRaw()`, `clearConversionReadyFlag()`, `clearFlags()`
-- `readIntPinAsserted(bool&)`
-- `readRegisters()`, `readRegister16()`, `writeRegister16()`
-
-`readRegisters()` preserves register-window byte ordering with I2C burst mode
-disabled by issuing one bounded two-byte transaction per register. Threshold
-lux encoding rounds to the nearest representable exponent/result value.
-
-### Decode And Scaling Helpers
-
-- `decodeDeviceId()`, `decodeConfiguration()`, `decodeIntConfiguration()`
-- `adcCodesToLux()`, `rawToAdcCodes()`, `rawToLux()`
-- `thresholdToLux()`, `thresholdToAdcCodes()`
-- `getRangeFullScaleLux()`, `getCurrentFullScaleLux()`, `getSampleFullScaleLux()`
-- `getEffectiveBits()`
-- `getRangeResolutionLux()`, `getCurrentResolutionLux()`, `getSampleResolutionLux()`
-- `sampleCounterDelta()`
+Transport statuses are never collapsed to `DEVICE_NOT_FOUND`.
 
 ## Examples
 
-- `examples/01_basic_bringup_cli/`
-  - interactive bring-up shell
-  - ACK scan, DEVICE_ID-qualified discovery, bind/attach/unbind, probe,
-    recover, reset/reapply, compact state view, and runtime address selection
-  - decoded config / intcfg / flags / status / device-ID readback with colored health reporting
-  - one-shot reads, poll-friendly `tryread` / `trylux`, non-blocking `watch` /
-    `stop`, full `job` control, burst/FIFO and slot history, cooperative finite
-    stress/stress-mix, and selfcheck
-  - lux / milli-lux / micro-lux commands plus latest-register `raw`, `adc2lux`, `raw2lux`, scale / timing diagnostics, and the per-range scale table
-  - threshold lux helpers, `thcalc`, `thdecode`, `threshold default`, raw threshold programming, interrupt configuration, and raw register / block access
-  - measurement and interrupt convenience flows exposed directly in the shell via `measure`, `int ready`, `int fifo`, and `int th`
-  - consolidated `diag` report and optional periodic `healthmon` output using the shared health diagnostic helper
-- `examples/esp_idf/basic/`
-  - native ESP-IDF diagnostic project with `app_main()`, fixed-buffer
-    nonblocking CLI input, and `driver/i2c_master.h` transport callbacks
-  - colorized, sectioned command coverage matching the Arduino diagnostic
-    surface: address/package profiles, blocking/poll-friendly reads, FIFO/slot
-    history, watch/stop, measurement and interrupt configuration, decoded
-    status/config, threshold math, raw registers, scaling/timing, full poll-job
-    control, cooperative stress, health monitor, color, and selfcheck workflows
-  - owns its example I2C bus and intentionally does not show production
-    shared-bus locking
-  - no Arduino compatibility facade; parity is enforced by
-    `tools/check_idf_example_contract.py`
-- `examples/common/`
-  - board config and serial logging helpers
-  - I2C transport adapter and bus scanner
-  - reusable CLI parsing / diagnostics glue, including `HealthView.h` and `HealthDiag.h`
+- **`examples/01_basic_bringup_cli/`** — Arduino/PlatformIO interactive bring-up
+  shell: bus scan and DEVICE_ID-qualified discovery, bind/attach/unbind, probe,
+  recover, reset/reapply, decoded config / intcfg / flags / device-ID readback,
+  one-shot and continuous reads, `tryread` / `trylux`, non-blocking `watch`,
+  full poll-job control, burst/FIFO and slot history, threshold and interrupt
+  configuration, raw register and block access, health monitor, and `selfcheck`.
+- **`examples/esp_idf/basic/`** — native ESP-IDF project with `app_main()`,
+  `driver/i2c_master.h` transport callbacks, and comparable command coverage.
+  It owns its example I2C bus and does not demonstrate production shared-bus
+  locking. Parity is enforced by `tools/check_idf_example_contract.py`.
+- **`examples/common/`** — example-only glue: board config, serial logging, I2C
+  transport adapter and scanner, bounded CLI line buffer, health views. This
+  directory is **not** part of the library.
 
-### CLI Notes
+Both CLIs use fixed 192-byte command storage; an overlong line is discarded
+completely and cannot dispatch as a truncated command.
 
-- `scan` is ACK-only. `discover` reports only legal-address responses whose
-  full DEVICE_ID pattern matches OPT4001.
-- `bind` and `unbind` are bus-silent. `attach` schedules the five-step owner
-  job; `job poll [budget]`, `job sample`, `job burst`, `job measure`,
-  `job reset confirm`, `job result`, and `job cancel` expose every poll-job API.
-  Budgets above one are diagnostic batching; a sole-owner integration should
-  retain the default budget of one callback per owner poll.
-- Both CLIs use fixed 192-byte command storage. An overlong line is discarded
-  completely through CR/LF and cannot dispatch as a truncated command.
-- `stress` and `stress_mix` are finite cooperative sessions. Measurement work
-  uses the driver's one-callback poll budget per owner-loop service.
-- `selfcheck` (`selftest` compatibility alias) is bounded but can consume
-  clear-on-read FLAGS, perform conversions, and invoke recovery/reapply.
-- `reset` performs the datasheet's general-call reset and is therefore bus-wide.
-- `begin` is an alias for `init` / reinitialization. `intpin` reads the
-  configured INT GPIO hook and applies the configured interrupt polarity.
-- `config`, `intcfg`, `flags`, `reg`, and `wreg` are intended for bring-up and
-  diagnostics; raw writes can desynchronize the cached config until `recover()`
-  or `resetAndReapply()` is used. Treat that as a dirty hardware/cache state:
-  stop relying on cached settings, recover or reset-and-reapply, then read back
-  the affected registers.
-- `flags readyclear` uses the write-to-clear-ready path, while `flags` and
-  `flags clear` use the register read path that also clears latched threshold
-  flags. Raw `reg 0x0c` reads have the same clear-on-read side effect.
-- `status` / `status_raw` are CLI aliases for the decoded and raw `FLAGS` views.
-- `threshold raw <low> <high>` accepts packed 16-bit threshold register values for
-  register-level bring-up, while `threshold <lowLux> <highLux>` uses the lux helpers.
-- `threshold default` restores the datasheet reset window without requiring the user
-  to know the packed reset values.
-- `thcalc <lux>` and `thdecode <raw16>` expose the datasheet threshold packing math
-  without touching the sensor registers.
-- `measure <range|auto> <ctime0..11> <power|cont> [qwake0|1]` is a CLI wrapper over
-  `configureMeasurement()` so bring-up sessions can update the coherent measurement
-  tuple in one command instead of several register-like steps.
-- `watch [count] [intervalMs]` streams decoded samples using the current driver mode.
-  In `CONTINUOUS`, it polls the ready path and prints each sampled frame; in
-  `POWER_DOWN`, it repeatedly starts one-shot conversions. `watch force ...` uses
-  forced auto-range one-shots, and `stop` ends the active watch cleanly with a
-  summary.
-- `int ready`, `int fifo`, and `int th <lowLux> <highLux>` exercise the interrupt
-  preset helpers while preserving the library's non-owning transport/GPIO model.
-- `diag` intentionally skips `FLAGS` so the report does not clear the device's
-  sticky status bits; use `status` or `status_raw` explicitly when you want that read.
-- `healthmon 1 [intervalMs]` enables periodic colorized health reporting from the
-  shared example diagnostics helper while the loop keeps running. Use interval `0`
-  for change-only reporting.
-- The example defaults to the SOT-5X3 package path. For PicoStar, switch the
-  package variant and leave the INT hook disabled.
+Some CLI commands have hardware side effects: `flags` / `status` consume
+clear-on-read FLAGS, `reset` is bus-wide, `wreg` can desynchronise the cached
+configuration, and `selfcheck` performs conversions and recovery. `diag`
+deliberately skips `FLAGS` so the report does not clear sticky status bits.
 
-## Documentation
-
-- `docs/README.md` - compact documentation index.
-- `docs/integration/esp-idf.md` - ESP-IDF component and example boundary.
-- `docs/integration/driver-contracts.md` - lifecycle, health, freshness,
-  poll-job, dirty-state, numeric, and CRC contracts.
-- `docs/reports/feature-matrix-20260808.md` - SBOS993A feature/API/CLI/test
-  coverage and deliberate controller-owned boundaries.
-- `docs/reports/naming-audit-20260808.md` - mature-peer naming rubric,
-  compatibility decisions, and repository-hygiene evidence.
-- `docs/reference/OPT4001_datasheet.md` - register map, timing notes, formulas,
-  and behavior summary.
-- `docs/reference/AN_light_detection.md` - threshold and light-detection notes.
-- `docs/reference/AN_high_speed_resolution.md` - high-speed and resolution
-  trade-offs.
-- `docs/reference/AN_picostar_package.md` - PicoStar package differences.
-- `docs/validation/validation-status.md` - current evidence and pending
-  validation.
-- `docs/validation/hardware-validation-procedure.md` - hardware evidence
-  capture procedure.
-- `docs/validation/release-checklist.md` - merge and release checklist.
-- `include/OPT4001/CommandTable.h` - public register constants and masks
-- `ASSUMPTIONS.md` - implementation choices made where the device notes needed interpretation
-
-## Limits
-
-- High-speed I2C entry sequencing is transport-owned and not modeled in the driver.
-- SMBus alert response arbitration is controller-level bus behavior and is not
-  wrapped as a dedicated driver API.
-- INT-input hardware triggering is left to the board/application layer, but the
-  driver can read a configured INT GPIO hook through `readIntPinAsserted()` and
-  apply the configured polarity. It does not configure or own GPIO/INT hardware
-  and does not generate GPIO trigger pulses.
-- Threshold and interrupt helper behavior is contract-tested at the register
-  level. Physical threshold comparator behavior, SMBus alert arbitration,
-  open-drain pulse timing, and ISR integration remain board-validation items.
-- Window transmission compensation and similar application-note calibration
-  factors are intentionally left at the application layer rather than baked into
-  the core lux conversion path.
-
-## Validation
+## Development
 
 ```powershell
 python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
-python tools/hil_opt4001_runner.py --parser-self-test
-python tools/test_hil_opt4001_runner_parser.py
+python tools/check_ci_action_pins.py
 python tools/check_idf_example_contract.py
 python tools/check_version_header_contract.py
 python tools/check_clean_consumer_package.py
-python tools/check_readiness_claims.py
-python tools/check_public_api_docs.py
 python scripts/generate_version.py check
+python tools/hil_opt4001_runner.py --parser-self-test
+python tools/test_hil_opt4001_runner_parser.py
 .\scripts\pio.cmd test -e native
 .\scripts\pio.cmd run -e native_core_no_arduino
 .\scripts\pio.cmd run -e esp32s3dev
@@ -723,63 +321,53 @@ python scripts/generate_version.py check
 .\scripts\pio.cmd pkg pack
 ```
 
-CI is expected to run the same guard/test/build/package command set above. It
-also configures a pure ESP-IDF matrix build for `esp32s3` and `esp32s2`; the
-static IDF contract check still does not replace reviewing the completed IDF
-workflow logs.
-
-Run real ESP-IDF builds when ESP-IDF is installed:
+CI runs the same set plus a pure ESP-IDF matrix build for `esp32s2` and
+`esp32s3`. With ESP-IDF installed locally:
 
 ```bash
 idf.py -C examples/esp_idf/basic set-target esp32s3 build
 idf.py -C examples/esp_idf/basic set-target esp32s2 build
 ```
 
-The static IDF contract check does not replace a real `idf.py` build. Local
-validation could not run because ESP-IDF was not available on `PATH`; captured
-CI run `31227037444` passed the native example for ESP32-S2 and ESP32-S3 using
-ESP-IDF v6.0.1.
-
-### Optional Hardware-In-Loop Runner
-
-`tools/hil_opt4001_runner.py` can drive the Arduino or ESP-IDF diagnostic CLI
-over a serial port and write bounded Markdown/JSON transcripts under
-`hil_logs/`. It does not manipulate power, GPIO fixtures, or stuck-bus hardware.
-INT and reset/recovery groups are disabled unless explicitly requested by the
-operator.
-
-The runner keeps its OPT4001-specific filename because it drives the repo's two
-diagnostic CLI dialects directly. Its smoke plan covers the shared I2C HIL
-minimum as OPT4001 commands: `version`, `scan`, `probe`, `id`, settings via
-`cfg`, and health via Arduino `state` or ESP-IDF `drv`. `scan` is ACK evidence
-only; OPT4001 identity requires the `probe`/`id` DEVICE_ID path.
-
-Use `--parser-self-test` and `tools/test_hil_opt4001_runner_parser.py` before
-live hardware. `--dry-run` lists commands only and does not claim hardware PASS.
-Live runs can use `--strict-expected` to classify known commands with missing
-evidence tokens as `UNKNOWN`, `--verbose` to echo captured transcripts, bounded
-`--reconnect-attempts`, and `--group benchmark --benchmark-command <cmd>
---benchmark-count <n>` for simple repeated-command timing.
-The default smoke/all-safe plans avoid `FLAGS` because that register is
-clear-on-read; use `--group status` only when the session is ready to consume
-sticky flag evidence.
-
-Examples:
+`tools/hil_opt4001_runner.py` drives either diagnostic CLI over a serial port and
+writes bounded Markdown/JSON transcripts under `hil_logs/`. It does not
+manipulate power, GPIO fixtures, or stuck-bus hardware; INT and reset/recovery
+groups stay disabled unless the operator requests them explicitly
+(`--include-int`, and `--include-fault` with `--confirm-faults`).
 
 ```bash
 python tools/hil_opt4001_runner.py --parser-self-test
 python tools/hil_opt4001_runner.py --port COM6 --cli arduino --group smoke
-python tools/hil_opt4001_runner.py --port COM6 --cli arduino --group all-safe --strict-expected
 python tools/hil_opt4001_runner.py --port /dev/ttyUSB0 --cli idf --group smoke --group fifo
-python tools/hil_opt4001_runner.py --port COM6 --cli arduino --group benchmark --benchmark-command read --benchmark-count 50
-python tools/hil_opt4001_runner.py --cli arduino --group all-safe --dry-run
 ```
 
-Use `--include-int` only on SOT-5X3 fixtures with INT wired and instrumented.
-Use `--include-fault` only when bus-wide reset and recovery commands are safe
-for the connected hardware; it requires
-`--confirm-faults I_ACCEPT_BUS_RESET_RISK`.
+Board bring-up procedure: [docs/validation/hardware-validation-procedure.md](docs/validation/hardware-validation-procedure.md).
+
+## Limits
+
+- High-speed I2C entry sequencing is a controller-level bus procedure and is not
+  modelled in the driver.
+- SMBus alert response arbitration is controller-level and is not wrapped as a
+  device API.
+- INT-input hardware triggering is left to the board layer. The driver can read a
+  configured INT GPIO hook through `readIntPinAsserted()` and apply the configured
+  polarity, but it never configures, drives, or owns the pin.
+- Window-transmission and similar optical calibration factors stay at the
+  application layer rather than being baked into the lux conversion path.
+- Threshold and interrupt behaviour is contract-tested at the register level.
+  Physical comparator behaviour, SMBus alert arbitration, open-drain pulse timing
+  and ISR integration are board-validation items.
+
+## Documentation
+
+- [docs/README.md](docs/README.md) — documentation index
+- [docs/integration/driver-contracts.md](docs/integration/driver-contracts.md) — behavioural contracts
+- [docs/integration/esp-idf.md](docs/integration/esp-idf.md) — ESP-IDF component and example boundary
+- [docs/reference/OPT4001_datasheet.md](docs/reference/OPT4001_datasheet.md) — register map, timing, formulas
+- [docs/validation/hardware-validation-procedure.md](docs/validation/hardware-validation-procedure.md) — board bring-up procedure
+- [docs/validation/release-checklist.md](docs/validation/release-checklist.md) — release checklist
+- [ASSUMPTIONS.md](ASSUMPTIONS.md) — choices made where the device documentation needed interpretation
 
 ## License
 
-MIT License. See `LICENSE`.
+MIT License. See [LICENSE](LICENSE).

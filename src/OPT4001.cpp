@@ -2135,13 +2135,17 @@ float OPT4001::getSampleResolutionLux(const Sample& sample) const {
 }
 
 uint32_t OPT4001::getConversionTimeUs() const {
-  const uint8_t index = static_cast<uint8_t>(_config.conversionTime);
-  return cmd::CONVERSION_TIME_US[index];
+  if (!isValidConversionTime(_config.conversionTime)) {
+    return 0U;
+  }
+  return cmd::CONVERSION_TIME_US[static_cast<uint8_t>(_config.conversionTime)];
 }
 
 uint32_t OPT4001::getConversionTimeMs() const {
-  const uint8_t index = static_cast<uint8_t>(_config.conversionTime);
-  return cmd::CONVERSION_TIME_MS_CEIL[index];
+  if (!isValidConversionTime(_config.conversionTime)) {
+    return 0U;
+  }
+  return cmd::CONVERSION_TIME_MS_CEIL[static_cast<uint8_t>(_config.conversionTime)];
 }
 
 uint32_t OPT4001::getOneShotBudgetUs(Mode mode) const {
@@ -2167,14 +2171,11 @@ Status OPT4001::luxToThreshold(float lux, Threshold& out) const {
     return Status::Error(Err::INVALID_PARAM, "Lux threshold must be finite and >= 0");
   }
 
-  const float lsb = getLuxLsb();
-  double scaledCodes = 0.0;
-  if (lsb > 0.0f) {
-    scaledCodes = static_cast<double>(lux) / static_cast<double>(lsb);
-    if (scaledCodes > static_cast<double>(THRESHOLD_ADC_CODES_MAX) +
-                          THRESHOLD_ADC_FLOAT_GUARD_CODES) {
-      return Status::Error(Err::INVALID_PARAM, "Lux threshold exceeds register range");
-    }
+  const double scaledCodes =
+      static_cast<double>(lux) / static_cast<double>(getLuxLsb());
+  if (scaledCodes > static_cast<double>(THRESHOLD_ADC_CODES_MAX) +
+                        THRESHOLD_ADC_FLOAT_GUARD_CODES) {
+    return Status::Error(Err::INVALID_PARAM, "Lux threshold exceeds register range");
   }
 
   double bestError = std::numeric_limits<double>::infinity();
