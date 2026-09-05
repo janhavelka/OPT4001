@@ -148,7 +148,13 @@ earlier reviewer vote:
 | Clean package consumer | **Passed** against the packed library. |
 | Package inspection | **Passed**: no vendor PDF members; generated `Version.h` is included. |
 | Whitespace validation | `git diff --check` **passed**. |
-| Native ESP-IDF ESP32-S2/S3 | Local toolchain unavailable; final verification uses repository CI. |
+| Native ESP-IDF ESP32-S2/S3 | **Both passed in CI** with ESP-IDF v6.0.1. Local toolchain unavailable. |
+
+[CI run 33987975021](https://github.com/janhavelka/OPT4001/actions/runs/33987975021)
+passed all six jobs for implementation commit
+`73b66e4fc2bf85bdb045f4a6edb4578ce2d6766e`: native tests, package/tooling
+validation, Arduino S2/S3, and native ESP-IDF S2/S3. The subsequent documentation
+commit records this result without changing the validated implementation.
 
 The initial Arduino command failed before compilation because inherited
 `PLATFORMIO_CORE_DIR=C:\pio` selected an incomplete auxiliary Python environment.
