@@ -25,11 +25,13 @@ FAIL_PATTERNS = [
     re.compile(r"\bDEVICE_NOT_FOUND\b", re.IGNORECASE),
     re.compile(r"\bDEVICE_ID_MISMATCH\b", re.IGNORECASE),
     re.compile(r"\bI2C_(?:ERROR|TIMEOUT|BUS|NACK_ADDR|NACK_DATA)\b", re.IGNORECASE),
-    re.compile(r"\bTIMEOUT\b", re.IGNORECASE),
-    re.compile(r"\bNOT_INITIALIZED\b", re.IGNORECASE),
-    re.compile(r"\bINVALID_(?:CONFIG|PARAM)\b", re.IGNORECASE),
-    re.compile(r"\bOFFLINE\b", re.IGNORECASE),
-    re.compile(r"\bBUSY\b", re.IGNORECASE),
+    # Status names are uppercase; prose such as "Timeout / offline threshold"
+    # is ordinary configuration output. State/error fields may omit "Status:".
+    re.compile(r"\bTIMEOUT\b"),
+    re.compile(r"\bNOT_INITIALIZED\b"),
+    re.compile(r"\bINVALID_(?:CONFIG|PARAM)\b"),
+    re.compile(r"\bOFFLINE\b"),
+    re.compile(r"\bBUSY\b"),
     re.compile(r"\bfail(?:ed|ures)?[=: ]+[1-9]\d*\b", re.IGNORECASE),
 ]
 

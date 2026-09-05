@@ -204,6 +204,10 @@ public:
   /// the preferred first step for an application-owned single-transfer poller.
   /// A successful bind leaves the driver uninitialized until `startAttach()`
   /// completes (or legacy synchronous `begin()` is used).
+  /// Every call resets the previous binding/runtime, including on validation
+  /// failure, which leaves default config and no transport callbacks. Existing
+  /// dirty-hardware evidence persists until full reapply or unbind(). Passing
+  /// getConfig() from this instance is supported; the input is copied first.
   Status bind(const Config& config);
   /// Release the cached transport/configuration and all runtime state without
   /// touching I2C. Unlike `end()`, this never attempts to power down hardware.
@@ -212,8 +216,9 @@ public:
   /// Initialize the driver, verify Device ID, and apply the supplied config.
   /// Config application writes multiple registers. If a later write fails after
   /// earlier writes reached hardware, `hardwareConfigDirty()` may be set even
-  /// though the driver remains `UNINIT`; retry `begin()` with the cached or
-  /// corrected config after the bus is healthy. Normal public I2C APIs stay
+  /// though the driver remains `UNINIT`; retry with a caller-owned corrected
+  /// config after the bus is healthy. Validation failure resets the previous
+  /// binding as documented by bind(). Normal public I2C APIs stay
   /// guarded and return `NOT_INITIALIZED` until `begin()` succeeds.
   Status begin(const Config& config);
   /// Advance conversion timing/poll state. Elapsed time is only a poll gate;
@@ -222,6 +227,12 @@ public:
   /// update health and latch `OFFLINE`; poll errors are retained in health state
   /// rather than returned because `tick()` is void. No I2C is attempted while
   /// `UNINIT` or `OFFLINE`.
+  /// Config::nowMs is authoritative when configured. Otherwise tick()/poll()
+  /// feed one caller clock: initial conversion/sample timestamps are rebased
+  /// on its first observation. Supply current time before synchronous work and
+  /// keep this clock progressing; until first observed, synchronous readiness
+  /// relies on hardware without a time gate. Rebase is conservative and cannot
+  /// reconstruct the actual acquisition time of an earlier cached sample.
   void tick(uint32_t nowMs);
   /// Best-effort shutdown. Attempts a raw power-down write only when initialized
   /// and online, ignores that write status, then clears runtime state and moves
@@ -294,7 +305,8 @@ public:
   /// count. A tracked success resets consecutive failures and moves
   /// `DEGRADED`/`OFFLINE` back to `READY`. Lifetime counters saturate at
   /// `UINT32_MAX` and `consecutiveFailures()` saturates at `UINT8_MAX`;
-  /// timestamps use `Config::nowMs` when available, otherwise 0.
+  /// timestamps use `Config::nowMs` when available, otherwise the last
+  /// tick()/poll() timestamp (0 before the first observation).
   uint32_t lastOkMs() const { return _lastOkMs; }
   uint32_t lastErrorMs() const { return _lastErrorMs; }
   Status lastError() const { return _lastError; }
@@ -303,6 +315,9 @@ public:
   uint32_t totalSuccess() const { return _totalSuccess; }
 
   // === Measurement API ===
+  /// Trigger a one-shot. An unresolved earlier one-shot can be retriggered after
+  /// 4 * getOneShotBudgetMs(ONE_SHOT_FORCED_AUTO) + 1000 ms since its start.
+  /// This abandons driver wait state, not an in-flight hardware conversion.
   Status startConversion();
   Status startConversion(Mode mode);
   /// Run the active poll-chunked job for at most `maxInstructions` I2C
@@ -310,6 +325,9 @@ public:
   /// counts as one instruction; CPU-only CRC/lux decode and delay gates do not.
   /// Returns `IN_PROGRESS` while the job is waiting, out of budget, or not yet
   /// ready. Use `pollBusy()` to distinguish an active job from idle state.
+  /// Clock selection follows tick(). Read jobs return TIMEOUT after
+  /// 4 * getOneShotBudgetMs(ONE_SHOT_FORCED_AUTO) + 1000 ms from first poll().
+  /// Failed readiness probes retry at max(1, conversionTimeMs / 16) ms.
   Status poll(uint32_t nowMs, uint8_t maxInstructions = 1);
   /// @return true while a poll-chunked sample/config/reset job is active.
   bool pollBusy() const;
@@ -317,12 +335,15 @@ public:
   Status lastPollStatus() const { return _lastPollStatus; }
   /// Start a poll-chunked fresh newest-sample read. The job uses the burst
   /// RESULT/FIFO block path and caches `newest`; retrieve it with
-  /// `getLastSample()`. Requires `Config::burstMode`.
+  /// `getLastSample()`. Requires observed hardware burst mode. POWER_DOWN with
+  /// no pending conversion or captured readiness returns MEASUREMENT_NOT_READY.
   Status startReadSample();
   /// Start a poll-chunked fresh RESULT/FIFO burst read. Requires
-  /// `Config::burstMode`; retrieve the completed frame with `getLastBurst()`.
+  /// observed hardware burst mode and an active conversion/captured readiness;
+  /// retrieve the completed frame with `getLastBurst()`.
   Status startReadBurst();
-  /// Return the most recently completed poll-chunked burst frame.
+  /// Return the most recent synchronous readBurst() or poll burst frame.
+  /// Starting either poll read invalidates it; sample-only jobs do not refill it.
   Status getLastBurst(BurstFrame& out) const;
   /// Start a poll-chunked coherent measurement configuration write. The job
   /// applies the same four-register sequence as the synchronous configuration
@@ -337,8 +358,10 @@ public:
   /// partially applied, the cache/hardware relationship is marked dirty.
   Status cancelPollJob();
   /// Status-returning fresh-readiness check.
-  /// Without configured INT evidence or prior-counter evidence this reads
-  /// clear-on-read FLAGS, which also consumes latched threshold flags.
+  /// Before a valid counter baseline exists, this reads clear-on-read FLAGS
+  /// after the conversion gate, consuming latched threshold flags. Thereafter
+  /// counter probes preserve FLAGS. Polled INT is a hint for a counter probe,
+  /// never proof of freshness; its brief pulses can be missed.
   /// @param[out] ready Set true when a fresh sample can be read
   /// @return Status::Ok() with ready=false when no sample is ready; transport errors are returned
   Status conversionReady(bool& ready);
@@ -349,12 +372,17 @@ public:
   /// Callers that need newly completed conversions should use readSample(),
   /// tryReadFreshSample(), or readFreshBlocking().
   Status readLatestSample(Sample& out);
-  /// Read a fresh sample. Freshness requires hardware evidence: ready flag, INT
-  /// assertion when configured, or a changed sample counter after a previous
+  /// Read a fresh sample. Freshness requires hardware evidence: ready flag,
+  /// or a changed sample counter after a previous
   /// fresh sample. Returns `MEASUREMENT_NOT_READY` when no fresh evidence exists.
-  /// On `OK` or `CRC_ERROR`, the fresh token is consumed and the cache updates.
-  /// Resolving ready-flag evidence can consume clear-on-read threshold flags;
-  /// use configured INT/counter evidence when those flags must remain untouched.
+  /// On `OK` or `CRC_ERROR`, readiness is cleared and the cache updates. Only a
+  /// CRC-valid counter updates the freshness baseline, even with CRC reporting
+  /// disabled; the same conversion may be returned again after a CRC warning.
+  /// Equal valid counters are conservatively rejected, even with a ready flag:
+  /// a latched flag can describe an already consumed counter-based sample.
+  /// Exactly 16 (or a multiple of 16) conversions between reads can alias;
+  /// readLatestSample() is available when duplicate acceptance is intentional.
+  /// Resolving the initial ready flag consumes clear-on-read threshold flags.
   Status readSample(Sample& out);
   /// Read newest RESULT plus FIFO0/FIFO1/FIFO2. Slot order is newest/current
   /// output register, then prior FIFO shadows in hardware order. Every slot is
@@ -369,6 +397,14 @@ public:
   /// `crcValid` is always computed, whatever `Config::verifyCrc` is set to; when
   /// verification is disabled, a CRC mismatch simply does not change the
   /// aggregate status.
+  /// Framing follows the last successful INT_CONFIGURATION write/readback,
+  /// with uncertain writes/reset attempts disabling burst framing until proven
+  /// again. External register changes require readback or recover(); the driver
+  /// does not monitor out-of-band writes or brownouts continuously.
+  /// Without burst framing, slots span separate transactions. A final counter
+  /// reread rejects detected FIFO movement with MEASUREMENT_NOT_READY. This is
+  /// not an atomic snapshot: counter wrap, guard corruption, and a torn newest
+  /// pair remain possible; pair CRC checking should remain enabled.
   Status readBurst(BurstFrame& out);
   /// Read one slot from the 4-deep history window: 0 = newest RESULT, 1 = FIFO0,
   /// 2 = FIFO1, 3 = FIFO2. Slot 0 consumes freshness; slots 1-3 are direct FIFO
@@ -380,7 +416,8 @@ public:
   bool hasSample() const { return _lastSampleValid; }
   uint32_t sampleTimestampMs() const;
   /// Age of the cached sample in milliseconds.
-  /// @param nowMs Current monotonic timestamp in milliseconds
+  /// @param nowMs Current timestamp in the driver's selected clock domain.
+  /// This query never updates the driver clock.
   /// @return `nowMs - sampleTimestampMs()` when a sample exists, otherwise 0
   uint32_t sampleAgeMs(uint32_t nowMs) const;
   /// Fresh lux read using `readSample()` semantics. On `CRC_ERROR`, the decoded
@@ -393,12 +430,15 @@ public:
   /// decoded output is still written and freshness is consumed.
   Status readMicroLux(uint64_t& microLux);
   /// Blocking read helpers require `Config::nowMs` and poll until a fresh sample,
-  /// timeout, transport error, or finite internal poll cap. Each I2C transaction
+  /// timeout, transport error, or stalled-clock diagnostic. Each I2C transaction
   /// is bounded by `Config::i2cTimeoutMs`; `Config::cooperativeYield`, when
   /// configured, is called between polls. On `CRC_ERROR`, sample/lux output is
   /// still populated. A timeout does not cancel an in-flight hardware one-shot;
   /// later readiness polling may still consume that conversion.
   /// @pre `Config::nowMs` must be configured, monotonic, and non-blocking.
+  /// It must advance within 1,000,000 consecutive unchanged-clock loop
+  /// iterations, otherwise INVALID_CONFIG is returned. This fail-safe cannot
+  /// distinguish a stopped clock from a slower-than-contracted clock.
   Status readBlocking(Sample& out, uint32_t timeoutMs = 1000);
   Status readBlocking(Sample& out, Mode mode, uint32_t timeoutMs);
   Status readFreshBlocking(Sample& out, uint32_t timeoutMs = 1000);
@@ -422,8 +462,8 @@ public:
   /// Raw reads of 0x0C or raw blocks spanning 0x0C have the same hardware side
   /// effect.
   Status readFlags(Flags& out);
-  /// Raw FLAGS read with the same clear-on-read hardware side effect; this also
-  /// clears driver readiness evidence associated with the latched FLAGS view.
+  /// Raw FLAGS read with the same clear-on-read hardware side effect; ready
+  /// evidence is captured set-only, just as with typed readFlags().
   Status readFlagsRaw(uint16_t& value);
   /// Clear CONVERSION_READY_FLAG only by writing a non-zero value to 0x0C; this
   /// clears driver readiness evidence for the pending conversion.
@@ -434,6 +474,7 @@ public:
   /// Read the configured INT GPIO hook and report assertion using INT_POL.
   /// @param[out] asserted True when the configured pin is active
   /// @return Status::Ok() on success, INVALID_CONFIG when no INT hook is available.
+  /// Returns NOT_INITIALIZED until initialization has applied the INT polarity.
   /// INT is an open-drain SOT_5X3-only signal. The application owns pullups,
   /// GPIO setup, ISR attachment, ISR-to-task signaling, debouncing, and pin
   /// lifetime; the driver only samples the configured `gpioRead` hook.
@@ -530,6 +571,9 @@ public:
   /// FLAGS register 0x0C clear that register's latched view. With burst mode
   /// disabled, one bounded two-byte transaction is used per register instead
   /// of relying on hardware pointer auto-increment.
+  /// Full FLAGS words capture readiness set-only. An odd burst read ending at
+  /// the FLAGS high byte cannot capture the unread low-byte ready bit. Full
+  /// INT_CONFIGURATION words also refresh the observed burst framing bit.
   Status readRegisters(uint8_t startReg, uint8_t* buf, size_t len);
   /// Read one public 16-bit register. Requires `begin()`; returns
   /// `NOT_INITIALIZED` without I2C while `UNINIT`. Reserved addresses are
@@ -564,7 +608,8 @@ public:
   /// returns NaN for invalid thresholds.
   float thresholdToLux(const Threshold& threshold) const;
   float getLuxLsb() const;
-  /// Invalid ranges return NaN.
+  /// Return the datasheet's rounded nominal full scale, not an exact decoded
+  /// maximum for saturation comparisons. Invalid ranges return NaN.
   float getRangeFullScaleLux(Range range) const;
   float getCurrentFullScaleLux() const;
   /// Return the sample exponent's full scale, or NaN for an invalid exponent.
@@ -577,7 +622,8 @@ public:
   float getCurrentResolutionLux() const;
   /// Return the sample exponent's resolution, or NaN for an invalid exponent.
   float getSampleResolutionLux(const Sample& sample) const;
-  /// Invalid conversion-time inputs return 0.
+  /// Invalid cached conversion times return 0 as an invalid-value sentinel;
+  /// lifecycle and configuration APIs reject them before arming timing gates.
   uint32_t getConversionTimeUs() const;
   uint32_t getConversionTimeMs() const;
   /// Invalid one-shot mode inputs return 0.
@@ -651,6 +697,10 @@ private:
   bool _pollReadGateElapsed(uint32_t nowMs) const;
   uint32_t _pollContinuousGateMs() const;
   bool _shouldProbeCounterForFreshness(uint32_t nowMs) const;
+  uint32_t _readTimeoutMs() const;
+  bool _readinessRetryElapsed(uint32_t nowMs) const;
+  void _armReadinessRetry(uint32_t nowMs);
+  void _captureReadinessFromFlags(uint16_t raw);
   void _finishApplyConfig(uint32_t nowMs);
   void _markHardwareConfigDirty(const Status& st);
   void _clearHardwareConfigDirty();
@@ -666,8 +716,6 @@ private:
   Status _pollConversionReadyFlag(bool& ready);
   Status _refreshReadinessEvidence(bool& ready);
   bool _intFreshEvidenceAsserted() const;
-  bool _oneShotBudgetElapsed() const;
-  bool _shouldProbeCounterForFreshness() const;
   bool _sampleCounterIsFresh(uint8_t counter) const;
   void _markFreshSampleConsumed(const Sample& sample);
   void _clearReadinessEvidence();
@@ -675,6 +723,7 @@ private:
   bool _thresholdValid(const Threshold& threshold) const;
   uint8_t _computeCrcNibble(uint8_t exponent, uint32_t mantissa, uint8_t counter) const;
   uint32_t _nowMs() const;
+  void _observeHostMs(uint32_t nowMs);
   void _cooperativeYield() const;
 
   // === State ===
@@ -685,6 +734,9 @@ private:
   bool _allowOfflineI2c = false;
   bool _hardwareConfigDirty = false;
   Status _hardwareConfigDirtyError = Status::Ok();
+  bool _hwBurstEnabled = false;
+  uint32_t _hostMs = 0;
+  bool _timeBaseValid = false;
 
   // === Health Counters ===
   uint32_t _lastOkMs = 0;
@@ -699,6 +751,8 @@ private:
   bool _lastSampleValid = false;
   bool _conversionStarted = false;
   bool _conversionReady = false;
+  uint32_t _readinessRetryMs = 0;
+  bool _readinessRetryArmed = false;
   uint32_t _conversionStartMs = 0;
   uint32_t _lastSampleTimestampMs = 0;
   Sample _lastSample{};
@@ -719,7 +773,8 @@ private:
   uint8_t _pollWritesApplied = 0;
   bool _pollResetApplied = false;
   bool _pollExecuting = false;
-  BurstFrame _pollBurst{};
+  uint32_t _pollReadStartMs = 0;
+  bool _pollReadDeadlineArmed = false;
 };
 
 }  // namespace OPT4001

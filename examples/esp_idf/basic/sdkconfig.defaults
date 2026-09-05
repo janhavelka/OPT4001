@@ -1,0 +1,3 @@
+# Keep the diagnostic conversion-poll cadence near 1 ms. Code still yields at
+# least one tick when an existing sdkconfig selects a lower tick rate.
+CONFIG_FREERTOS_HZ=1000

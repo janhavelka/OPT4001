@@ -210,9 +210,13 @@ def main() -> int:
         if (IDF_MAIN / stale).exists():
             fail(f"stale compatibility file remains: {stale}")
 
+    dispatch_start = main_text.find("void processCommand")
+    if dispatch_start < 0:
+        fail("native CLI missing processCommand dispatcher")
+    dispatch = main_text[dispatch_start:]
     for command in MANDATORY_COMMANDS:
-        if re.search(rf'"{re.escape(command)}"', main_text) is None:
-            fail(f"native CLI missing command '{command}'")
+        if re.search(rf'strcmp\(cmd,\s*"{re.escape(command)}"\)', dispatch) is None:
+            fail(f"native CLI missing command handler '{command}'")
 
     for token in (
         "sensor.bind", "sensor.probe", "DEVICE_ID",

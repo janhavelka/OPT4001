@@ -3,7 +3,7 @@
 #include <Arduino.h>
 
 #include "OPT4001/OPT4001.h"
-#include "examples/common/Log.h"
+#include "examples/common/CliStyle.h"
 
 namespace health_view {
 
@@ -31,15 +31,6 @@ inline const char* successColor(uint32_t successes) {
   return (successes > 0U) ? colorGreen() : colorGray();
 }
 
-inline const char* successRateColor(float pct) {
-  if (pct >= 99.9f) {
-    return colorGreen();
-  }
-  if (pct >= 80.0f) {
-    return colorYellow();
-  }
-  return colorRed();
-}
 
 inline const char* stateColor(OPT4001::DriverState state, bool online,
                               uint8_t consecutiveFailures) {
@@ -97,7 +88,7 @@ inline void printHealthView(const DriverT& driver) {
                 failureColor(snap.totalFailures),
                 static_cast<unsigned long>(snap.totalFailures),
                 colorReset(),
-                successRateColor(pct),
+                cli::successRateColor(pct),
                 pct,
                 colorReset());
 }

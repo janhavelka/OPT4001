@@ -24,7 +24,7 @@
 - **Automotive tunnel entry/exit** is called out as the case where rapid
   reaction time matters for safety.
 - **PicoStar™ package** with a bottom-facing sensor enables placement under thin
-  display bezels. Package dimensions are *not* given in this article — see
+  display bezels. PicoStar dimensions are *not* given in this article — see
   [AN_picostar_package.md](AN_picostar_package.md).
 - **OPT4041** (dual-channel) can detect infrared LED illumination for camera
   night-vision — a different product, same family design principles.

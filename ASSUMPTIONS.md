@@ -18,10 +18,11 @@ that stays consistent with the other I2C driver repositories in this workspace.
 
 3. Fresh-sample readiness requires hardware evidence.
    Elapsed conversion time is only a gate for bounded register polling. Fresh
-   reads require the conversion-ready flag, a configured SOT-5X3 INT assertion,
-   or a sample-counter advance from the previous accepted fresh sample. The
-   driver still avoids baking board-specific GPIO interrupt behavior into the
-   core library.
+   reads require the conversion-ready flag or a sample-counter advance from the
+   previous accepted fresh sample. A polled SOT-5X3 INT level is only a hint to
+   check the counter: it cannot reliably capture a roughly 1 us conversion/FIFO
+   pulse or distinguish another source holding a shared line asserted. The
+   application owns any interrupt capture and signaling.
 
 4. High-speed I2C entry and SMBus alert response are not wrapped as dedicated
    driver APIs.

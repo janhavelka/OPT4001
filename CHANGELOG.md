@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Blocking fresh reads use elapsed-time deadlines and a separate stalled-clock
+  diagnostic; rapid clock polling no longer consumes a millisecond-based spin
+  allowance before a conversion can finish.
+- Timing uses one clock domain: the configured clock hook, or caller timestamps
+  observed through `tick()`/`poll()`, with startup timestamps rebased when needed.
+- Readiness polling respects conversion/retry gates, uses counter evidence once
+  a baseline exists, and does not accept a polled INT level as a fresh sample.
+  Inactive power-down read jobs are rejected and abandoned reads/one-shots are
+  bounded so they cannot hold the driver busy indefinitely.
+- Typed and raw FLAGS reads retain observed readiness in software. CRC-invalid
+  samples do not advance the trusted counter baseline, even with warning
+  reporting disabled, and CRC errors take precedence over invalid sample fields.
+- I2C framing follows observed burst configuration, including raw writes and
+  uncertain write outcomes. Non-burst FIFO reads detect counter movement during
+  assembly instead of silently returning a shifted window.
+- Bus-silent rebinding preserves existing dirty-configuration evidence, and
+  `end()` applies poll cancellation rules before shutdown. Lifecycle, timestamp,
+  burst-cache, nominal full-scale and counter-wrap limits are clarified.
+- Completed the earlier selfcheck fix: a failed threshold capture now stops
+  before mutating checks. Both CLIs restore the previous profile after failed
+  address/package changes and report rollback failures.
+- Example scheduler hooks and IDF short waits block for at least one tick; the
+  IDF example configures an enabled INT input and classifies an unconfigured
+  adapter as `INVALID_CONFIG`. Its default scheduler cadence is now 1000 Hz.
+- Example `measure` and `job measure` commands share validated parsers within
+  each framework. Integer parsing rejects unsigned negatives and overflow.
+  Blocking `read N` is limited to 20 samples; watch status/help, readiness-poll
+  cadence, continuous-mode counter diagnostics and status colors are corrected.
+- HIL output classification no longer mistakes ordinary lowercase status words
+  for errors; IDF command coverage requires executable dispatch entries.
+- Native fake timing rounds microsecond budgets only once, FLAGS zero writes
+  preserve the register, and transaction address/reset-payload coverage is explicit.
 - `getConversionTimeUs()` / `getConversionTimeMs()` now apply the
   `isValidConversionTime()` guard their documentation already promised, instead of
   indexing a 12-entry table unchecked.
@@ -34,6 +66,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- Broken example `LOG_SERIAL` indirection, unused serial initialization and bus
+  recovery helpers, duplicate color helpers, and resident poll-step burst scratch.
+- The closed `AUDIT-FINDINGS.md` work list; its verification and dispositions
+  are recorded in `docs/CODE_AUDIT_REVIEW.md`.
 - Dead code: an unreachable `lsb > 0.0f` branch in `luxToThreshold()` that also hid
   the range check; `examples/common/TransportAdapter.h`, an alias namespace nothing
   included; and roughly 110 lines in `scripts/generate_version.py` copied from an
@@ -49,8 +85,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tools/check_ci_action_pins.py`, preserving the one durable guard that lived inside
   the removed `check_readiness_claims.py`: every GitHub Action must be pinned to a
   full commit SHA.
-- `AUDIT-FINDINGS.md`, a work list of the audited defects that were too large to fix
-  in place, each with a concrete proposal. Delete it when the items are closed.
+- `docs/CODE_AUDIT_REVIEW.md`, covering every audit finding, corrected/rejected
+  proposals, verification evidence and remaining hardware limits.
+- Native regressions for timing, readiness, CRC, framing and lifecycle behavior,
+  plus HIL/parser/command-checker regressions discovered by CI.
 
 ## 1.2.2 - 2026-08-08
 

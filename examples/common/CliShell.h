@@ -10,8 +10,8 @@ namespace cli_shell {
 inline LineResult readLine(char* output, size_t outputCapacity) {
   static FixedLineBuffer line;
   LineResult result = LineResult::NONE;
-  while (LOG_SERIAL.available() > 0 && result == LineResult::NONE) {
-    result = line.push(static_cast<char>(LOG_SERIAL.read()), output,
+  while (Serial.available() > 0 && result == LineResult::NONE) {
+    result = line.push(static_cast<char>(Serial.read()), output,
                        outputCapacity);
   }
   return result;

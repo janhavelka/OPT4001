@@ -1,4 +1,5 @@
 #include <cctype>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -24,8 +25,8 @@ constexpr uint8_t I2C_ADDRESS = 0x45;
 constexpr uint32_t I2C_FREQ_HZ = 400000;
 constexpr uint32_t I2C_TIMEOUT_MS = 50;
 constexpr uint32_t STRESS_COUNT_MAX = 10000;
+constexpr uint32_t BLOCKING_READ_COUNT_MAX = 20;
 constexpr uint32_t WATCH_COUNT_MAX = 100000;
-constexpr uint32_t WATCH_INTERVAL_MIN_MS = 1;
 constexpr uint32_t WATCH_INTERVAL_MAX_MS = 3600000;
 constexpr size_t REGISTER_DUMP_MAX_BYTES = 64;
 
@@ -122,10 +123,13 @@ char* nextToken(char** save) {
 }
 
 bool parseU32(const char* text, uint32_t& out) {
-  if (text == nullptr || text[0] == '\0' || text[0] == '-') return false;
+  if (text == nullptr) return false;
+  while (std::isspace(static_cast<unsigned char>(*text))) ++text;
+  if (text[0] == '\0' || text[0] == '-') return false;
+  errno = 0;
   char* end = nullptr;
   const unsigned long value = strtoul(text, &end, 0);
-  if (end == text || *end != '\0' || value > UINT32_MAX) return false;
+  if (end == text || *end != '\0' || errno == ERANGE || value > UINT32_MAX) return false;
   out = static_cast<uint32_t>(value);
   return true;
 }
@@ -191,6 +195,34 @@ OPT4001::ConversionTime parseConversionTime(uint32_t value) {
   return static_cast<OPT4001::ConversionTime>(value);
 }
 
+bool parseMeasureArgs(char** save, OPT4001::Range& range,
+                      OPT4001::ConversionTime& time, OPT4001::Mode& mode,
+                      bool& quickWake) {
+  const char* rangeArg = nextToken(save);
+  const char* timeArg = nextToken(save);
+  const char* modeArg = nextToken(save);
+  const char* quickArg = nextToken(save);
+  uint32_t rangeValue = 12U;
+  uint32_t timeValue = 0U;
+  const bool rangeOk = rangeArg != nullptr &&
+      (strcmp(rangeArg, "auto") == 0 ||
+       (parseU32(rangeArg, rangeValue) && rangeValue <= 8U));
+  const bool continuous = modeArg != nullptr &&
+      (strcmp(modeArg, "cont") == 0 || strcmp(modeArg, "continuous") == 0 ||
+       strcmp(modeArg, "3") == 0);
+  const bool power = modeArg != nullptr &&
+      (strcmp(modeArg, "power") == 0 || strcmp(modeArg, "pd") == 0 ||
+       strcmp(modeArg, "0") == 0);
+  if (!rangeOk || !parseU32(timeArg, timeValue) || timeValue > 11U ||
+      (!continuous && !power) ||
+      (quickArg != nullptr && !parseBool(quickArg, quickWake)) ||
+      nextToken(save) != nullptr) return false;
+  range = parseRange(rangeValue);
+  time = parseConversionTime(timeValue);
+  mode = continuous ? OPT4001::Mode::CONTINUOUS : OPT4001::Mode::POWER_DOWN;
+  return true;
+}
+
 OPT4001::Config makeConfig() {
   OPT4001::Config cfg{};
   cfg.i2cWrite = opt4001IdfI2cWrite;
@@ -231,7 +263,7 @@ void printHelp() {
   printHelpItem("color [0|1|off|on]", "Toggle ANSI color output");
 
   printHelpSection("Data");
-  printHelpItem("read [force] [N]", "Bounded blocking fresh sample read(s)");
+  printHelpItem("read [force] [N]", "1..20 blocking reads; watch N 0 is cancellable");
   printHelpItem("readblocking [force]", "Explicit blocking-read alias");
   printHelpItem("tryread / trylux", "Poll-friendly fresh read helpers");
   printHelpItem("start [force]", "Start regular/forced-auto one-shot");
@@ -240,7 +272,8 @@ void printHelp() {
   printHelpItem("slot <0..3>", "Read one result/FIFO history slot");
   printHelpItem("sample / sampleage", "Show cached sample or age");
   printHelpItem("lux / mlux / ulux", "Read scaled lux helpers");
-  printHelpItem("watch [N] [interval]", "Run bounded sample stream");
+  printHelpItem("watch", "Show current watch state");
+  printHelpItem("watch N [interval]", "Stream samples; default interval 1000 ms, 0 is back-to-back");
   printHelpItem("watch force [N] [interval]", "Stream forced-auto one-shots");
   printHelpItem("stop", "Stop active watch/stress session");
   printHelpItem("job", "Show active poll-job state");
@@ -530,7 +563,7 @@ OPT4001::Status readBurstBlocking(bool forceAuto, OPT4001::BurstFrame& frame) {
     if (static_cast<uint32_t>(opt4001IdfNowMs(&i2c) - start) >= timeout) {
       return OPT4001::Status::Error(OPT4001::Err::TIMEOUT, "Burst read timed out");
     }
-    vTaskDelay(pdMS_TO_TICKS(1));
+    vTaskDelay(1);
   }
   return OPT4001::Status::Error(OPT4001::Err::TIMEOUT, "Burst poll limit reached");
 }
@@ -547,7 +580,7 @@ OPT4001::Status primeFreshSample() {
     if (static_cast<uint32_t>(opt4001IdfNowMs(&i2c) - start) >= timeout) {
       return OPT4001::Status::Error(OPT4001::Err::TIMEOUT, "Conversion timed out");
     }
-    vTaskDelay(pdMS_TO_TICKS(1));
+    vTaskDelay(1);
   }
   return OPT4001::Status::Error(OPT4001::Err::TIMEOUT, "Conversion poll limit reached");
 }
@@ -779,6 +812,41 @@ void dumpPublicRegisters() {
   }
 }
 
+bool rebeginWithProfile(uint8_t address, OPT4001::PackageVariant package) {
+  const bool wasInitialized = device.isInitialized();
+  const OPT4001::Config previous = device.getConfig();
+  const uint8_t previousAddress = selectedAddress;
+  const OPT4001::PackageVariant previousPackage = selectedPackage;
+  OPT4001::Config next = wasInitialized ? previous : makeConfig();
+  next.i2cAddress = address;
+  next.packageVariant = package;
+  const bool hasInt = package == OPT4001::PackageVariant::SOT_5X3 &&
+                      INT_PIN != GPIO_NUM_NC;
+  next.intPin = hasInt ? static_cast<int>(INT_PIN) : -1;
+  next.gpioRead = hasInt ? opt4001IdfGpioRead : nullptr;
+  watchState.active = false;
+  if (stressState.active) finishStress(true);
+  device.end();
+  if (replaceDeviceAddress(address)) {
+    selectedPackage = package;
+    const OPT4001::Status st = device.begin(next);
+    printStatus(st);
+    if (st.ok()) return true;
+  }
+  printInfo("Profile change failed; restoring previous configuration");
+  if (!replaceDeviceAddress(previousAddress)) {
+    printInfo("Could not restore previous address handle; driver remains uninitialized");
+    return false;
+  }
+  selectedPackage = previousPackage;
+  if (wasInitialized) {
+    const OPT4001::Status restore = device.begin(previous);
+    printStatus(restore);
+    if (!restore.ok()) printInfo("Previous configuration could not be restored");
+  }
+  return false;
+}
+
 void processCommand(char* line) {
   lowerInPlace(line);
   char* save = nullptr;
@@ -841,33 +909,15 @@ void processCommand(char* line) {
       }
       printStatus(device.startResetAndReapply());
     } else if (strcmp(op, "measure") == 0) {
-      char* rangeArg = nextToken(&save);
-      char* ctimeArg = nextToken(&save);
-      char* modeArg = nextToken(&save);
-      char* quickArg = nextToken(&save);
-      uint32_t range = 12U;
-      uint32_t ctime = 0U;
-      bool quick = device.getQuickWake();
-      const bool rangeOk = rangeArg != nullptr &&
-          (strcmp(rangeArg, "auto") == 0 ||
-           (parseU32(rangeArg, range) && range <= 8U));
-      const bool timeOk = parseU32(ctimeArg, ctime) && ctime <= 11U;
-      const bool continuous = modeArg != nullptr &&
-          (strcmp(modeArg, "cont") == 0 || strcmp(modeArg, "continuous") == 0);
-      const bool power = modeArg != nullptr &&
-          (strcmp(modeArg, "power") == 0 || strcmp(modeArg, "pd") == 0);
-      if (!rangeOk || !timeOk || (!continuous && !power) ||
-          (quickArg != nullptr && !parseBool(quickArg, quick))) {
+      OPT4001::Range range = OPT4001::Range::AUTO;
+      OPT4001::ConversionTime time = OPT4001::ConversionTime::MS_100;
+      OPT4001::Mode mode = OPT4001::Mode::POWER_DOWN;
+      bool quickWake = device.getQuickWake();
+      if (!parseMeasureArgs(&save, range, time, mode, quickWake)) {
         printUsage("job measure <0..8|auto> <0..11> <power|cont> [qw]");
         return;
       }
-      printStatus(device.startConfigureMeasurement(
-          range == 12U ? OPT4001::Range::AUTO
-                       : static_cast<OPT4001::Range>(range),
-          static_cast<OPT4001::ConversionTime>(ctime),
-          continuous ? OPT4001::Mode::CONTINUOUS
-                     : OPT4001::Mode::POWER_DOWN,
-          quick));
+      printStatus(device.startConfigureMeasurement(range, time, mode, quickWake));
     } else {
       printUsage("job [sample|burst|measure|reset|poll|result|cancel]");
     }
@@ -926,9 +976,7 @@ void processCommand(char* line) {
       if (selectedPackage == OPT4001::PackageVariant::PICOSTAR && value != 0x45) {
         printInfo("PicoStar has fixed address 0x45"); return;
       }
-      watchState.active = false;
-      device.end();
-      if (replaceDeviceAddress(static_cast<uint8_t>(value))) printStatus(device.begin(makeConfig()));
+      (void)rebeginWithProfile(static_cast<uint8_t>(value), selectedPackage);
     }
     printAddressPackage();
   } else if (strcmp(cmd, "pkg") == 0) {
@@ -943,13 +991,9 @@ void processCommand(char* line) {
       } else {
         printUsage("pkg [pico|sot]"); return;
       }
-      watchState.active = false;
-      device.end();
-      if (next == OPT4001::PackageVariant::PICOSTAR && selectedAddress != 0x45) {
-        if (!replaceDeviceAddress(0x45)) return;
-      }
-      selectedPackage = next;
-      printStatus(device.begin(makeConfig()));
+      const uint8_t address = next == OPT4001::PackageVariant::PICOSTAR
+                                  ? 0x45 : selectedAddress;
+      (void)rebeginWithProfile(address, next);
     }
     printAddressPackage();
   } else if (strcmp(cmd, "init") == 0 || strcmp(cmd, "begin") == 0) {
@@ -1002,7 +1046,9 @@ void processCommand(char* line) {
       char* countArg = nextToken(&save);
       if (countArg != nullptr && !parseU32(countArg, count)) { printUsage("read [force] [N]"); return; }
     }
-    if (count == 0 || count > STRESS_COUNT_MAX) { printUsage("read [force] [1..10000]"); return; }
+    if (count == 0 || count > BLOCKING_READ_COUNT_MAX) {
+      printUsage("read [force] [1..20]; use watch N 0 for a cancellable sequence"); return;
+    }
     for (uint32_t i = 0; i < count; ++i) {
       OPT4001::Sample sample{};
       const OPT4001::Status st = force
@@ -1109,23 +1155,14 @@ void processCommand(char* line) {
     else { printUsage("mode [power|cont]"); return; }
     printStatus(device.setMode(value));
   } else if (strcmp(cmd, "measure") == 0) {
-    char* rangeArg = nextToken(&save); char* ctimeArg = nextToken(&save);
-    char* modeArg = nextToken(&save); uint32_t range = 12, ctime = 0;
-    OPT4001::Mode mode = OPT4001::Mode::POWER_DOWN; bool qwake = false;
-    const bool rangeOk = rangeArg != nullptr &&
-        (strcmp(rangeArg, "auto") == 0 || (parseU32(rangeArg, range) && range <= 8));
-    const bool ctimeOk = parseU32(ctimeArg, ctime) && ctime <= 11;
-    const bool modeOk = modeArg != nullptr &&
-        ((strcmp(modeArg, "power") == 0 || strcmp(modeArg, "0") == 0) ||
-         (strcmp(modeArg, "cont") == 0 || strcmp(modeArg, "continuous") == 0 ||
-          strcmp(modeArg, "3") == 0));
-    if (modeOk && (strcmp(modeArg, "cont") == 0 || strcmp(modeArg, "continuous") == 0 ||
-                   strcmp(modeArg, "3") == 0)) mode = OPT4001::Mode::CONTINUOUS;
-    if (!rangeOk || !ctimeOk || !modeOk) {
-      printUsage("measure <range|auto> <ctime0..11> <power|cont> [quickwake]"); return;
+    OPT4001::Range range = OPT4001::Range::AUTO;
+    OPT4001::ConversionTime time = OPT4001::ConversionTime::MS_100;
+    OPT4001::Mode mode = OPT4001::Mode::POWER_DOWN;
+    bool quickWake = device.getQuickWake();
+    if (!parseMeasureArgs(&save, range, time, mode, quickWake)) {
+      printUsage("measure <0..8|auto> <ctime0..11> <power|cont> [quickwake]"); return;
     }
-    char* qw = nextToken(&save); if (qw != nullptr && !parseBool(qw, qwake)) { printUsage("measure ... [0|1]"); return; }
-    printStatus(device.configureMeasurement(parseRange(range), parseConversionTime(ctime), mode, qwake));
+    printStatus(device.configureMeasurement(range, time, mode, quickWake));
   } else if (strcmp(cmd, "quickwake") == 0 || strcmp(cmd, "qwake") == 0 || strcmp(cmd, "crc") == 0) {
     char* arg = nextToken(&save);
     if (arg == nullptr) { printf("%s: %s\n", cmd, strcmp(cmd, "crc") == 0 ?
@@ -1305,17 +1342,26 @@ void processCommand(char* line) {
     if (count == 0 || count > STRESS_COUNT_MAX) { printUsage("stress [1..10000]"); return; }
     startStressSession(count, strcmp(cmd, "stress_mix") == 0);
   } else if (strcmp(cmd, "watch") == 0 || strcmp(cmd, "demo") == 0) {
-    if (stressState.active) finishStress(true);
-    bool force = false; uint32_t count = strcmp(cmd, "demo") == 0 ? 10U : 10U;
-    uint32_t interval = strcmp(cmd, "demo") == 0 ? 1000U : 1000U;
     char* arg = nextToken(&save);
+    if (arg == nullptr && strcmp(cmd, "watch") == 0) {
+      printf("Watch: %s remaining=%lu interval=%lu force=%s\n",
+             watchState.active ? "ON" : "OFF",
+             static_cast<unsigned long>(watchState.remaining),
+             static_cast<unsigned long>(watchState.intervalMs),
+             watchState.forceAuto ? "yes" : "no");
+      return;
+    }
+    bool force = false;
+    uint32_t count = 10U;
+    uint32_t interval = 1000U;
     if (arg != nullptr && strcmp(arg, "force") == 0) { force = true; arg = nextToken(&save); }
     if (arg != nullptr && !parseU32(arg, count)) { printUsage("watch [force] [N] [interval]"); return; }
     char* intervalArg = nextToken(&save);
     if (intervalArg != nullptr && !parseU32(intervalArg, interval)) { printUsage("watch [force] [N] [interval]"); return; }
-    if (count == 0 || count > WATCH_COUNT_MAX || interval < WATCH_INTERVAL_MIN_MS || interval > WATCH_INTERVAL_MAX_MS) {
-      printUsage("watch [force] [1..100000] [1..3600000]"); return;
+    if (count == 0 || count > WATCH_COUNT_MAX || interval > WATCH_INTERVAL_MAX_MS) {
+      printUsage("watch [force] [1..100000] [0..3600000]"); return;
     }
+    if (stressState.active) finishStress(true);
     watchState = {};
     watchState.active = true; watchState.forceAuto = force; watchState.remaining = count;
     watchState.intervalMs = interval; watchState.nextMs = opt4001IdfNowMs(&i2c);
@@ -1334,6 +1380,15 @@ void processCommand(char* line) {
 void configureI2c() {
   i2c.address = I2C_ADDRESS;
   i2c.intPin = INT_PIN;
+  if (i2c.intPin != GPIO_NUM_NC) {
+    gpio_config_t intConfig{};
+    intConfig.pin_bit_mask = 1ULL << static_cast<uint32_t>(i2c.intPin);
+    intConfig.mode = GPIO_MODE_INPUT;
+    intConfig.pull_up_en = GPIO_PULLUP_ENABLE;
+    intConfig.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    intConfig.intr_type = GPIO_INTR_DISABLE;
+    ESP_ERROR_CHECK(gpio_config(&intConfig));
+  }
 
   i2c_master_bus_config_t busConfig{};
   busConfig.clk_source = I2C_CLK_SRC_DEFAULT;

@@ -192,8 +192,9 @@ read
 
 ## Freshness And Counter Behavior
 
-Objective: prove fresh reads are tied to conversion-ready flag, configured
-SOT-5X3 INT assertion, or counter advance.
+Objective: prove fresh reads are tied to the conversion-ready flag or counter
+advance. An asserted SOT-5X3 INT level may prompt a counter check but must never
+make an unchanged/reset result fresh by itself.
 
 Arduino CLI sequence:
 

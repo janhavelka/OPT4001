@@ -114,6 +114,24 @@ class HilOpt4001RunnerParserTest(unittest.TestCase):
                 status, _ = hil.classify_output(sample)
                 self.assertEqual("PASS", status)
 
+    def test_settings_and_help_prose_are_not_failure_statuses(self) -> None:
+        samples = (
+            ("Settings snapshot:\n  Timeout / offline threshold: 50 ms / 5\n", "cfg"),
+            ("online    Show online/offline state\n", "help"),
+            ("Job busy: false\n", "job"),
+        )
+        for sample, command in samples:
+            with self.subTest(sample=sample):
+                status, _ = hil.classify_output(sample, command, strict_expected=True)
+                self.assertEqual("PASS", status)
+
+    def test_uppercase_failure_tokens_without_status_prefix_are_failures(self) -> None:
+        # State and diagnostic output also carry status names without "Status:".
+        for sample in ("state=OFFLINE", "lastError=TIMEOUT", "job: BUSY"):
+            with self.subTest(sample=sample):
+                status, _ = hil.classify_output(sample)
+                self.assertEqual("FAIL", status)
+
     def test_warning_tokens_are_warnings(self) -> None:
         for sample in ("Status: CRC_ERROR", "Status: MEASUREMENT_NOT_READY", "Status: CONVERSION_NOT_READY"):
             with self.subTest(sample=sample):

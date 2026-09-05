@@ -34,6 +34,12 @@ not re-enter the same instance.
 
 Add the repository root as a component directory:
 
+ESP-IDF identifies local components by their directory name. Keep the checkout
+directory named `OPT4001`, matching the example's `REQUIRES OPT4001`; rename a
+GitHub ZIP extraction such as `OPT4001-main` before building the example.
+The component manifest supports only ESP32-S2 and ESP32-S3, the targets built
+by this repository's CI. Other ESP32 targets are not currently validated.
+
 ```cmake
 set(EXTRA_COMPONENT_DIRS
     "${CMAKE_CURRENT_LIST_DIR}/../OPT4001")
@@ -42,6 +48,15 @@ set(EXTRA_COMPONENT_DIRS
 The application owns the I2C bus, locking, timeout policy, reset-line handling,
 INT GPIO setup, ISR attachment, ISR-to-task signaling, and pin lifetime. The
 driver only consumes the configured callbacks.
+
+The example configures an enabled `INT_PIN` as an input with an internal pull-up.
+Connect the required external pull-up as well (10 kOhm typical); the internal
+pull-up does not replace it. PicoStar has no INT pin.
+
+The example defaults to `CONFIG_FREERTOS_HZ=1000`. Conversion-poll waits and the
+cooperative hook block for one tick so IDLE and lower-priority tasks can run.
+An existing `sdkconfig` takes precedence over defaults: at 100 Hz each such
+wait is one 10 ms tick, while timeout checks still use elapsed milliseconds.
 
 `include/OPT4001/Version.h` is generated from `library.json` and committed, so a
 clean ESP-IDF checkout can include `OPT4001/OPT4001.h` without running
@@ -57,6 +72,7 @@ The example adapter preserves `esp_err_t` in `Status::detail`.
 | `ESP_ERR_TIMEOUT` | `I2C_TIMEOUT` | Timeout is distinguishable. |
 | `ESP_ERR_INVALID_RESPONSE` | `I2C_ERROR` | Transaction-level NACK/invalid response; address vs data phase is not exposed by this transaction API. |
 | `ESP_ERR_INVALID_ARG` | `INVALID_PARAM` | Adapter/API argument failure. |
+| Missing adapter context/device handle | `INVALID_CONFIG` | Host configuration error; does not change device transport health. |
 | `ESP_ERR_INVALID_STATE` | `I2C_BUS` | Driver or bus state fault. |
 | Other `esp_err_t` | `I2C_BUS` | Raw value is kept in `detail`. |
 

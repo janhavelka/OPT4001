@@ -7,6 +7,7 @@
 #include <limits>
 #include <cstring>
 #include <type_traits>
+#include <initializer_list>
 
 #include "Arduino.h"
 #include "Wire.h"
@@ -41,6 +42,14 @@ struct FakeBus {
   uint32_t nowMs = 1234;
   uint32_t writeCalls = 0;
   uint32_t readCalls = 0;
+  uint8_t readAddresses[256]{};
+  uint8_t writeAddresses[256]{};
+  uint8_t writeFirstBytes[256]{};
+  size_t readLengths[256]{};
+  uint8_t readRegs[256]{};
+  uint32_t slowClockCalls = 0;
+  uint32_t shiftOnReadCall = 0;
+  uint16_t shiftedLsbCrc = 0;
   uint32_t failWriteCall = 0;
   uint32_t oneShotReadyAtMs = UINT32_MAX;
   uint32_t continuousReadyAtMs = UINT32_MAX;
@@ -72,14 +81,16 @@ uint32_t conversionTimeMsFromRegister(uint16_t configReg) {
 }
 
 uint32_t oneShotBudgetMsFromRegister(uint16_t configReg, Mode mode) {
-  uint32_t budgetMs = conversionTimeMsFromRegister(configReg);
+  const uint8_t idx = static_cast<uint8_t>(
+      (configReg & cmd::MASK_CONVERSION_TIME) >> cmd::BIT_CONVERSION_TIME);
+  uint32_t budgetUs = cmd::CONVERSION_TIME_US[idx];
   if ((configReg & cmd::MASK_QWAKE) == 0) {
-    budgetMs += 1U;
+    budgetUs += cmd::ONE_SHOT_STANDBY_US;
   }
   if (mode == Mode::ONE_SHOT_FORCED_AUTO) {
-    budgetMs += 1U;
+    budgetUs += cmd::FORCED_AUTO_RANGE_EXTRA_US;
   }
-  return budgetMs;
+  return (budgetUs + 999U) / 1000U;
 }
 
 void maybeCompleteConversion(FakeBus& bus) {
@@ -102,8 +113,12 @@ void maybeCompleteConversion(FakeBus& bus) {
   }
 }
 
-Status fakeWrite(uint8_t, const uint8_t* data, size_t len, uint32_t, void* user) {
+Status fakeWrite(uint8_t addr, const uint8_t* data, size_t len, uint32_t, void* user) {
   FakeBus* bus = static_cast<FakeBus*>(user);
+  if (bus->writeCalls < 256U) {
+    bus->writeAddresses[bus->writeCalls] = addr;
+    bus->writeFirstBytes[bus->writeCalls] = data != nullptr && len != 0U ? data[0] : 0U;
+  }
   bus->writeCalls++;
   if (!bus->writeStatus.ok()) {
     return bus->writeStatus;
@@ -142,17 +157,20 @@ Status fakeWrite(uint8_t, const uint8_t* data, size_t len, uint32_t, void* user)
     } else if (reg == cmd::REG_FLAGS && value != 0) {
       bus->registers[cmd::REG_FLAGS] &=
           static_cast<uint16_t>(~cmd::MASK_CONVERSION_READY_FLAG);
-    } else if (reg == cmd::REG_FLAGS) {
-      bus->registers[cmd::REG_FLAGS] = value;
     }
   }
 
   return Status::Ok();
 }
 
-Status fakeWriteRead(uint8_t, const uint8_t* txData, size_t txLen, uint8_t* rxData,
+Status fakeWriteRead(uint8_t addr, const uint8_t* txData, size_t txLen, uint8_t* rxData,
                      size_t rxLen, uint32_t, void* user) {
   FakeBus* bus = static_cast<FakeBus*>(user);
+  if (bus->readCalls < 256U) {
+    bus->readAddresses[bus->readCalls] = addr;
+    bus->readLengths[bus->readCalls] = rxLen;
+    bus->readRegs[bus->readCalls] = txData != nullptr && txLen != 0U ? txData[0] : 0U;
+  }
   bus->readCalls++;
   if (!bus->readStatus.ok()) {
     return bus->readStatus;
@@ -169,6 +187,10 @@ Status fakeWriteRead(uint8_t, const uint8_t* txData, size_t txLen, uint8_t* rxDa
     const uint16_t value = bus->registers[currentReg];
     rxData[i] = ((i & 1U) == 0U) ? static_cast<uint8_t>(value >> 8)
                                  : static_cast<uint8_t>(value & 0xFF);
+  }
+
+  if (bus->shiftOnReadCall == bus->readCalls) {
+    bus->registers[cmd::REG_RESULT_LSB_CRC] = bus->shiftedLsbCrc;
   }
 
   const uint16_t endReg = static_cast<uint16_t>(reg) +
@@ -1099,14 +1121,14 @@ void test_start_conversion_wraparound_reaches_ready() {
   TEST_ASSERT_EQUAL_UINT32(0x12345u, sample.mantissa);
 }
 
-void test_read_blocking_times_out_with_stalled_clock() {
+void test_read_blocking_rejects_stalled_clock() {
   FakeBus bus;
   OPT4001::OPT4001 dev;
   TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
 
   Sample sample;
   Status st = dev.readBlocking(sample, Mode::ONE_SHOT, 5);
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::TIMEOUT), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_CONFIG), static_cast<uint8_t>(st.code));
   SettingsSnapshot timedOut;
   TEST_ASSERT_TRUE(dev.getSettings(timedOut).ok());
   TEST_ASSERT_TRUE(timedOut.conversionStarted);
@@ -1120,7 +1142,7 @@ void test_read_blocking_times_out_with_stalled_clock() {
   TEST_ASSERT_TRUE(continuousDev.begin(cfg).ok());
 
   st = continuousDev.readBlocking(sample, 5);
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::TIMEOUT), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_CONFIG), static_cast<uint8_t>(st.code));
 }
 
 void test_bind_and_unbind_are_bus_silent() {
@@ -1337,6 +1359,7 @@ void test_blocking_reads_accept_full_uint32_timeout_range() {
   continuousCfg.mode = Mode::CONTINUOUS;
   TEST_ASSERT_TRUE(continuousDev.begin(continuousCfg).ok());
   seedSample(continuousBus, cmd::REG_RESULT, 0, 0x12345, 1, true);
+  continuousBus.nowMs += continuousDev.getConversionTimeMs();
   markConversionReady(continuousBus);
 
   Sample sample;
@@ -1475,6 +1498,7 @@ void test_decode_rejects_invalid_result_exponent_without_cache_update() {
   TEST_ASSERT_EQUAL_UINT32(0x12345u, valid.mantissa);
 
   seedSample(bus, cmd::REG_RESULT, 9, 0x00001, 2, true);
+  bus.nowMs += dev.getConversionTimeMs();
   markConversionReady(bus);
   Sample invalid;
   Status st = dev.readSample(invalid);
@@ -1618,6 +1642,7 @@ void test_lux_helpers_preserve_outputs_on_crc_warning() {
   TEST_ASSERT_FLOAT_WITHIN(0.001f, expectedLux, lux);
 
   seedSample(bus, cmd::REG_RESULT, 1, 0x12345, 7, false);
+  bus.nowMs += dev.getConversionTimeMs();
   markConversionReady(bus);
   uint64_t microLux = 0;
   st = dev.readMicroLux(microLux);
@@ -1625,6 +1650,7 @@ void test_lux_helpers_preserve_outputs_on_crc_warning() {
   TEST_ASSERT_EQUAL_UINT64(expectedMicroLux, microLux);
 
   seedSample(bus, cmd::REG_RESULT, 1, 0x12345, 8, false);
+  bus.nowMs += dev.getConversionTimeMs();
   markConversionReady(bus);
   uint32_t milliLux = 0;
   st = dev.readMilliLux(milliLux);
@@ -1772,6 +1798,8 @@ void test_poll_read_burst_status_and_burst_share_budget_two() {
   seedSample(bus, cmd::REG_FIFO0_MSB, 1, 0x22222, 8, true);
   seedSample(bus, cmd::REG_FIFO1_MSB, 2, 0x33333, 7, true);
   seedSample(bus, cmd::REG_FIFO2_MSB, 3, 0x44444, 6, true);
+  TEST_ASSERT_TRUE(dev.startConversion().inProgress());
+  bus.nowMs += dev.getOneShotBudgetMs(Mode::ONE_SHOT);
   markConversionReady(bus);
 
   const uint32_t readsBefore = bus.readCalls;
@@ -1800,6 +1828,8 @@ void test_poll_read_sample_uses_burst_primitive_without_publishing_burst() {
   seedSample(bus, cmd::REG_FIFO0_MSB, 1, 0x22222, 8, true);
   seedSample(bus, cmd::REG_FIFO1_MSB, 2, 0x33333, 7, true);
   seedSample(bus, cmd::REG_FIFO2_MSB, 3, 0x44444, 6, true);
+  TEST_ASSERT_TRUE(dev.startConversion().inProgress());
+  bus.nowMs += dev.getOneShotBudgetMs(Mode::ONE_SHOT);
   markConversionReady(bus);
 
   const uint32_t readsBefore = bus.readCalls;
@@ -1828,6 +1858,8 @@ void test_poll_read_burst_budget_one_splits_status_and_burst() {
   seedSample(bus, cmd::REG_FIFO0_MSB, 1, 0x22222, 2, true);
   seedSample(bus, cmd::REG_FIFO1_MSB, 2, 0x33333, 3, true);
   seedSample(bus, cmd::REG_FIFO2_MSB, 3, 0x44444, 4, true);
+  TEST_ASSERT_TRUE(dev.startConversion().inProgress());
+  bus.nowMs += dev.getOneShotBudgetMs(Mode::ONE_SHOT);
   markConversionReady(bus);
 
   const uint32_t readsBefore = bus.readCalls;
@@ -1853,6 +1885,8 @@ void test_poll_zero_budget_does_not_touch_i2c() {
   seedSample(bus, cmd::REG_FIFO0_MSB, 1, 0x22222, 8, true);
   seedSample(bus, cmd::REG_FIFO1_MSB, 2, 0x33333, 7, true);
   seedSample(bus, cmd::REG_FIFO2_MSB, 3, 0x44444, 6, true);
+  TEST_ASSERT_TRUE(dev.startConversion().inProgress());
+  bus.nowMs += dev.getOneShotBudgetMs(Mode::ONE_SHOT);
   markConversionReady(bus);
 
   const uint32_t readsBefore = bus.readCalls;
@@ -1966,7 +2000,8 @@ void test_poll_read_burst_fifo_full_gate_uses_four_sample_cadence() {
   const uint32_t startMs = bus.nowMs;
   TEST_ASSERT_TRUE(dev.startReadBurst().inProgress());
 
-  Status st = dev.poll(startMs + 399U, 2);
+  bus.nowMs = startMs + 399U;
+  Status st = dev.poll(bus.nowMs, 2);
   TEST_ASSERT_TRUE(st.inProgress());
   TEST_ASSERT_TRUE(dev.pollBusy());
   TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
@@ -1976,7 +2011,8 @@ void test_poll_read_burst_fifo_full_gate_uses_four_sample_cadence() {
   seedSample(bus, cmd::REG_FIFO1_MSB, 2, 0x33333, 7, true);
   seedSample(bus, cmd::REG_FIFO2_MSB, 3, 0x44444, 6, true);
   markConversionReady(bus);
-  st = dev.poll(startMs + 400U, 2);
+  bus.nowMs = startMs + 400U;
+  st = dev.poll(bus.nowMs, 2);
   TEST_ASSERT_TRUE(st.ok());
   TEST_ASSERT_FALSE(dev.pollBusy());
   TEST_ASSERT_EQUAL_UINT32(readsBefore + 2U, bus.readCalls);
@@ -1999,7 +2035,8 @@ void test_poll_read_burst_one_shot_forced_auto_gate_uses_full_budget() {
   const uint32_t readsBefore = bus.readCalls;
 
   TEST_ASSERT_TRUE(dev.startReadBurst().inProgress());
-  st = dev.poll(readyMs - 1U, 2);
+  bus.nowMs = readyMs - 1U;
+  st = dev.poll(bus.nowMs, 2);
   TEST_ASSERT_TRUE(st.inProgress());
   TEST_ASSERT_TRUE(dev.pollBusy());
   TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
@@ -2009,7 +2046,8 @@ void test_poll_read_burst_one_shot_forced_auto_gate_uses_full_budget() {
   seedSample(bus, cmd::REG_FIFO1_MSB, 2, 0x33333, 7, true);
   seedSample(bus, cmd::REG_FIFO2_MSB, 3, 0x44444, 6, true);
   markConversionReady(bus);
-  st = dev.poll(readyMs, 2);
+  bus.nowMs = readyMs;
+  st = dev.poll(bus.nowMs, 2);
   TEST_ASSERT_TRUE(st.ok());
   TEST_ASSERT_FALSE(dev.pollBusy());
   TEST_ASSERT_EQUAL_UINT32(readsBefore + 2U, bus.readCalls);
@@ -2449,16 +2487,16 @@ void test_generic_raw_flags_access_synchronizes_readiness_without_dirtying_confi
   uint16_t raw = 0;
   TEST_ASSERT_TRUE(dev.readRegister16(cmd::REG_FLAGS, raw).ok());
   TEST_ASSERT_EQUAL_HEX16(cmd::MASK_CONVERSION_READY_FLAG, raw);
-  TEST_ASSERT_FALSE(dev._sampleAvailable);
-  TEST_ASSERT_FALSE(dev._conversionReady);
+  TEST_ASSERT_TRUE(dev._sampleAvailable);
+  TEST_ASSERT_TRUE(dev._conversionReady);
 
   bus.registers[cmd::REG_FLAGS] = cmd::MASK_CONVERSION_READY_FLAG;
   dev._sampleAvailable = true;
   dev._conversionReady = true;
   uint8_t bytes[2] = {};
   TEST_ASSERT_TRUE(dev.readRegisters(cmd::REG_FLAGS, bytes, sizeof(bytes)).ok());
-  TEST_ASSERT_FALSE(dev._sampleAvailable);
-  TEST_ASSERT_FALSE(dev._conversionReady);
+  TEST_ASSERT_TRUE(dev._sampleAvailable);
+  TEST_ASSERT_TRUE(dev._conversionReady);
 
   dev._sampleAvailable = true;
   dev._conversionReady = true;
@@ -2570,9 +2608,9 @@ void test_int_fresh_evidence_does_not_clear_flags() {
   Sample sample;
   Status st = dev.readSample(sample);
 
-  TEST_ASSERT_TRUE(st.ok());
-  TEST_ASSERT_EQUAL_UINT32(0x45678u, sample.mantissa);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore + 1U, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::MEASUREMENT_NOT_READY),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
   TEST_ASSERT_TRUE((bus.registers[cmd::REG_FLAGS] & cmd::MASK_FLAG_H) != 0U);
   TEST_ASSERT_TRUE((bus.registers[cmd::REG_FLAGS] & cmd::MASK_FLAG_L) != 0U);
 }
@@ -2585,6 +2623,7 @@ void test_counter_fresh_evidence_does_not_clear_flags() {
   TEST_ASSERT_TRUE(dev.begin(cfg).ok());
 
   seedSample(bus, cmd::REG_RESULT, 0, 0x12345, 4, true);
+  bus.nowMs += dev.getConversionTimeMs();
   markConversionReady(bus);
   Sample sample;
   Status st = dev.readSample(sample);
@@ -2635,6 +2674,7 @@ void test_try_read_helpers_report_not_ready_without_error() {
   TEST_ASSERT_EQUAL_UINT32(0x23456u, sample.mantissa);
 
   seedSample(bus, cmd::REG_RESULT, 0, 0x23456, 6, true);
+  bus.nowMs += dev.getConversionTimeMs();
   markConversionReady(bus);
   didRead = false;
   lux = 0.0f;
@@ -2652,6 +2692,7 @@ void test_fresh_continuous_first_sample_is_fresh() {
   TEST_ASSERT_TRUE(dev.begin(cfg).ok());
 
   seedSample(bus, cmd::REG_RESULT, 1, 0x13579, 2, true);
+  bus.nowMs += dev.getConversionTimeMs();
   markConversionReady(bus);
 
   Sample sample;
@@ -2671,6 +2712,7 @@ void test_fresh_repeated_same_counter_is_not_fresh() {
   TEST_ASSERT_TRUE(dev.begin(cfg).ok());
 
   seedSample(bus, cmd::REG_RESULT, 1, 0x24680, 3, true);
+  bus.nowMs += dev.getConversionTimeMs();
   markConversionReady(bus);
 
   Sample sample;
@@ -2693,6 +2735,7 @@ void test_fresh_counter_wrap_15_to_0_is_fresh() {
   TEST_ASSERT_TRUE(dev.begin(cfg).ok());
 
   seedSample(bus, cmd::REG_RESULT, 0, 0x11111, 15, true);
+  bus.nowMs += dev.getConversionTimeMs();
   markConversionReady(bus);
 
   Sample sample;
@@ -2703,6 +2746,7 @@ void test_fresh_counter_wrap_15_to_0_is_fresh() {
   TEST_ASSERT_EQUAL_UINT8(15u, sample.counter);
 
   seedSample(bus, cmd::REG_RESULT, 0, 0x22222, 0, true);
+  bus.nowMs += dev.getConversionTimeMs();
   markConversionReady(bus);
 
   didRead = false;
@@ -2721,6 +2765,7 @@ void test_fresh_same_lux_changed_counter_is_fresh() {
   TEST_ASSERT_TRUE(dev.begin(cfg).ok());
 
   seedSample(bus, cmd::REG_RESULT, 2, 0x12345, 4, true);
+  bus.nowMs += dev.getConversionTimeMs();
   markConversionReady(bus);
 
   Sample first;
@@ -2730,6 +2775,7 @@ void test_fresh_same_lux_changed_counter_is_fresh() {
   TEST_ASSERT_TRUE(didRead);
 
   seedSample(bus, cmd::REG_RESULT, 2, 0x12345, 5, true);
+  bus.nowMs += dev.getConversionTimeMs();
   markConversionReady(bus);
 
   Sample second;
@@ -2823,6 +2869,7 @@ void test_fresh_read_advances_readiness() {
   TEST_ASSERT_TRUE(dev.begin(cfg).ok());
 
   seedSample(bus, cmd::REG_RESULT, 1, 0x6789A, 9, true);
+  bus.nowMs += dev.getConversionTimeMs();
   markConversionReady(bus);
 
   Sample sample;
@@ -2851,6 +2898,7 @@ void test_fresh_one_shot_to_continuous_clears_stale_readiness() {
   TEST_ASSERT_TRUE(st.inProgress());
   bus.nowMs += dev.getOneShotBudgetMs(Mode::ONE_SHOT);
   forceHardwareMode(bus, Mode::POWER_DOWN);
+  bus.nowMs += dev.getConversionTimeMs();
   markConversionReady(bus);
 
   Flags flags;
@@ -2866,6 +2914,7 @@ void test_fresh_one_shot_to_continuous_clears_stale_readiness() {
   TEST_ASSERT_FALSE(didRead);
 
   seedSample(bus, cmd::REG_RESULT, 0, 0x789AC, 11, true);
+  bus.nowMs += dev.getConversionTimeMs();
   markConversionReady(bus);
   didRead = false;
   st = dev.tryReadFreshSample(sample, didRead);
@@ -2898,6 +2947,7 @@ void test_fresh_crc_error_on_fresh_sample() {
   TEST_ASSERT_TRUE(dev.begin(cfg).ok());
 
   seedSample(bus, cmd::REG_RESULT, 0, 0x23456, 12, false);
+  bus.nowMs += dev.getConversionTimeMs();
   markConversionReady(bus);
 
   Sample sample;
@@ -3747,8 +3797,691 @@ void test_raw_transport_rejects_invalid_buffers() {
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM), static_cast<uint8_t>(st.code));
 }
 
+void fakeSlowYield(void* user) {
+  FakeBus& bus = *static_cast<FakeBus*>(user);
+  if (++bus.slowClockCalls % 500U == 0U) {
+    ++bus.nowMs;
+  }
+}
+
+uint32_t fakeSlowNowMs(void* user) {
+  FakeBus& bus = *static_cast<FakeBus*>(user);
+  if (++bus.slowClockCalls % 5000U == 0U) {
+    ++bus.nowMs;
+  }
+  return bus.nowMs;
+}
+
+void test_blocking_wait_uses_elapsed_time_with_many_spins_per_millisecond() {
+  for (uint8_t variant = 0; variant < 2U; ++variant) {
+    FakeBus bus;
+    OPT4001::OPT4001 dev;
+    Config cfg = makeConfig(bus);
+    cfg.cooperativeYield = variant == 0U ? fakeSlowYield : nullptr;
+    if (variant != 0U) {
+      cfg.nowMs = fakeSlowNowMs;
+    }
+    TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+    seedSample(bus, cmd::REG_RESULT, 0, 0x12345, 3, true);
+    const uint32_t startedMs = bus.nowMs;
+    float lux = 0.0f;
+    TEST_ASSERT_TRUE(dev.readBlockingLux(lux, 1500).ok());
+    TEST_ASSERT_TRUE(lux > 0.0f);
+    TEST_ASSERT_TRUE(bus.nowMs - startedMs >= dev.getOneShotBudgetMs(Mode::ONE_SHOT));
+    TEST_ASSERT_TRUE(bus.nowMs - startedMs < 1500U);
+  }
+}
+
+void test_caller_clock_rebases_startup_and_survives_config_reapply() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.nowMs = nullptr;
+  cfg.mode = Mode::CONTINUOUS;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+  bus.autoCompleteConversions = false;
+  const uint32_t readsBefore = bus.readCalls;
+  dev.tick(5000U);
+  dev.tick(5099U);
+  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(5000U, dev._conversionStartMs);
+  TEST_ASSERT_TRUE(dev.startReadSample().inProgress());
+  TEST_ASSERT_TRUE(dev.poll(5099U, 2).inProgress());
+  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
+  seedSample(bus, cmd::REG_RESULT, 0, 0x12345, 1, true);
+  markConversionReady(bus);
+  TEST_ASSERT_TRUE(dev.poll(5100U, 2).ok());
+  TEST_ASSERT_EQUAL_UINT32(5100U, dev.sampleTimestampMs());
+  TEST_ASSERT_EQUAL_UINT32(20U, dev.sampleAgeMs(5120U));
+  TEST_ASSERT_EQUAL_UINT32(5100U, dev._hostMs);
+  TEST_ASSERT_TRUE(dev.configureMeasurement(Range::RANGE_1,
+      ConversionTime::MS_50, Mode::CONTINUOUS).ok());
+  TEST_ASSERT_EQUAL_UINT32(5100U, dev._conversionStartMs);
+  const uint32_t reappliedReads = bus.readCalls;
+  dev.tick(5149U);
+  TEST_ASSERT_EQUAL_UINT32(reappliedReads, bus.readCalls);
+}
+
+void test_hook_clock_is_authoritative_for_poll_and_tick() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+  const uint32_t readsBefore = bus.readCalls;
+  dev.tick(9999999U);
+  TEST_ASSERT_TRUE(dev.startReadSample().inProgress());
+  TEST_ASSERT_TRUE(dev.poll(9999999U, 2).inProgress());
+  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
+  bus.nowMs += dev.getConversionTimeMs();
+  seedSample(bus, cmd::REG_RESULT, 0, 0x12345, 1, true);
+  TEST_ASSERT_TRUE(dev.poll(0U, 2).ok());
+  TEST_ASSERT_EQUAL_UINT32(bus.nowMs, dev.sampleTimestampMs());
+}
+
+void test_readiness_gate_and_retry_preserve_threshold_flags() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  cfg.conversionTime = ConversionTime::MS_800;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+  bus.autoCompleteConversions = false;
+  bus.registers[cmd::REG_FLAGS] = cmd::MASK_FLAG_H;
+  const uint32_t readsBefore = bus.readCalls;
+  bool ready = true;
+  for (uint32_t ms = 0; ms < 800U; ++ms) {
+    TEST_ASSERT_TRUE(dev.conversionReady(ready).ok());
+    TEST_ASSERT_FALSE(ready);
+    ++bus.nowMs;
+  }
+  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
+  TEST_ASSERT_EQUAL_HEX16(cmd::MASK_FLAG_H, bus.registers[cmd::REG_FLAGS]);
+  TEST_ASSERT_TRUE(dev.conversionReady(ready).ok());
+  TEST_ASSERT_EQUAL_UINT32(readsBefore + 1U, bus.readCalls);
+  for (uint32_t ms = 1; ms < 50U; ++ms) {
+    ++bus.nowMs;
+    TEST_ASSERT_TRUE(dev.conversionReady(ready).ok());
+  }
+  TEST_ASSERT_EQUAL_UINT32(readsBefore + 1U, bus.readCalls);
+}
+
+void test_poll_counter_evidence_preserves_flags_and_does_not_ping_pong() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+  seedSample(bus, cmd::REG_RESULT, 0, 0x12345, 1, true);
+  bus.nowMs += dev.getConversionTimeMs();
+  Sample sample;
+  TEST_ASSERT_TRUE(dev.readSample(sample).ok());
+  seedSample(bus, cmd::REG_RESULT, 0, 0x23456, 2, true);
+  bus.nowMs += dev.getConversionTimeMs();
+  bus.registers[cmd::REG_FLAGS] = cmd::MASK_FLAG_H | cmd::MASK_CONVERSION_READY_FLAG;
+  const uint32_t readsBefore = bus.readCalls;
+  TEST_ASSERT_TRUE(dev.startReadSample().inProgress());
+  TEST_ASSERT_TRUE(dev.poll(bus.nowMs, 2).ok());
+  TEST_ASSERT_EQUAL_UINT8(cmd::REG_RESULT_LSB_CRC, bus.readRegs[readsBefore]);
+  TEST_ASSERT_EQUAL_UINT32(readsBefore + 2U, bus.readCalls);
+  TEST_ASSERT_EQUAL_HEX16(cmd::MASK_FLAG_H | cmd::MASK_CONVERSION_READY_FLAG,
+                         bus.registers[cmd::REG_FLAGS]);
+
+  bus.nowMs += dev.getConversionTimeMs();
+  TEST_ASSERT_TRUE(dev.startReadSample().inProgress());
+  const uint32_t staleReads = bus.readCalls;
+  TEST_ASSERT_TRUE(dev.poll(bus.nowMs, 255U).inProgress());
+  TEST_ASSERT_EQUAL_UINT32(staleReads + 1U, bus.readCalls);
+  TEST_ASSERT_TRUE(dev.poll(bus.nowMs, 255U).inProgress());
+  TEST_ASSERT_EQUAL_UINT32(staleReads + 1U, bus.readCalls);
+  TEST_ASSERT_EQUAL_HEX16(cmd::MASK_FLAG_H | cmd::MASK_CONVERSION_READY_FLAG,
+                         bus.registers[cmd::REG_FLAGS]);
+}
+
+void test_poll_idle_reads_are_rejected_and_stuck_jobs_timeout() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+  const uint32_t readsBefore = bus.readCalls;
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::MEASUREMENT_NOT_READY),
+      static_cast<uint8_t>(dev.startReadSample().code));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::MEASUREMENT_NOT_READY),
+      static_cast<uint8_t>(dev.startReadBurst().code));
+  TEST_ASSERT_FALSE(dev.pollBusy());
+  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
+  bus.autoCompleteConversions = false;
+  TEST_ASSERT_TRUE(dev.startConversion().inProgress());
+  TEST_ASSERT_TRUE(dev.startReadSample().inProgress());
+  TEST_ASSERT_TRUE(dev.poll(bus.nowMs, 255U).inProgress());
+  bus.nowMs += dev._readTimeoutMs();
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::TIMEOUT),
+      static_cast<uint8_t>(dev.poll(bus.nowMs, 255U).code));
+  TEST_ASSERT_FALSE(dev.pollBusy());
+  TEST_ASSERT_FALSE(dev._conversionStarted);
+  TEST_ASSERT_TRUE(dev.startConversion().inProgress());
+  const uint32_t firstStart = dev._conversionStartMs;
+  bus.nowMs += dev._readTimeoutMs();
+  TEST_ASSERT_TRUE(dev.startConversion().inProgress());
+  TEST_ASSERT_TRUE(dev._conversionStartMs != firstStart);
+}
+
+void test_poll_deadline_uses_first_caller_time_and_wraps() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.nowMs = nullptr;
+  cfg.mode = Mode::CONTINUOUS;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+  bus.autoCompleteConversions = false;
+  TEST_ASSERT_TRUE(dev.startReadBurst().inProgress());
+  const uint32_t firstMs = UINT32_MAX - 500U;
+  TEST_ASSERT_TRUE(dev.poll(firstMs, 1).inProgress());
+  TEST_ASSERT_TRUE(dev.poll(firstMs + dev._readTimeoutMs() - 1U, 0).inProgress());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::TIMEOUT),
+      static_cast<uint8_t>(dev.poll(firstMs + dev._readTimeoutMs(), 0).code));
+  TEST_ASSERT_FALSE(dev.pollBusy());
+}
+
+void test_asserted_int_hint_cannot_publish_reset_sample_in_poll() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  cfg.intPin = 4;
+  cfg.gpioRead = fakeGpioRead;
+  cfg.gpioUser = &bus;
+  cfg.intConfig = IntConfig::EVERY_CONVERSION;
+  bus.gpioLevel = false;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+  const uint32_t readsBefore = bus.readCalls;
+  TEST_ASSERT_TRUE(dev.startReadSample().inProgress());
+  TEST_ASSERT_TRUE(dev.poll(bus.nowMs, 255U).inProgress());
+  TEST_ASSERT_FALSE(dev.hasSample());
+  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
+}
+
+void test_all_raw_flags_reads_capture_set_only_readiness() {
+  for (uint8_t method = 0; method < 4U; ++method) {
+    FakeBus bus;
+    OPT4001::OPT4001 dev;
+    TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+    TEST_ASSERT_TRUE(dev.startConversion().inProgress());
+    bus.autoCompleteConversions = false;
+    bus.registers[cmd::REG_FLAGS] = cmd::MASK_CONVERSION_READY_FLAG;
+    uint16_t raw = 0;
+    uint8_t bytes[4]{};
+    Status st;
+    if (method == 0U) {
+      st = dev.readFlagsRaw(raw);
+    } else if (method == 1U) {
+      st = dev.readRegister16(cmd::REG_FLAGS, raw);
+    } else if (method == 2U) {
+      st = dev.readRegisters(cmd::REG_INT_CONFIGURATION, bytes, sizeof(bytes));
+    } else {
+      TEST_ASSERT_TRUE(dev.setBurstMode(false).ok());
+      bus.registers[cmd::REG_FLAGS] = cmd::MASK_CONVERSION_READY_FLAG;
+      st = dev.readRegisters(cmd::REG_FLAGS, bytes, 1U);
+    }
+    TEST_ASSERT_TRUE(st.ok());
+    TEST_ASSERT_TRUE(dev._conversionReady);
+    TEST_ASSERT_FALSE(dev._conversionStarted);
+    TEST_ASSERT_TRUE(dev.readFlagsRaw(raw).ok());
+    TEST_ASSERT_EQUAL_HEX16(0U, raw);
+    TEST_ASSERT_TRUE(dev._conversionReady);
+    seedSample(bus, cmd::REG_RESULT, 0, 0x12345, 1, true);
+    Sample sample;
+    TEST_ASSERT_TRUE(dev.readSample(sample).ok());
+  }
+}
+
+void test_partial_flags_byte_does_not_invent_ready_evidence() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+  bus.registers[cmd::REG_FLAGS] = cmd::MASK_CONVERSION_READY_FLAG;
+  uint8_t byte = 0;
+  TEST_ASSERT_TRUE(dev.readRegisters(cmd::REG_FLAGS, &byte, 1U).ok());
+  TEST_ASSERT_FALSE(dev._conversionReady);
+}
+
+void test_crc_invalid_counter_never_advances_freshness_baseline() {
+  for (uint8_t method = 0; method < 6U; ++method) {
+    for (uint8_t verify = 0; verify < 2U; ++verify) {
+      FakeBus bus;
+      OPT4001::OPT4001 dev;
+      Config cfg = makeConfig(bus);
+      cfg.mode = Mode::CONTINUOUS;
+      cfg.verifyCrc = verify != 0U;
+      cfg.burstMode = method != 4U;
+      TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+      seedSample(bus, cmd::REG_RESULT, 0, 0x12345, 1, true);
+      bus.nowMs += dev.getConversionTimeMs();
+      Sample sample;
+      TEST_ASSERT_TRUE(dev.readSample(sample).ok());
+      seedSample(bus, cmd::REG_RESULT, 0, 0x23456, 2, false);
+      bus.nowMs += dev.getConversionTimeMs();
+      Status st;
+      BurstFrame burst;
+      if (method == 0U) {
+        st = dev.readSample(sample);
+      } else if (method == 1U) {
+        st = dev.readSampleSlot(0U, sample);
+      } else if (method == 2U || method == 4U) {
+        st = dev.readBurst(burst);
+      } else {
+        TEST_ASSERT_TRUE((method == 5U ? dev.startReadBurst() : dev.startReadSample()).inProgress());
+        st = dev.poll(bus.nowMs, 2U);
+      }
+      TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(verify != 0U ? Err::CRC_ERROR : Err::OK),
+                              static_cast<uint8_t>(st.code));
+      TEST_ASSERT_TRUE(dev._lastFreshCounterValid);
+      TEST_ASSERT_EQUAL_UINT8(1U, dev._lastFreshCounter);
+      TEST_ASSERT_TRUE(dev.getLastSample(sample).ok());
+      TEST_ASSERT_FALSE(sample.crcValid);
+      seedSample(bus, cmd::REG_RESULT, 0, 0x23456, 2, true);
+      bus.nowMs += dev.getConversionTimeMs();
+      TEST_ASSERT_TRUE(dev.readSample(sample).ok());
+      TEST_ASSERT_EQUAL_UINT8(2U, dev._lastFreshCounter);
+    }
+  }
+}
+
+void test_fifo_crc_warning_keeps_valid_newest_counter_baseline() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+  seedSample(bus, cmd::REG_RESULT, 0, 0x12345, 3, true);
+  seedSample(bus, cmd::REG_FIFO0_MSB, 0, 0x12344, 2, false);
+  bus.nowMs += dev.getConversionTimeMs();
+  BurstFrame burst;
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::CRC_ERROR),
+      static_cast<uint8_t>(dev.readBurst(burst).code));
+  TEST_ASSERT_TRUE(dev._lastFreshCounterValid);
+  TEST_ASSERT_EQUAL_UINT8(3U, dev._lastFreshCounter);
+}
+
+void test_write_configuration_restarts_retry_for_new_conversion_time() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  cfg.conversionTime = ConversionTime::MS_800;
+  cfg.cooperativeYield = fakeAdvancingYield;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+  bus.autoCompleteConversions = false;
+  bus.nowMs += 800U;
+  bool ready = true;
+  TEST_ASSERT_TRUE(dev.conversionReady(ready).ok());
+  TEST_ASSERT_FALSE(ready);
+  TEST_ASSERT_TRUE(dev._readinessRetryArmed);
+  const uint16_t fastConfig = static_cast<uint16_t>(
+      dev._buildConfigurationRegister(Mode::CONTINUOUS) & ~cmd::MASK_CONVERSION_TIME);
+  TEST_ASSERT_TRUE(dev.writeConfiguration(fastConfig).ok());
+  bus.autoCompleteConversions = true;
+  seedSample(bus, cmd::REG_RESULT, 0, 0x12345, 2, true);
+  Sample sample;
+  TEST_ASSERT_TRUE(dev.readBlocking(sample, 10U).ok());
+}
+
+void test_readiness_retry_after_long_idle_uses_unsigned_elapsed() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+  bus.autoCompleteConversions = false;
+  bus.nowMs += dev.getConversionTimeMs();
+  bool ready = true;
+  TEST_ASSERT_TRUE(dev.conversionReady(ready).ok());
+  TEST_ASSERT_FALSE(ready);
+  bus.nowMs += 0x80000000U;
+  markConversionReady(bus);
+  TEST_ASSERT_TRUE(dev.conversionReady(ready).ok());
+  TEST_ASSERT_TRUE(ready);
+}
+
+void test_same_counter_flag_cannot_override_duplicate_veto() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+  seedSample(bus, cmd::REG_RESULT, 0, 0x12345, 1, true);
+  bus.nowMs += dev.getConversionTimeMs();
+  Sample sample;
+  TEST_ASSERT_TRUE(dev.readSample(sample).ok());
+  seedSample(bus, cmd::REG_RESULT, 0, 0x23456, 2, true);
+  bus.nowMs += dev.getConversionTimeMs();
+  markConversionReady(bus);
+  TEST_ASSERT_TRUE(dev.readSample(sample).ok());
+  // This is still the ready flag from the counter-based read just accepted.
+  Flags flags;
+  TEST_ASSERT_TRUE(dev.readFlags(flags).ok());
+  TEST_ASSERT_TRUE(flags.conversionReady);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::MEASUREMENT_NOT_READY),
+      static_cast<uint8_t>(dev.readSample(sample).code));
+  // Modulo-16 alias remains conservatively rejected for the same reason.
+  bus.nowMs += 16U * dev.getConversionTimeMs();
+  markConversionReady(bus);
+  TEST_ASSERT_TRUE(dev.readFlags(flags).ok());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::MEASUREMENT_NOT_READY),
+      static_cast<uint8_t>(dev.readSample(sample).code));
+  TEST_ASSERT_TRUE(dev.readLatestSample(sample).ok());
+}
+
+void test_raw_burst_writes_and_readback_control_transaction_framing() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+  const uint16_t burstOff = static_cast<uint16_t>(
+      bus.registers[cmd::REG_INT_CONFIGURATION] & ~cmd::MASK_I2C_BURST);
+  TEST_ASSERT_TRUE(dev.writeRegister16(cmd::REG_INT_CONFIGURATION, burstOff).ok());
+  TEST_ASSERT_TRUE(dev.getConfig().burstMode);
+  uint32_t readsBefore = bus.readCalls;
+  Sample sample;
+  TEST_ASSERT_TRUE(dev.readLatestSample(sample).ok());
+  uint8_t bytes[5]{};
+  TEST_ASSERT_TRUE(dev.readRegisters(cmd::REG_RESULT, bytes, sizeof(bytes)).ok());
+  for (uint32_t i = readsBefore; i < bus.readCalls; ++i) {
+    TEST_ASSERT_EQUAL_UINT32(2U, bus.readLengths[i]);
+  }
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_CONFIG),
+      static_cast<uint8_t>(dev.startReadSample().code));
+  TEST_ASSERT_TRUE(dev.recover().ok());
+  TEST_ASSERT_TRUE(dev._hwBurstEnabled);
+  // An out-of-band writer requires an explicit readback or recovery boundary.
+  bus.registers[cmd::REG_INT_CONFIGURATION] = burstOff;
+  uint16_t raw = 0;
+  TEST_ASSERT_TRUE(dev.readIntConfiguration(raw).ok());
+  readsBefore = bus.readCalls;
+  TEST_ASSERT_TRUE(dev.readLatestSample(sample).ok());
+  TEST_ASSERT_EQUAL_UINT32(readsBefore + 2U, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(2U, bus.readLengths[readsBefore]);
+  TEST_ASSERT_EQUAL_UINT32(2U, bus.readLengths[readsBefore + 1U]);
+}
+
+void test_failed_burst_write_invalidates_framing_until_reapply() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+  bus.writeStatus = Status::Error(Err::I2C_TIMEOUT, "uncertain write");
+  TEST_ASSERT_FALSE(dev.writeRegister16(cmd::REG_INT_CONFIGURATION, 0U).ok());
+  TEST_ASSERT_FALSE(dev._hwBurstEnabled);
+  bus.writeStatus = Status::Ok();
+  const uint32_t readsBefore = bus.readCalls;
+  Sample sample;
+  TEST_ASSERT_TRUE(dev.readLatestSample(sample).ok());
+  TEST_ASSERT_EQUAL_UINT32(readsBefore + 2U, bus.readCalls);
+  TEST_ASSERT_TRUE(dev.recover().ok());
+  TEST_ASSERT_TRUE(dev._hwBurstEnabled);
+}
+
+void test_nonburst_history_rejects_fifo_shift_without_consuming_counter() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.burstMode = false;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+  seedSample(bus, cmd::REG_RESULT, 0, 0x12345, 1, true);
+  markConversionReady(bus);
+  bus.shiftOnReadCall = bus.readCalls + 5U;
+  bus.shiftedLsbCrc = static_cast<uint16_t>(2U << cmd::BIT_COUNTER);
+  BurstFrame burst;
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::MEASUREMENT_NOT_READY),
+      static_cast<uint8_t>(dev.readBurst(burst).code));
+  TEST_ASSERT_FALSE(dev._lastFreshCounterValid);
+  TEST_ASSERT_FALSE(dev._lastBurstValid);
+}
+
+void test_callback_validation_is_health_neutral_but_bus_fault_is_tracked() {
+  for (Err code : {Err::INVALID_PARAM, Err::INVALID_CONFIG}) {
+    FakeBus bus;
+    OPT4001::OPT4001 dev;
+    TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+    bus.readStatus = Status::Error(code, "adapter precondition");
+    bus.writeStatus = bus.readStatus;
+    uint16_t raw = 0;
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(code),
+        static_cast<uint8_t>(dev.readDeviceId(raw).code));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(code),
+        static_cast<uint8_t>(dev.clearConversionReadyFlag().code));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(code),
+        static_cast<uint8_t>(dev.softReset().code));
+    TEST_ASSERT_EQUAL_UINT32(0U, dev.totalFailures());
+    TEST_ASSERT_EQUAL_UINT32(0U, dev.totalSuccess());
+    TEST_ASSERT_TRUE(dev.isOnline());
+    bus.readStatus = Status::Error(Err::I2C_BUS, "bus fault");
+    TEST_ASSERT_FALSE(dev.readDeviceId(raw).ok());
+    TEST_ASSERT_EQUAL_UINT32(1U, dev.totalFailures());
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DriverState::DEGRADED),
+        static_cast<uint8_t>(dev.state()));
+  }
+}
+
+void test_crc_error_precedes_corrupt_exponent_with_populated_output() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+  seedSample(bus, cmd::REG_RESULT, 15U, 0x12345, 3, false);
+  Sample sample;
+  sample.adcCodes = 123U;
+  sample.lux = 12.0f;
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::CRC_ERROR),
+      static_cast<uint8_t>(dev.readLatestSample(sample).code));
+  TEST_ASSERT_EQUAL_UINT8(15U, sample.exponent);
+  TEST_ASSERT_EQUAL_UINT32(0U, sample.adcCodes);
+  TEST_ASSERT_TRUE(std::isnan(sample.lux));
+  TEST_ASSERT_TRUE(dev.setVerifyCrc(false).ok());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM),
+      static_cast<uint8_t>(dev.readLatestSample(sample).code));
+}
+
+void test_bind_preserves_dirty_evidence_and_accepts_own_config_reference() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+  TEST_ASSERT_TRUE(dev.begin(dev.getConfig()).ok());
+  TEST_ASSERT_TRUE(dev.writeRegister16(cmd::REG_THRESHOLD_L, 0x0123U).ok());
+  TEST_ASSERT_TRUE(dev.hardwareConfigDirty());
+  const uint32_t callsBefore = bus.readCalls + bus.writeCalls;
+  Config invalid = makeConfig(bus);
+  invalid.i2cTimeoutMs = 0;
+  TEST_ASSERT_FALSE(dev.begin(invalid).ok());
+  TEST_ASSERT_TRUE(dev.hardwareConfigDirty());
+  TEST_ASSERT_EQUAL_UINT32(callsBefore, bus.readCalls + bus.writeCalls);
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+  TEST_ASSERT_FALSE(dev.hardwareConfigDirty());
+}
+
+void test_end_cancels_partial_attach_through_dirty_tracking() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.bind(makeConfig(bus)).ok());
+  TEST_ASSERT_TRUE(dev.startAttach().inProgress());
+  TEST_ASSERT_TRUE(dev.poll(bus.nowMs, 2U).inProgress());
+  const uint32_t callsBefore = bus.readCalls + bus.writeCalls;
+  dev.end();
+  TEST_ASSERT_FALSE(dev.pollBusy());
+  TEST_ASSERT_FALSE(dev.isInitialized());
+  TEST_ASSERT_TRUE(dev.hardwareConfigDirty());
+  TEST_ASSERT_EQUAL_UINT32(callsBefore, bus.readCalls + bus.writeCalls);
+}
+
+void test_transport_addresses_and_all_general_call_reset_paths() {
+  for (uint8_t address = 0x44U; address <= 0x46U; ++address) {
+    for (uint8_t resetPath = 0; resetPath < 3U; ++resetPath) {
+      FakeBus bus;
+      OPT4001::OPT4001 dev;
+      Config cfg = makeConfig(bus);
+      cfg.i2cAddress = address;
+      TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+      Sample sample;
+      TEST_ASSERT_TRUE(dev.readLatestSample(sample).ok());
+      const uint32_t resetWrite = bus.writeCalls;
+      if (resetPath == 0U) {
+        TEST_ASSERT_TRUE(dev.softReset().ok());
+      } else if (resetPath == 1U) {
+        TEST_ASSERT_TRUE(dev.resetAndReapply().ok());
+      } else {
+        TEST_ASSERT_TRUE(dev.startResetAndReapply().inProgress());
+        TEST_ASSERT_TRUE(dev.poll(bus.nowMs, 5U).ok());
+      }
+      TEST_ASSERT_EQUAL_UINT8(0x00U, bus.writeAddresses[resetWrite]);
+      TEST_ASSERT_EQUAL_UINT8(0x06U, bus.writeFirstBytes[resetWrite]);
+      for (uint32_t i = 0; i < bus.readCalls; ++i) {
+        TEST_ASSERT_EQUAL_UINT8(address, bus.readAddresses[i]);
+      }
+      for (uint32_t i = 0; i < bus.writeCalls; ++i) {
+        TEST_ASSERT_EQUAL_UINT8(i == resetWrite ? 0x00U : address, bus.writeAddresses[i]);
+      }
+    }
+  }
+}
+
+void test_zero_flags_write_preserves_hardware_flags() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+  const uint16_t allFlags = cmd::MASK_CONVERSION_READY_FLAG | cmd::MASK_FLAG_H |
+                            cmd::MASK_FLAG_L | cmd::MASK_OVERLOAD_FLAG;
+  bus.registers[cmd::REG_FLAGS] = allFlags;
+  TEST_ASSERT_TRUE(dev.writeRegister16(cmd::REG_FLAGS, 0U).ok());
+  TEST_ASSERT_EQUAL_HEX16(allFlags, bus.registers[cmd::REG_FLAGS]);
+  Flags flags;
+  TEST_ASSERT_TRUE(dev.readFlags(flags).ok());
+  TEST_ASSERT_TRUE(flags.overload);
+  TEST_ASSERT_TRUE(flags.highThreshold);
+  TEST_ASSERT_TRUE(flags.lowThreshold);
+}
+
+void test_write_configuration_one_shot_and_invalid_fields() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+  const uint16_t base = dev._buildConfigurationRegister(Mode::POWER_DOWN);
+  const uint16_t invalid[] = {
+      static_cast<uint16_t>(base | cmd::MASK_CONFIGURATION_RESERVED),
+      static_cast<uint16_t>((base & ~cmd::MASK_RANGE) | (9U << cmd::BIT_RANGE)),
+      static_cast<uint16_t>((base & ~cmd::MASK_CONVERSION_TIME) |
+                            (12U << cmd::BIT_CONVERSION_TIME))};
+  const uint32_t writesBefore = bus.writeCalls;
+  for (uint16_t value : invalid) {
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM),
+        static_cast<uint8_t>(dev.writeConfiguration(value).code));
+  }
+  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
+  TEST_ASSERT_EQUAL_UINT32(0U, dev.totalFailures());
+  for (Mode mode : {Mode::ONE_SHOT, Mode::ONE_SHOT_FORCED_AUTO}) {
+    TEST_ASSERT_TRUE(dev.writeConfiguration(dev._buildConfigurationRegister(mode)).inProgress());
+    TEST_ASSERT_TRUE(dev._conversionStarted);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(mode), static_cast<uint8_t>(dev._pendingMode));
+  }
+}
+
+void test_read_blocking_lux_preserves_crc_warning() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.cooperativeYield = fakeAdvancingYield;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+  seedSample(bus, cmd::REG_RESULT, 1U, 0x12345, 2U, false);
+  float lux = -1.0f;
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::CRC_ERROR),
+      static_cast<uint8_t>(dev.readBlockingLux(lux, 1000U).code));
+  TEST_ASSERT_FLOAT_WITHIN(0.001f, dev.rawToLux(1U, 0x12345), lux);
+  TEST_ASSERT_FALSE(dev._lastFreshCounterValid);
+}
+
+void test_online_and_interrupt_latch_contracts() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  TEST_ASSERT_FALSE(dev.isOnline());
+  bool asserted = true;
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::NOT_INITIALIZED),
+      static_cast<uint8_t>(dev.readIntPinAsserted(asserted).code));
+  TEST_ASSERT_FALSE(asserted);
+  TEST_ASSERT_TRUE(dev.begin(makeConfig(bus)).ok());
+  TEST_ASSERT_TRUE(dev.isOnline());
+  TEST_ASSERT_TRUE(dev.setInterruptLatch(InterruptLatch::LATCHED).ok());
+  TEST_ASSERT_TRUE((bus.registers[cmd::REG_CONFIGURATION] & cmd::MASK_LATCH) != 0U);
+  TEST_ASSERT_TRUE(dev.setInterruptLatch(InterruptLatch::TRANSPARENT).ok());
+  TEST_ASSERT_EQUAL_UINT16(0U, bus.registers[cmd::REG_CONFIGURATION] & cmd::MASK_LATCH);
+  const uint32_t writesBefore = bus.writeCalls;
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Err::INVALID_PARAM),
+      static_cast<uint8_t>(dev.setInterruptLatch(static_cast<InterruptLatch>(2U)).code));
+  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
+  bus.readStatus = Status::Error(Err::I2C_BUS, "bus fault");
+  uint16_t raw = 0;
+  TEST_ASSERT_FALSE(dev.readDeviceId(raw).ok());
+  TEST_ASSERT_TRUE(dev.isOnline());
+  TEST_ASSERT_FALSE(dev.readDeviceId(raw).ok());
+  TEST_ASSERT_FALSE(dev.readDeviceId(raw).ok());
+  TEST_ASSERT_FALSE(dev.isOnline());
+  dev.end();
+  TEST_ASSERT_FALSE(dev.isOnline());
+}
+
+void test_flags_capture_preserves_continuous_conversion_state() {
+  FakeBus bus;
+  OPT4001::OPT4001 dev;
+  Config cfg = makeConfig(bus);
+  cfg.mode = Mode::CONTINUOUS;
+  TEST_ASSERT_TRUE(dev.begin(cfg).ok());
+  markConversionReady(bus);
+  Flags flags;
+  TEST_ASSERT_TRUE(dev.readFlags(flags).ok());
+  TEST_ASSERT_TRUE(dev._conversionStarted);
+  TEST_ASSERT_TRUE(dev._conversionReady);
+}
+
+void test_fake_one_shot_budget_rounds_once_for_all_timings() {
+  for (uint8_t time = 0; time < 12U; ++time) {
+    for (uint8_t quick = 0; quick < 2U; ++quick) {
+      for (Mode mode : {Mode::ONE_SHOT, Mode::ONE_SHOT_FORCED_AUTO}) {
+        OPT4001::OPT4001 dev;
+        dev._config.conversionTime = static_cast<ConversionTime>(time);
+        dev._config.quickWake = quick != 0U;
+        TEST_ASSERT_EQUAL_UINT32(dev.getOneShotBudgetMs(mode),
+            oneShotBudgetMsFromRegister(dev._buildConfigurationRegister(mode), mode));
+      }
+    }
+  }
+}
+
 int main() {
   UNITY_BEGIN();
+  RUN_TEST(test_blocking_wait_uses_elapsed_time_with_many_spins_per_millisecond);
+  RUN_TEST(test_caller_clock_rebases_startup_and_survives_config_reapply);
+  RUN_TEST(test_hook_clock_is_authoritative_for_poll_and_tick);
+  RUN_TEST(test_readiness_gate_and_retry_preserve_threshold_flags);
+  RUN_TEST(test_poll_counter_evidence_preserves_flags_and_does_not_ping_pong);
+  RUN_TEST(test_poll_idle_reads_are_rejected_and_stuck_jobs_timeout);
+  RUN_TEST(test_poll_deadline_uses_first_caller_time_and_wraps);
+  RUN_TEST(test_asserted_int_hint_cannot_publish_reset_sample_in_poll);
+  RUN_TEST(test_all_raw_flags_reads_capture_set_only_readiness);
+  RUN_TEST(test_partial_flags_byte_does_not_invent_ready_evidence);
+  RUN_TEST(test_crc_invalid_counter_never_advances_freshness_baseline);
+  RUN_TEST(test_fifo_crc_warning_keeps_valid_newest_counter_baseline);
+  RUN_TEST(test_write_configuration_restarts_retry_for_new_conversion_time);
+  RUN_TEST(test_readiness_retry_after_long_idle_uses_unsigned_elapsed);
+  RUN_TEST(test_same_counter_flag_cannot_override_duplicate_veto);
+  RUN_TEST(test_raw_burst_writes_and_readback_control_transaction_framing);
+  RUN_TEST(test_failed_burst_write_invalidates_framing_until_reapply);
+  RUN_TEST(test_nonburst_history_rejects_fifo_shift_without_consuming_counter);
+  RUN_TEST(test_callback_validation_is_health_neutral_but_bus_fault_is_tracked);
+  RUN_TEST(test_crc_error_precedes_corrupt_exponent_with_populated_output);
+  RUN_TEST(test_bind_preserves_dirty_evidence_and_accepts_own_config_reference);
+  RUN_TEST(test_end_cancels_partial_attach_through_dirty_tracking);
+  RUN_TEST(test_transport_addresses_and_all_general_call_reset_paths);
+  RUN_TEST(test_zero_flags_write_preserves_hardware_flags);
+  RUN_TEST(test_write_configuration_one_shot_and_invalid_fields);
+  RUN_TEST(test_read_blocking_lux_preserves_crc_warning);
+  RUN_TEST(test_online_and_interrupt_latch_contracts);
+  RUN_TEST(test_flags_capture_preserves_continuous_conversion_state);
+  RUN_TEST(test_fake_one_shot_budget_rounds_once_for_all_timings);
+
   RUN_TEST(test_status_ok);
   RUN_TEST(test_status_error);
   RUN_TEST(test_status_in_progress);
@@ -3790,7 +4523,7 @@ int main() {
   RUN_TEST(test_recover_id_mismatch_updates_health);
   RUN_TEST(test_recover_success_returns_ready);
   RUN_TEST(test_start_conversion_wraparound_reaches_ready);
-  RUN_TEST(test_read_blocking_times_out_with_stalled_clock);
+  RUN_TEST(test_read_blocking_rejects_stalled_clock);
   RUN_TEST(test_blocking_reads_accept_full_uint32_timeout_range);
   RUN_TEST(test_read_sample_decodes_lux_and_crc);
   RUN_TEST(test_raw_lux_vectors_use_64_bit_intermediates);

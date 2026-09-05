@@ -49,7 +49,7 @@ OPT4001::Status mapEspErr(esp_err_t err, const char* context) {
 OPT4001::Status validateContext(const void* user, const Opt4001IdfI2c*& ctx) {
   ctx = static_cast<const Opt4001IdfI2c*>(user);
   if (ctx == nullptr || ctx->dev == nullptr) {
-    return OPT4001::Status::Error(OPT4001::Err::I2C_BUS, "IDF I2C device not configured");
+    return OPT4001::Status::Error(OPT4001::Err::INVALID_CONFIG, "IDF I2C device not configured");
   }
   return OPT4001::Status::Ok();
 }
@@ -113,5 +113,6 @@ uint32_t opt4001IdfNowMs(void*) {
 }
 
 void opt4001IdfYield(void*) {
-  taskYIELD();
+  // Let lower-priority tasks (including IDLE) run while conversions settle.
+  vTaskDelay(1);
 }

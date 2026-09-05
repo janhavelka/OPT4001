@@ -19,7 +19,7 @@
 - **Camera applications** need a fast ALS to get exposure right before the first
   frame; high resolution allows darker, more aesthetic glass.
 - **Automotive safety** is the headline case: tunnel entry and exit create rapid
-  light changes that require fast display-brightness and headlight response.
+  light changes that require fast display-brightness response.
 
 ## Relevance To This Driver
 

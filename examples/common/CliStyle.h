@@ -26,15 +26,15 @@ inline const char* successRateColor(float pct) {
 }
 
 inline void printHelpHeader(const char* title) {
-  LOG_SERIAL.printf("%s=== %s ===%s\n", LOG_COLOR_CYAN, title, LOG_COLOR_RESET);
+  Serial.printf("%s=== %s ===%s\n", LOG_COLOR_CYAN, title, LOG_COLOR_RESET);
 }
 
 inline void printHelpSection(const char* title) {
-  LOG_SERIAL.printf("\n%s[%s]%s\n", LOG_COLOR_GREEN, title, LOG_COLOR_RESET);
+  Serial.printf("\n%s[%s]%s\n", LOG_COLOR_GREEN, title, LOG_COLOR_RESET);
 }
 
 inline void printHelpItem(const char* command, const char* description) {
-  LOG_SERIAL.printf("  %s%-*s%s - %s\n",
+  Serial.printf("  %s%-*s%s - %s\n",
                     LOG_COLOR_CYAN,
                     static_cast<int>(HELP_COMMAND_WIDTH),
                     command,
@@ -43,7 +43,7 @@ inline void printHelpItem(const char* command, const char* description) {
 }
 
 inline void printPrompt() {
-  LOG_SERIAL.print("> ");
+  Serial.print("> ");
 }
 
 }  // namespace cli

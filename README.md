@@ -83,6 +83,8 @@ adapter, status mapping, and example boundary.
 
 ```cpp
 #include <Wire.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include "OPT4001/OPT4001.h"
 
 OPT4001::Status i2cWrite(uint8_t addr, const uint8_t* data, size_t len,
@@ -134,7 +136,7 @@ void setup() {
   // The return type must be spelled uint32_t: millis() returns unsigned long,
   // which is a different type from uint32_t on ESP32.
   cfg.nowMs = [](void*) -> uint32_t { return static_cast<uint32_t>(millis()); };
-  cfg.cooperativeYield = [](void*) { yield(); };
+  cfg.cooperativeYield = [](void*) { vTaskDelay(1); };
   cfg.packageVariant = OPT4001::PackageVariant::SOT_5X3;
   cfg.i2cAddress = 0x45;
   cfg.mode = OPT4001::Mode::POWER_DOWN;
@@ -166,6 +168,7 @@ When one task owns the I2C bus, use the bus-silent bind plus the
 instruction-budgeted poll engine instead of the synchronous helpers:
 
 ```cpp
+cfg.mode = OPT4001::Mode::CONTINUOUS;
 sensor.bind(cfg);                 // validates and caches, touches no I2C
 sensor.startAttach();             // schedules 1 read + 4 writes
 
@@ -200,11 +203,13 @@ missed:
 - **`FLAGS` (`0x0C`) is clear-on-read.** `readFlags()`, `readFlagsRaw()`, raw
   reads of `0x0C`, and raw blocks spanning it all consume the device's latched
   status view, including `FLAG_H` / `FLAG_L`.
-- **Fresh reads need hardware evidence** — conversion-ready flag, configured INT
-  assertion, or a sample-counter advance. `readLatestSample()` is the explicit
+- **Fresh reads need hardware evidence** — conversion-ready flag or a
+  sample-counter advance. A sampled INT level is only a polling hint; its
+  conversion/FIFO pulse is too short to use as a latched event. `readLatestSample()` is the explicit
   "no freshness proof" escape hatch.
 - **`CRC_ERROR` is data-bearing.** Fresh-sample and lux APIs still populate the
-  decoded output and consume freshness on `CRC_ERROR`.
+  decoded output, but a CRC-invalid counter never advances the freshness baseline.
+  A later valid read may therefore deliver that conversion again.
 - **`OFFLINE` is latched.** Normal public I2C APIs then return `OFFLINE` without
   touching the bus. `probe()`, `recover()`, `softReset()`, `resetAndReapply()`,
   `startResetAndReapply()` and `poll()` driving a reset job are the exceptions.
@@ -219,12 +224,25 @@ missed:
 | Term / API | Meaning |
 | --- | --- |
 | Latest sample | Current `RESULT` contents; may repeat a previous sample. `readLatestSample()`. |
-| Fresh sample | A newly observed conversion. Evidence is `CONVERSION_READY_FLAG`, configured INT assertion, or a counter advance. |
+| Fresh sample | A newly observed conversion, established by `CONVERSION_READY_FLAG` or a counter advance, with duplicate-counter rejection. |
 | Cached sample | RAM copy of the last successful decode: `getLastSample()`, `hasSample()`, `sampleTimestampMs()`, `sampleAgeMs()`. |
 | Not ready | Fresh reads return `MEASUREMENT_NOT_READY`; `tryRead*()` return `OK` with `didRead = false`. |
 
 The sample counter is modulo 16, so counter-only freshness cannot detect a
-missed full wrap. Poll faster than 16 conversions when every conversion matters.
+missed full wrap. Once a baseline exists, readiness polls preserve FLAGS and use
+the counter. Even an explicitly read ready flag can be left over from an earlier
+counter-based read, so equal counters are conservatively rejected. Poll faster
+than 16 conversions when every conversion matters.
+
+`Config::nowMs` is the authoritative clock when supplied. Otherwise `tick()` and
+`poll()` update the driver's caller clock. Blocking helpers require a progressing
+clock hook and return `INVALID_CONFIG` if the stalled-clock guard trips. Poll
+read jobs also have a finite deadline; see the [timing contract](docs/integration/driver-contracts.md#clock-and-waits).
+
+Non-burst FIFO reads span multiple transactions. A final counter check rejects
+detected window movement, but cannot prove atomicity or detect a full counter
+wrap during transfer. Applications must serialize external register writers and
+read back or recover after external configuration changes.
 
 Elapsed conversion time is only a poll gate, never proof of completion: in
 auto-range an overflow can abort a measurement, raise the range, and push
@@ -313,7 +331,7 @@ python tools/check_version_header_contract.py
 python tools/check_clean_consumer_package.py
 python scripts/generate_version.py check
 python tools/hil_opt4001_runner.py --parser-self-test
-python tools/test_hil_opt4001_runner_parser.py
+python -m unittest discover -s tools -p 'test_*.py'
 .\scripts\pio.cmd test -e native
 .\scripts\pio.cmd run -e native_core_no_arduino
 .\scripts\pio.cmd run -e esp32s3dev

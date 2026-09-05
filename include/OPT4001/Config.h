@@ -15,6 +15,9 @@ namespace OPT4001 {
 /// `timeoutMs` as their per-transaction bound. They must map platform errors to
 /// `OPT4001::Status`, must externally serialize shared-bus access, and must not
 /// re-enter public methods on the same driver instance.
+/// Return `I2C_*` errors for bus faults. `INVALID_PARAM`/`INVALID_CONFIG` describe
+/// local validation/precondition failures and do not affect device health,
+/// including when returned by an application transport callback.
 using I2cWriteFn = Status (*)(uint8_t addr, const uint8_t* data, size_t len,
                               uint32_t timeoutMs, void* user);
 
@@ -32,12 +35,17 @@ using I2cWriteReadFn = Status (*)(uint8_t addr, const uint8_t* txData, size_t tx
 using GpioReadFn = bool (*)(int pin, void* user);
 
 /// Optional monotonic millisecond timestamp callback.
-/// Framework-neutral builds do not call platform time APIs; if unset, health
-/// timestamps use 0 and blocking helpers cannot advance from wall time.
+/// This is the authoritative clock when configured; tick()/poll() then ignore
+/// their timestamp argument. Otherwise the last tick()/poll() timestamp is used
+/// (0 until first observed), and blocking helpers are unavailable. Keep one
+/// monotonic unsigned millisecond domain, allowing uint32_t wraparound.
 using NowMsFn = uint32_t (*)(void* user);
 
 /// Optional cooperative yield callback. If unset, the driver core does not call
-/// scheduler/yield APIs.
+/// scheduler/yield APIs. The application must allow the clock and scheduler to
+/// progress; blocking reads diagnose a clock unchanged across 1,000,000
+/// consecutive loop iterations as INVALID_CONFIG. This finite fail-safe is not
+/// an elapsed-time measurement; adapt the hook if the platform cannot meet it.
 using YieldFn = void (*)(void* user);
 
 /// Package variant. This controls lux scaling and address validation.

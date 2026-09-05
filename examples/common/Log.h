@@ -17,10 +17,6 @@
 #error "LOG_LEVEL must be 0-4 (0=off, 1=error, 2=info, 3=debug, 4=trace)"
 #endif
 
-#ifndef LOG_SERIAL
-#define LOG_SERIAL Serial
-#endif
-
 inline bool& log_color_enabled_storage() {
   static bool enabled = true;
   return enabled;
@@ -44,21 +40,9 @@ inline void log_set_color_enabled(bool enabled) {
 
 inline const char* log_bool_str(bool value) { return value ? "yes" : "no"; }
 
-/**
- * @brief Initialize serial for logging.
- * @param baud Baud rate (default: 115200).
- */
-inline void log_begin(unsigned long baud = 115200) {
-  LOG_SERIAL.begin(baud);
-  // Give USB CDC time to initialize on ESP32-S3
-  #if defined(CONFIG_IDF_TARGET_ESP32S3) && ARDUINO_USB_CDC_ON_BOOT
-  delay(100);
-  #endif
-}
-
 // Colorize only the severity tag; keep message text in terminal default color.
 #define LOG_PRINT_WITH_TAG(tagColor, tag, fmt, ...) \
-  LOG_SERIAL.printf("%s[" tag "]%s " fmt "\n", tagColor, LOG_COLOR_RESET, ##__VA_ARGS__)
+  Serial.printf("%s[" tag "]%s " fmt "\n", tagColor, LOG_COLOR_RESET, ##__VA_ARGS__)
 
 /// @brief Log error message (level >= 1)
 #define LOGE(fmt, ...) \

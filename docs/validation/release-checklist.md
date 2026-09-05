@@ -24,7 +24,7 @@ python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
 python tools/check_ci_action_pins.py
 python tools/hil_opt4001_runner.py --parser-self-test
-python tools/test_hil_opt4001_runner_parser.py
+python -m unittest discover -s tools -p 'test_*.py'
 python tools/check_idf_example_contract.py
 python tools/check_version_header_contract.py
 python tools/check_clean_consumer_package.py
