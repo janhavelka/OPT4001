@@ -178,8 +178,8 @@ them:
 | F | Do not invent a clockless polling interval: hardware inspection remains available, and timing gates require a caller-provided advancing clock. |
 | H | Do not change nominal full-scale output: all delegating accessors now warn that it is not an exact saturation bound; existing raw conversion supplies that bound. |
 
-Hardware validation and complete embedded compilation remain separate validation
-obligations, as described below.
+Hardware validation remains a separate obligation. Complete embedded compilation
+passed in CI, as recorded below.
 
 ## Validation
 
@@ -260,6 +260,26 @@ and mismatching checksums, duplicate/changed counters, synchronous sample/slot/
 burst/non-burst and poll sample/burst paths, FIFO-slot population, freshness
 recovery, health neutrality, and non-burst guard movement.
 
+### Completed CI validation
+
+Implementation commit [`f4dec25`](https://github.com/janhavelka/OPT4001/commit/f4dec25a6ff95c86d49f9057c97699101b47d0ed)
+passed the complete [CI run 34223507086](https://github.com/janhavelka/OPT4001/actions/runs/34223507086).
+All six jobs succeeded:
+
+| Job | Result |
+| --- | --- |
+| Arduino `esp32s3dev` | Passed. |
+| Arduino `esp32s2dev` | Passed. |
+| Native tests and strict core | Passed. |
+| Library/package/tooling validation | Passed. |
+| Native ESP-IDF `esp32s3` | Passed. |
+| Native ESP-IDF `esp32s2` | Passed. |
+
+This supplies full application/compiler coverage that the local environment
+could not provide. The follow-up commit records this evidence and changes only
+this report; implementation and test sources are identical to the validated
+commit.
+
 ### Validation limits
 
 The host workflow harness compiles verbatim production functions under host
@@ -272,8 +292,8 @@ The local build failures above are current observations; the attachment's older
 The existing VS Code-managed PlatformIO Core 6.1.19 was used through the wrapper.
 No other Core was installed and no toolchain repair was attempted. The inherited
 `PLATFORMIO_CORE_DIR=C:\pio` still lacks usable selected S2/S3 compiler commands.
-Complete Arduino and native ESP-IDF compilation requires the repository's CI
-matrix for the committed source revision.
+Complete Arduino and native ESP-IDF compilation was instead verified by the CI
+matrix for the implementation revision linked above.
 
 Native tests prove source behavior using fake transport. No board was flashed,
 and no optical, INT pulse, address-pin, real FIFO, or hardware recovery validation
