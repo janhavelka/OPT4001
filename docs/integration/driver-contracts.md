@@ -50,14 +50,21 @@ configuration error returned by an API call.
 When `Config::nowMs` is set, it is the authoritative clock for synchronous
 operations, `tick()` and `poll()`; the latter two ignore their timestamp argument
 for timing. Without the hook, the driver uses the last timestamp supplied to
-`tick()`/`poll()`. Their first observation establishes the epoch and rebases
-conversion/cache stamps made before that observation. Later synchronous calls
-use the last observed caller time. Feed that clock regularly when relying on
+`tick()`/`poll()`. Their first observation establishes the epoch and rebases an
+in-flight conversion's start to delay its timing gate conservatively. Cached
+sample and health timestamps are not rebased: a pre-clock zero stamp means the
+event time is unknown, not that the event occurred at the first observation.
+Unsigned age calculations from those stamps are not measured event ages and
+can wrap. Supply time before synchronous work when event ages matter. Later
+synchronous calls use the last observed caller time. Feed that clock regularly when relying on
 timing gates, and pass the same clock domain to `sampleAgeMs()`; the age query
 does not update the driver's clock.
 
 Before any time source is available, synchronous nonblocking readiness helpers
-can still inspect hardware evidence, but cannot enforce a time gate. Blocking
+can still inspect hardware evidence, but cannot enforce conversion or retry
+gates. Repeated `conversionReady()` calls can therefore repeatedly consume
+clear-on-read FLAGS until a trusted sample counter exists. Provide `nowMs`, or
+establish and regularly advance the caller clock, to bound that polling. Blocking
 helpers require `Config::nowMs`. Their caller timeout is measured with unsigned
 elapsed milliseconds. A separate guard reports `INVALID_CONFIG` if the clock
 does not advance within 1,000,000 consecutive loop observations. That guard is
@@ -190,8 +197,16 @@ after diagnostics that intentionally change registers.
   configuration APIs reject invalid enums before applying them.
 - CRC verification can return `CRC_ERROR` while still preserving decoded sample
   fields.
+- An unsupported sample exponent also returns `CRC_ERROR`, even when
+  `verifyCrc` is false or the CRC nibble matches. Raw fields and the actual CRC
+  result remain available; ADC codes are zero and lux is NaN because numeric
+  conversion is invalid. Fresh reads consume the evidence under the same
+  data-bearing error contract. Public numeric helpers still return
+  `INVALID_PARAM` for invalid caller arguments.
 - Burst reads decode all four slots after transfer success and preserve per-slot
   CRC fields while returning aggregate CRC status.
-- CRC-invalid samples remain data-bearing but do not change the last trusted
-  freshness counter, including when CRC error reporting is disabled. A later
-  valid read may deliver the same conversion again.
+- Samples with an invalid exponent or CRC remain data-bearing but do not veto
+  captured readiness or change the last trusted freshness counter, including
+  when CRC error reporting is disabled. A later valid read may deliver the same
+  conversion again. `crcValid` reports the checksum comparison independently of
+  exponent validity.

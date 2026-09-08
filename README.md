@@ -75,6 +75,8 @@ set(EXTRA_COMPONENT_DIRS
 
 ESP-IDF derives the component name from the directory name, so the checkout must
 be named `OPT4001` for `REQUIRES OPT4001` to resolve.
+The component manifest supports ESP32-S2 and ESP32-S3, the targets built in CI;
+other ESP32 targets are not currently validated.
 
 See [docs/integration/esp-idf.md](docs/integration/esp-idf.md) for the transport
 adapter, status mapping, and example boundary.
@@ -208,8 +210,10 @@ missed:
   conversion/FIFO pulse is too short to use as a latched event. `readLatestSample()` is the explicit
   "no freshness proof" escape hatch.
 - **`CRC_ERROR` is data-bearing.** Fresh-sample and lux APIs still populate the
-  decoded output, but a CRC-invalid counter never advances the freshness baseline.
+  decoded output, but an invalid exponent or CRC never advances the freshness baseline.
   A later valid read may therefore deliver that conversion again.
+  An unsupported sample exponent returns this status even with `verifyCrc=false`;
+  raw fields remain available, ADC codes are zero, and lux is NaN.
 - **`OFFLINE` is latched.** Normal public I2C APIs then return `OFFLINE` without
   touching the bus. `probe()`, `recover()`, `softReset()`, `resetAndReapply()`,
   `startResetAndReapply()` and `poll()` driving a reset job are the exceptions.
@@ -238,6 +242,10 @@ than 16 conversions when every conversion matters.
 `poll()` update the driver's caller clock. Blocking helpers require a progressing
 clock hook and return `INVALID_CONFIG` if the stalled-clock guard trips. Poll
 read jobs also have a finite deadline; see the [timing contract](docs/integration/driver-contracts.md#clock-and-waits).
+Before the first clock observation, synchronous readiness checks cannot throttle
+clear-on-read FLAGS polling. Supply time before synchronous work when poll
+cadence or sample/health ages matter; timestamps recorded without a clock remain
+zero and do not represent measured event times.
 
 Non-burst FIFO reads span multiple transactions. A final counter check rejects
 detected window movement, but cannot prove atomicity or detect a full counter
@@ -255,6 +263,9 @@ accept exponent `0..8` and mantissa `0x00000..0xFFFFF`; status-returning helpers
 return `INVALID_PARAM` for anything else, and the compatibility float helpers
 return quiet NaN. ADC codes are computed with 64-bit intermediates as
 `mantissa << exponent` before scaling to lux.
+The three full-scale helpers return rounded nominal datasheet values. Use
+`rawToLux(exponent, 0xFFFFF, lux)` for the decoded maximum at a valid exponent
+when implementing a numeric saturation check.
 
 Threshold registers use a 4-bit exponent and 12-bit result. The exact linear code
 is `result << (8 + exponent)` and can exceed `uint32_t`, so

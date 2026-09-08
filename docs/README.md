@@ -27,8 +27,8 @@ library artifact via `library.json`.
 
 ## Validation
 
-- [Audit verification and remediation](CODE_AUDIT_REVIEW.md) — finding-by-finding
-  dispositions, implementation decisions and validation of the August audit.
+- [Code audit](code_audit.md) — verification and remediation report for all original
+  findings and follow-ups, with decisions, regression evidence, and validation limits.
 - [Hardware validation procedure](validation/hardware-validation-procedure.md) —
   repeatable board / HIL bring-up procedure and command sequences.
 - [Release checklist](validation/release-checklist.md) — local checks, CI,

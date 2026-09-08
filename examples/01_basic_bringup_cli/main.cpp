@@ -695,10 +695,14 @@ void finishWatch(bool cancelled) {
     Serial.printf("  ADC range: %lu .. %lu\n",
                   static_cast<unsigned long>(watchState.minAdc),
                   static_cast<unsigned long>(watchState.maxAdc));
-    Serial.printf("  Counter gaps: %s%lu%s\n",
-                  warnCountColor(watchState.counterGapCount),
-                  static_cast<unsigned long>(watchState.counterGapCount),
-                  LOG_COLOR_RESET);
+    if (device.getMode() == OPT4001::Mode::CONTINUOUS) {
+      Serial.println("  Counter gaps: n/a (continuous mode)");
+    } else {
+      Serial.printf("  Counter gaps: %s%lu%s\n",
+                    warnCountColor(watchState.counterGapCount),
+                    static_cast<unsigned long>(watchState.counterGapCount),
+                    LOG_COLOR_RESET);
+    }
   }
   Serial.println("  Health changes:");
   printHealthDiff(watchState.before, after);
@@ -768,10 +772,14 @@ void handleWatch() {
     if (watchState.intervalMs > 0U && (now - watchState.lastStepMs) < watchState.intervalMs) {
       return;
     }
-    if ((now - watchState.lastPollMs) < WATCH_MIN_POLL_MS) return;
+    // Throttle retries for a pending sample, preserving the requested cadence
+    // when each new sample is already ready on its first attempt.
+    if (watchState.waitingConversion &&
+        (now - watchState.lastPollMs) < WATCH_MIN_POLL_MS) return;
     watchState.lastPollMs = now;
     bool ready = false;
     OPT4001::Status readySt = device.conversionReady(ready);
+    watchState.waitingConversion = readySt.ok() && !ready;
     if (!readySt.ok()) {
       recordWatchStatus(readySt);
       printStatus(readySt);
@@ -818,12 +826,15 @@ void handleWatch() {
       } else {
         watchState.waitingConversion = true;
         watchState.lastStepMs = now;
+        watchState.lastPollMs = now - WATCH_MIN_POLL_MS;
         const OPT4001::Mode mode =
             watchState.forceAuto ? OPT4001::Mode::ONE_SHOT_FORCED_AUTO : OPT4001::Mode::ONE_SHOT;
         watchState.conversionDeadlineMs =
             now + device.getOneShotBudgetMs(mode) + BLOCKING_READ_TIMEOUT_MS;
       }
     } else {
+      if ((now - watchState.lastPollMs) < WATCH_MIN_POLL_MS) return;
+      watchState.lastPollMs = now;
       OPT4001::Sample sample;
       bool didRead = false;
       OPT4001::Status st = device.tryReadSample(sample, didRead);
@@ -1189,16 +1200,22 @@ bool rebeginWithConfig(const OPT4001::Config& cfg) {
   const OPT4001::Config next = cfg;
   const OPT4001::Config previous = device.getConfig();
   const bool wasInitialized = device.isInitialized();
+  const bool wasBound = device.isBound();
   if (watchState.active) finishWatch(true);
   if (stressState.active) finishStress(true);
   device.end();
   const OPT4001::Status st = device.begin(next);
   printStatus(st);
-  if (!st.ok() && wasInitialized) {
+  if (!st.ok()) {
     LOGW("Configuration change failed; restoring previous configuration.");
-    const OPT4001::Status restore = device.begin(previous);
-    printStatus(restore);
-    if (!restore.ok()) LOGE("Previous configuration could not be restored.");
+    if (wasBound) {
+      const OPT4001::Status restore = wasInitialized ? device.begin(previous)
+                                                   : device.bind(previous);
+      printStatus(restore);
+      if (!restore.ok()) LOGE("Previous configuration could not be restored.");
+    } else {
+      device.unbind();
+    }
   }
   printDriverHealth();
   return st.ok();

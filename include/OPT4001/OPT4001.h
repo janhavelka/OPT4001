@@ -228,11 +228,14 @@ public:
   /// rather than returned because `tick()` is void. No I2C is attempted while
   /// `UNINIT` or `OFFLINE`.
   /// Config::nowMs is authoritative when configured. Otherwise tick()/poll()
-  /// feed one caller clock: initial conversion/sample timestamps are rebased
-  /// on its first observation. Supply current time before synchronous work and
-  /// keep this clock progressing; until first observed, synchronous readiness
-  /// relies on hardware without a time gate. Rebase is conservative and cannot
-  /// reconstruct the actual acquisition time of an earlier cached sample.
+  /// feed one caller clock: an in-flight conversion's start timestamp is
+  /// rebased on its first observation, which only ever delays a timing gate.
+  /// Supply current time before synchronous work and keep this clock
+  /// progressing; until first observed, synchronous readiness relies on
+  /// hardware without a time gate. A sample cached before that first
+  /// observation keeps its pre-epoch stamp of 0. Its `sampleAgeMs()` then counts
+  /// from that unknown epoch with unsigned wraparound; this is not a measured
+  /// acquisition age. Rebasing would instead make an old sample look recent.
   void tick(uint32_t nowMs);
   /// Best-effort shutdown. Attempts a raw power-down write only when initialized
   /// and online, ignores that write status, then clears runtime state and moves
@@ -307,7 +310,13 @@ public:
   /// `UINT32_MAX` and `consecutiveFailures()` saturates at `UINT8_MAX`;
   /// timestamps use `Config::nowMs` when available, otherwise the last
   /// tick()/poll() timestamp (0 before the first observation).
+  /// A pre-observation health timestamp remains 0 after the clock is observed;
+  /// it is not rebased because the event's actual time is unknown. Supply and
+  /// advance the clock before tracked I/O when health ages must be meaningful.
   uint32_t lastOkMs() const { return _lastOkMs; }
+  /// Time of the last tracked failure, in the same clock domain as lastOkMs().
+  /// Pre-observation failures retain 0; the first clock observation does not
+  /// invent a recent failure time. Also 0 when no failure has been recorded.
   uint32_t lastErrorMs() const { return _lastErrorMs; }
   Status lastError() const { return _lastError; }
   uint8_t consecutiveFailures() const { return _consecutiveFailures; }
@@ -362,22 +371,30 @@ public:
   /// after the conversion gate, consuming latched threshold flags. Thereafter
   /// counter probes preserve FLAGS. Polled INT is a hint for a counter probe,
   /// never proof of freshness; its brief pulses can be missed.
+  /// Without Config::nowMs and before the first tick()/poll() timestamp,
+  /// conversion/retry timing gates are disabled; repeated checks may repeatedly
+  /// read clear-on-read FLAGS. Supply and advance a clock to throttle probes.
   /// @param[out] ready Set true when a fresh sample can be read
   /// @return Status::Ok() with ready=false when no sample is ready; transport errors are returned
   Status conversionReady(bool& ready);
-  /// Convenience readiness check. Transport/poll errors are collapsed to false.
+  /// Convenience readiness check with the same clock/FLAGS behavior as the
+  /// Status-returning overload. Transport/poll errors are collapsed to false.
   bool conversionReady();
   /// Read the current RESULT registers without proving freshness. This returns
   /// the latest register contents and may return the same sample repeatedly.
   /// Callers that need newly completed conversions should use readSample(),
   /// tryReadFreshSample(), or readFreshBlocking().
+  /// Invalid exponents always return CRC_ERROR, regardless of verifyCrc, with
+  /// raw fields preserved, adcCodes = 0, and lux = NaN. crcValid still reports
+  /// the received checksum comparison independently of exponent validity.
   Status readLatestSample(Sample& out);
   /// Read a fresh sample. Freshness requires hardware evidence: ready flag,
   /// or a changed sample counter after a previous
   /// fresh sample. Returns `MEASUREMENT_NOT_READY` when no fresh evidence exists.
   /// On `OK` or `CRC_ERROR`, readiness is cleared and the cache updates. Only a
-  /// CRC-valid counter updates the freshness baseline, even with CRC reporting
-  /// disabled; the same conversion may be returned again after a CRC warning.
+  /// counter from a CRC-valid sample with a valid exponent updates the freshness
+  /// baseline, even with CRC reporting disabled; the same conversion may be
+  /// returned again after a frame warning.
   /// Equal valid counters are conservatively rejected, even with a ready flag:
   /// a latched flag can describe an already consumed counter-based sample.
   /// Exactly 16 (or a multiple of 16) conversions between reads can alias;
@@ -386,17 +403,20 @@ public:
   Status readSample(Sample& out);
   /// Read newest RESULT plus FIFO0/FIFO1/FIFO2. Slot order is newest/current
   /// output register, then prior FIFO shadows in hardware order. Every slot is
-  /// decoded; if any slot fails CRC, all decoded fields remain populated and the
-  /// aggregate status is `CRC_ERROR`.
+  /// decoded; if any slot has an invalid exponent or fails enabled CRC
+  /// verification, all decoded fields remain populated and the aggregate
+  /// status is `CRC_ERROR`.
   /// Read a fresh four-sample history frame ordered newest to oldest.
   ///
   /// The returned status is aggregate. `OK` means all decoded slots satisfied
-  /// the selected CRC policy. `CRC_ERROR` means at least one decoded slot failed
-  /// CRC verification; inspect each slot's `crcValid`/`crc` fields. After a
+  /// the selected CRC policy and exponent bounds. `CRC_ERROR` means at least one
+  /// decoded slot failed enabled CRC verification or exponent validation;
+  /// inspect each slot's `crcValid`/`crc` and `exponent` fields. After a
   /// successful register transfer, all four slots are decoded and populated.
   /// `crcValid` is always computed, whatever `Config::verifyCrc` is set to; when
   /// verification is disabled, a CRC mismatch simply does not change the
-  /// aggregate status.
+  /// aggregate status. An invalid exponent always returns CRC_ERROR with
+  /// adcCodes = 0 and lux = NaN for that slot.
   /// Framing follows the last successful INT_CONFIGURATION write/readback,
   /// with uncertain writes/reset attempts disabling burst framing until proven
   /// again. External register changes require readback or recover(); the driver
@@ -609,10 +629,16 @@ public:
   float thresholdToLux(const Threshold& threshold) const;
   float getLuxLsb() const;
   /// Return the datasheet's rounded nominal full scale, not an exact decoded
-  /// maximum for saturation comparisons. Invalid ranges return NaN.
+  /// maximum for saturation comparisons. For an exact decoded maximum, use
+  /// rawToLux(exponent, 0xFFFFF), with exponent 8 for AUTO. Invalid ranges
+  /// return NaN.
   float getRangeFullScaleLux(Range range) const;
+  /// Return the configured range's rounded nominal full scale (AUTO uses range
+  /// 8), not an exact decoded maximum. See getRangeFullScaleLux().
   float getCurrentFullScaleLux() const;
-  /// Return the sample exponent's full scale, or NaN for an invalid exponent.
+  /// Return the sample exponent's rounded nominal full scale, not an exact
+  /// decoded maximum for saturation comparisons. See getRangeFullScaleLux().
+  /// Invalid exponents return NaN.
   float getSampleFullScaleLux(const Sample& sample) const;
   /// Invalid conversion times return 0.
   uint8_t getEffectiveBits(ConversionTime time) const;
@@ -700,6 +726,10 @@ private:
   uint32_t _readTimeoutMs() const;
   bool _readinessRetryElapsed(uint32_t nowMs) const;
   void _armReadinessRetry(uint32_t nowMs);
+  /// Latch readiness evidence from any source. In one-shot modes the device
+  /// auto-clears OPERATING_MODE when the conversion completes, so proven
+  /// readiness also releases driver-side one-shot ownership.
+  void _latchReadinessEvidence();
   void _captureReadinessFromFlags(uint16_t raw);
   void _finishApplyConfig(uint32_t nowMs);
   void _markHardwareConfigDirty(const Status& st);
@@ -717,6 +747,8 @@ private:
   Status _refreshReadinessEvidence(bool& ready);
   bool _intFreshEvidenceAsserted() const;
   bool _sampleCounterIsFresh(uint8_t counter) const;
+  bool _sampleCounterIsTrusted(const Sample& sample) const;
+  bool _sampleCounterIsDuplicate(const Sample& sample) const;
   void _markFreshSampleConsumed(const Sample& sample);
   void _clearReadinessEvidence();
   uint16_t _packThreshold(const Threshold& threshold) const;

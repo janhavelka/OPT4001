@@ -814,10 +814,11 @@ void dumpPublicRegisters() {
 
 bool rebeginWithProfile(uint8_t address, OPT4001::PackageVariant package) {
   const bool wasInitialized = device.isInitialized();
+  const bool wasBound = device.isBound();
   const OPT4001::Config previous = device.getConfig();
   const uint8_t previousAddress = selectedAddress;
   const OPT4001::PackageVariant previousPackage = selectedPackage;
-  OPT4001::Config next = wasInitialized ? previous : makeConfig();
+  OPT4001::Config next = wasBound ? previous : makeConfig();
   next.i2cAddress = address;
   next.packageVariant = package;
   const bool hasInt = package == OPT4001::PackageVariant::SOT_5X3 &&
@@ -835,14 +836,18 @@ bool rebeginWithProfile(uint8_t address, OPT4001::PackageVariant package) {
   }
   printInfo("Profile change failed; restoring previous configuration");
   if (!replaceDeviceAddress(previousAddress)) {
-    printInfo("Could not restore previous address handle; driver remains uninitialized");
+    device.unbind();
+    printInfo("Could not restore previous address handle; driver transport released");
     return false;
   }
   selectedPackage = previousPackage;
-  if (wasInitialized) {
-    const OPT4001::Status restore = device.begin(previous);
+  if (wasBound) {
+    const OPT4001::Status restore = wasInitialized ? device.begin(previous)
+                                                 : device.bind(previous);
     printStatus(restore);
     if (!restore.ok()) printInfo("Previous configuration could not be restored");
+  } else {
+    device.unbind();
   }
   return false;
 }

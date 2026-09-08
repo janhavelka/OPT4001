@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Failed Arduino and ESP-IDF profile changes restore the previous initialized,
+  bound-only, or unbound driver state using a saved configuration value. Failed
+  ESP-IDF transport rollback releases the binding instead of retaining an
+  address that disagrees with the transport handle.
+- Arduino watch throttles readiness retries in both continuous and one-shot
+  modes without imposing the retry interval on the requested sample cadence.
+  Its continuous summary identifies counter gaps as not checked.
+- Unsupported sample exponents return data-bearing `CRC_ERROR` with CRC warning
+  reporting enabled or disabled, allowing fresh-read APIs to consume readiness
+  consistently. Their counters cannot veto readiness or advance its trusted
+  baseline, even if the checksum matches. Raw numeric helper argument validation
+  remains `INVALID_PARAM`.
+- Readiness proven by the sample counter now releases one-shot ownership, as the
+  conversion-ready flag path already did. Because counter evidence is the only
+  path used once a baseline exists, a completed one-shot previously stayed "in
+  progress" and `startConversion()` refused to retrigger for a full read timeout,
+  freezing any host loop faster than that on a stale reading. The poll counter
+  path also releases ownership before frame transfer, so cancellation or a later
+  data-read failure cannot strand a completed one-shot.
+- The caller-clock startup rebase no longer moves the cached sample timestamp
+  forward. Rebasing it made an arbitrarily old sample report a near-zero
+  `sampleAgeMs()`; the pre-clock stamp now stays zero instead of inventing a
+  recent acquisition time. Such ages remain unknown and can wrap. Only the
+  conversion gate, where moving forward merely delays readiness, is rebased.
+- The poll read job no longer lets an asserted INT level skip the conversion
+  gate. That gate carries the FIFO_FULL four-conversion burst window, so a
+  sampled level could complete a burst job after a single conversion and publish
+  three stale FIFO slots as a fresh frame. Readiness already cached by `tick()`
+  or explicit FLAGS reads now respects the same FIFO history gate.
+- Test-only: the transaction-address assertions no longer read past the 256-entry
+  recorder; the bound is now the named `FakeBus::ADDRESS_CAPACITY`, shared by the
+  recording and asserting sites.
 - Blocking fresh reads use elapsed-time deadlines and a separate stalled-clock
   diagnostic; rapid clock polling no longer consumes a millisecond-based spin
   allowance before a conversion can finish.
@@ -66,10 +98,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- `docs/CODE_AUDIT_REVIEW.md`, superseded by `docs/code_audit.md`.
 - Broken example `LOG_SERIAL` indirection, unused serial initialization and bus
   recovery helpers, duplicate color helpers, and resident poll-step burst scratch.
 - The closed `AUDIT-FINDINGS.md` work list; its verification and dispositions
-  are recorded in `docs/CODE_AUDIT_REVIEW.md`.
+  are recorded in `docs/code_audit.md`.
 - Dead code: an unreachable `lsb > 0.0f` branch in `luxToThreshold()` that also hid
   the range check; `examples/common/TransportAdapter.h`, an alias namespace nothing
   included; and roughly 110 lines in `scripts/generate_version.py` copied from an
@@ -82,13 +115,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Regression coverage for the staged readiness fixes and the INT hint and CRC
+  counter-veto paths that the earlier suite did not reach. New malformed-frame
+  and example rollback/watch regressions are checked by temporarily removing
+  their production fixes and verifying that the tests fail.
 - `tools/check_ci_action_pins.py`, preserving the one durable guard that lived inside
   the removed `check_readiness_claims.py`: every GitHub Action must be pinned to a
   full commit SHA.
-- `docs/CODE_AUDIT_REVIEW.md`, covering every audit finding, corrected/rejected
+- `docs/code_audit.md`, covering every audit finding, corrected/rejected
   proposals, verification evidence and remaining hardware limits.
 - Native regressions for timing, readiness, CRC, framing and lifecycle behavior,
   plus HIL/parser/command-checker regressions discovered by CI.
+
+### Changed
+
+- Centralized the CRC-aware duplicate-counter rule for synchronous sample,
+  burst, slot and poll reads. Existing checksum-invalid counter behavior is
+  preserved, with the invalid-exponent exclusion described above.
+- Clarified pre-clock health timestamps, ungated synchronous readiness before a
+  clock exists, and rounded nominal values on all three full-scale accessors.
+  Integration documentation now agrees with the sample timestamp policy, and
+  the README identifies the existing ESP-IDF target restriction.
 
 ## 1.2.2 - 2026-08-08
 
@@ -325,4 +372,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   approve that path before running reset/fault validation.
 - Optical compensation remains application-specific and should be characterized
   with the final product enclosure/window and reference meter setup.
-

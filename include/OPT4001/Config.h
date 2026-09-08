@@ -154,7 +154,11 @@ struct Config {
   void* i2cUser = nullptr;
 
   // === Timing Hooks (optional) ===
-  NowMsFn nowMs = nullptr;             ///< Optional monotonic millisecond source.
+  /// Optional monotonic millisecond source. Without this hook, call tick()/poll()
+  /// with current time before synchronous readiness checks, and keep that clock
+  /// progressing. Until its first observation, conversion/retry timing gates
+  /// are disabled: repeated checks may repeatedly read clear-on-read FLAGS.
+  NowMsFn nowMs = nullptr;
   YieldFn cooperativeYield = nullptr;  ///< Optional cooperative scheduler hint.
   void* timeUser = nullptr;
 
@@ -162,6 +166,8 @@ struct Config {
   PackageVariant packageVariant = PackageVariant::SOT_5X3;
   uint8_t i2cAddress = 0x45;  ///< 0x45 fixed for PicoStar, 0x44-0x46 for SOT-5X3.
   uint32_t i2cTimeoutMs = 50;
+  /// Report CRC mismatches. Invalid decoded exponents always return CRC_ERROR,
+  /// even when mismatch reporting is disabled; raw fields remain available.
   bool verifyCrc = true;
 
   // === Measurement Settings ===

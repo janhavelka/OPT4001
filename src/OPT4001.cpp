@@ -834,7 +834,7 @@ Status OPT4001::readSample(Sample& out) {
     return st;
   }
 
-  if (out.crcValid && !_sampleCounterIsFresh(out.counter)) {
+  if (_sampleCounterIsDuplicate(out)) {
     _clearReadinessEvidence();
     return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
   }
@@ -878,7 +878,7 @@ Status OPT4001::readBurst(BurstFrame& out) {
       return status;
     }
 
-    if (out.newest.crcValid && !_sampleCounterIsFresh(out.newest.counter)) {
+    if (_sampleCounterIsDuplicate(out.newest)) {
       _clearReadinessEvidence();
       return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
     }
@@ -911,7 +911,7 @@ Status OPT4001::readBurst(BurstFrame& out) {
     return status;
   }
 
-  if (out.newest.crcValid && !_sampleCounterIsFresh(out.newest.counter)) {
+  if (_sampleCounterIsDuplicate(out.newest)) {
     _clearReadinessEvidence();
     return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
   }
@@ -923,7 +923,7 @@ Status OPT4001::readBurst(BurstFrame& out) {
   }
   const uint8_t counterAfter =
       static_cast<uint8_t>((lsbCrcAfter & cmd::MASK_COUNTER) >> cmd::BIT_COUNTER);
-  if (out.newest.crcValid && counterAfter != out.newest.counter) {
+  if (_sampleCounterIsTrusted(out.newest) && counterAfter != out.newest.counter) {
     _clearReadinessEvidence();
     return Status::Error(Err::MEASUREMENT_NOT_READY, "Burst window shifted during read");
   }
@@ -960,7 +960,7 @@ Status OPT4001::readSampleSlot(uint8_t slot, Sample& out) {
   }
 
   if (slot == 0U) {
-    if (out.crcValid && !_sampleCounterIsFresh(out.counter)) {
+    if (_sampleCounterIsDuplicate(out)) {
       _clearReadinessEvidence();
       return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
     }
@@ -1930,8 +1930,7 @@ Status OPT4001::_refreshReadinessEvidence(bool& ready) {
     const uint8_t counter =
         static_cast<uint8_t>((lsbCrc & cmd::MASK_COUNTER) >> cmd::BIT_COUNTER);
     if (_sampleCounterIsFresh(counter)) {
-      _sampleAvailable = true;
-      _conversionReady = true;
+      _latchReadinessEvidence();
       ready = true;
       return Status::Ok();
     }
@@ -1950,16 +1949,23 @@ Status OPT4001::_refreshReadinessEvidence(bool& ready) {
   return st;
 }
 
+void OPT4001::_latchReadinessEvidence() {
+  _sampleAvailable = true;
+  _conversionReady = true;
+  if (_config.mode != Mode::CONTINUOUS) {
+    // The device auto-clears OPERATING_MODE when a one-shot completes, so the
+    // driver must release its one-shot ownership no matter which evidence
+    // source proved the conversion ready.
+    _conversionStarted = false;
+    _pendingMode = Mode::POWER_DOWN;
+  }
+}
+
 void OPT4001::_captureReadinessFromFlags(uint16_t raw) {
   if ((raw & cmd::MASK_CONVERSION_READY_FLAG) == 0U) {
     return;
   }
-  _sampleAvailable = true;
-  _conversionReady = true;
-  if (_config.mode != Mode::CONTINUOUS) {
-    _conversionStarted = false;
-    _pendingMode = Mode::POWER_DOWN;
-  }
+  _latchReadinessEvidence();
 }
 
 bool OPT4001::_intFreshEvidenceAsserted() const {
@@ -1984,6 +1990,16 @@ bool OPT4001::_sampleCounterIsFresh(uint8_t counter) const {
   return !_lastFreshCounterValid ||
          ((counter & (cmd::SAMPLE_COUNT_MODULO - 1U)) !=
           (_lastFreshCounter & (cmd::SAMPLE_COUNT_MODULO - 1U)));
+}
+
+bool OPT4001::_sampleCounterIsTrusted(const Sample& sample) const {
+  // Malformed frames cannot prove counter equality or advance the baseline,
+  // even when CRC mismatch reporting is disabled.
+  return sample.crcValid && sample.exponent <= RESULT_EXPONENT_MAX;
+}
+
+bool OPT4001::_sampleCounterIsDuplicate(const Sample& sample) const {
+  return _sampleCounterIsTrusted(sample) && !_sampleCounterIsFresh(sample.counter);
 }
 
 void OPT4001::_markFreshSampleConsumed(const Sample& sample) {
@@ -2418,6 +2434,11 @@ Status OPT4001::_decodeSampleRegisters(uint16_t resultReg, uint16_t lsbCrcReg,
   out.lux = numericStatus.ok() ? adcCodesToLux64(adcCodes, getLuxLsb())
                                : invalidLuxValue();
 
+  if (!numericStatus.ok()) {
+    // Invalid hardware data is a frame error, not a caller parameter error.
+    // Preserve every decoded field and let fresh-read paths consume readiness.
+    return Status::Error(Err::CRC_ERROR, "Sample exponent out of range", out.exponent);
+  }
   if (_config.verifyCrc && !out.crcValid) {
     return Status::Error(Err::CRC_ERROR, "Sample CRC mismatch", out.crc);
   }
@@ -2550,20 +2571,26 @@ Status OPT4001::_pollReadJob(uint32_t nowMs, uint8_t& remainingInstructions) {
   while (true) {
     if (_pollStep == PollStep::WAIT_READY) {
       if (_conversionReady || _sampleAvailable) {
+        // Cached readiness can describe only one conversion. FIFO_FULL burst
+        // jobs still need the full history interval before publishing four slots.
+        if (_pollJob == PollJob::READ_BURST && _config.mode == Mode::CONTINUOUS &&
+            _config.intConfig == IntConfig::FIFO_FULL && !_pollReadGateElapsed(nowMs)) {
+          return _pollInProgressStatus("Waiting for FIFO history gate");
+        }
         _pollStep = PollStep::READ_BURST_BLOCK;
         continue;
       }
       if (!_readinessRetryElapsed(nowMs)) {
         return _pollInProgressStatus("Waiting for readiness retry");
       }
-      if (_lastFreshCounterValid && _intFreshEvidenceAsserted()) {
-        _pollStep = PollStep::READ_COUNTER;
-      } else if (!_pollReadGateElapsed(nowMs)) {
+      // No INT shortcut here: _pollReadGateElapsed() carries the FIFO_FULL
+      // four-conversion burst gate, and a sampled level cannot prove the FIFO
+      // filled. Skipping the gate would publish stale FIFO slots.
+      if (!_pollReadGateElapsed(nowMs)) {
         return _pollInProgressStatus("Waiting for conversion gate");
-      } else {
-        _pollStep = _shouldProbeCounterForFreshness(nowMs)
-                        ? PollStep::READ_COUNTER : PollStep::READ_FLAGS;
       }
+      _pollStep = _shouldProbeCounterForFreshness(nowMs)
+                      ? PollStep::READ_COUNTER : PollStep::READ_FLAGS;
       continue;
     }
 
@@ -2583,8 +2610,7 @@ Status OPT4001::_pollReadJob(uint32_t nowMs, uint8_t& remainingInstructions) {
         const uint8_t counter =
             static_cast<uint8_t>((raw & cmd::MASK_COUNTER) >> cmd::BIT_COUNTER);
         if (_sampleCounterIsFresh(counter)) {
-          _sampleAvailable = true;
-          _conversionReady = true;
+          _latchReadinessEvidence();
         }
       }
       if (_conversionReady || _sampleAvailable) {
@@ -2606,7 +2632,7 @@ Status OPT4001::_pollReadJob(uint32_t nowMs, uint8_t& remainingInstructions) {
       if (!st.ok() && st.code != Err::CRC_ERROR) {
         return _finishPollJob(st);
       }
-      if (burst.newest.crcValid && !_sampleCounterIsFresh(burst.newest.counter)) {
+      if (_sampleCounterIsDuplicate(burst.newest)) {
         _clearReadinessEvidence();
         return _finishPollJob(
             Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready"));
@@ -2868,8 +2894,7 @@ void OPT4001::_cacheSample(const Sample& sample) {
 
 void OPT4001::_markFreshSampleConsumedAt(const Sample& sample, uint32_t nowMs) {
   _cacheSampleAt(sample, nowMs);
-  // Even when CRC reporting is disabled, corrupt counter bits are not a baseline.
-  if (sample.crcValid) {
+  if (_sampleCounterIsTrusted(sample)) {
     _lastFreshCounterValid = true;
     _lastFreshCounter = sample.counter;
   }
@@ -2977,11 +3002,13 @@ void OPT4001::_observeHostMs(uint32_t nowMs) {
     _timeBaseValid = true;
     // Synchronous calls may precede the first caller timestamp. Start their
     // timing gates here rather than subtracting an unrelated zero epoch.
+    // Only the conversion gate is rebased: moving it forward delays readiness,
+    // which is the safe direction. The cached sample stamp is deliberately NOT
+    // rebased -- that would move it forward too, making an arbitrarily old
+    // sample report a near-zero sampleAgeMs(). The pre-epoch zero preserves the
+    // unknown stamp; its unsigned age is not a measured acquisition interval.
     if (_conversionStarted) {
       _conversionStartMs = nowMs;
-    }
-    if (_lastSampleValid) {
-      _lastSampleTimestampMs = nowMs;
     }
     _readinessRetryArmed = false;
   }
