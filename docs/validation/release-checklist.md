@@ -5,6 +5,10 @@ of truth; `include/OPT4001/Version.h` is generated from it and committed.
 
 ## Version
 
+No release has been published yet. Prepare **1.0.0** as the first release;
+consolidate all current development notes from `Unreleased` into that entry.
+Earlier development build numbers do not consume published release versions.
+
 - Update `library.json`.
 - Run `python scripts/generate_version.py sync`.
 - Run `python scripts/generate_version.py check`.

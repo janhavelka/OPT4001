@@ -43,6 +43,13 @@ from a 5 V rail.
 - **Integration** — synchronous blocking helpers, poll-friendly `tryRead*()`
   helpers, and instruction-budgeted poll jobs for a sole bus owner.
 
+## Release status
+
+No GitHub release has been published. This checkout is **Unreleased**; the
+first intended release is **1.0.0**. The [changelog](CHANGELOG.md) contains all
+development notes. Existing build metadata will be aligned during release
+preparation and does not prove publication.
+
 ## Installation
 
 ### PlatformIO

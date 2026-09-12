@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+No GitHub release has been published. All changes below are development work
+for the first intended release, **1.0.0**; previous build numbers did not
+represent published releases.
+
 ### Fixed
 
 - Failed Arduino and ESP-IDF profile changes restore the previous initialized,
@@ -96,6 +100,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The packaged library no longer ships the vendor reference PDFs; `pkg pack` output
   drops from roughly 10 MB to 0.13 MB.
 
+- Corrected the public health description to include the deliberately counted
+  `recover()` device-identity mismatch instead of claiming that every health
+  failure originates in a tracked transport wrapper.
+
+- Removed an unreachable private readiness helper whose power-down inference
+  was not part of the driver's hardware-evidence freshness path.
+- Removed the unused legacy example command parser, avoiding a second parser
+  with silent truncation semantics beside the bounded shared line buffer.
+- Updated current validation evidence, CI links, commands, generated metadata,
+  and Doxygen inputs without claiming physical validation.
+- Kept example health-rate formatting correct when two saturated lifetime
+  counters would overflow a 32-bit intermediate.
+
+- Prevented both CLIs from silently dispatching truncated overlong commands.
+- Removed Arduino command-path `String` allocation and aligned Arduino/native
+  IDF parser and diagnostic behavior.
+- Preserved the documented legacy `end()` power-down attempt while providing a
+  separate bus-silent release API instead of redefining shutdown semantics.
+
+- Rejected overflowing `size_t` register windows before transport instead of
+  truncating the register span and forwarding an oversized read.
+- Made blocking deadlines correct across the full `uint32_t` timeout range and
+  retained truthful in-flight one-shot state after a host timeout.
+- Made sample full-scale/resolution helpers return NaN for invalid hardware
+  result exponents instead of silently treating them as auto-range.
+- Prevented cache-only package/CRC setters from changing or losing policy while
+  a staged poll job owns the driver state.
+- Fixed Arduino one-shot watch and IDF burst/scaled-read helpers that treated
+  the documented `IN_PROGRESS` start result as failure.
+- Fixed Arduino burst, slot-0, milli-lux, and micro-lux commands that consumed
+  the fresh token in a priming read before the requested operation.
+
+- Read RESULT and RESULT_LSB_CRC in one transaction when burst mode is enabled,
+  preventing mixed fields when a conversion completes between two reads.
+- Kept generic FLAGS reads/writes synchronized with cached freshness evidence,
+  without incorrectly marking cached hardware configuration dirty.
+- Rejected impossible PicoStar INT GPIO hooks and interrupt-output presets
+  before bus I/O.
+- Made invalid range, conversion-time, and one-shot budget helpers honor their
+  documented `NaN`/zero contracts instead of returning plausible values.
+- Corrected native ESP-IDF conversion-time parsing so `ctime 0..11` maps to the
+  enum values shown by the CLI rather than ambiguous rounded millisecond values.
+
+- Guarded raw-register APIs before successful `begin()`, after `end()`, and
+  while the driver is latched `OFFLINE`.
+- Preserved probe and startup transport error detail while keeping `probe()`
+  free of health side effects.
+- Validated full `DEVICE_ID` fixed-pattern fields instead of accepting only a
+  partial DIDH match.
+- Tied fresh-sample reads to flag, INT, or counter evidence and prevented stale
+  samples from being reported as fresh.
+- Propagated readiness-poll transport errors through `tryRead*()` and blocking
+  helper paths instead of flattening them into not-ready or timeout results.
+- Added finite polling caps for blocking read helpers using injected time.
+- Hardened raw lux, threshold, range, conversion-time, and CRC paths with
+  independent vectors, invalid-input handling, and wider intermediates.
+- Decoded all four burst/FIFO slots after transfer success and preserved
+  per-slot CRC fields while returning aggregate CRC status.
+- Marked hardware/cache dirty state after partial multi-register write failures
+  and cleared it only after successful reapply or recovery.
+
 ### Removed
 
 - `docs/CODE_AUDIT_REVIEW.md`, superseded by `docs/code_audit.md`.
@@ -127,63 +192,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Native regressions for timing, readiness, CRC, framing and lifecycle behavior,
   plus HIL/parser/command-checker regressions discovered by CI.
 
-### Changed
-
-- Centralized the CRC-aware duplicate-counter rule for synchronous sample,
-  burst, slot and poll reads. Existing checksum-invalid counter behavior is
-  preserved, with the invalid-exponent exclusion described above.
-- Clarified pre-clock health timestamps, ungated synchronous readiness before a
-  clock exists, and rounded nominal values on all three full-scale accessors.
-  Integration documentation now agrees with the sample timestamp policy, and
-  the README identifies the existing ESP-IDF target restriction.
-
-## 1.2.2 - 2026-08-08
-
-### Changed
-
-- Aligned invalid `Err` and `DriverState` display-name fallbacks with the
-  cross-library `"UNKNOWN"` convention used by mature workspace I2C drivers.
-  Valid enum values, numeric ordering, names, and all driver behavior remain
-  unchanged.
-- Re-audited public status, lifecycle, health, dirty-state, and private
-  raw/tracked/address/config/poll naming against mature peers. Existing names
-  remain the compatible shared vocabulary; no cosmetic API or internal rename
-  was added.
-
-### Fixed
-
-- Corrected the public health description to include the deliberately counted
-  `recover()` device-identity mismatch instead of claiming that every health
-  failure originates in a tracked transport wrapper.
-
-## 1.2.1 - 2026-08-08
-
-### Changed
-
-- Aligned private transport-address helpers and example health/status output
-  with the stable library-owned naming used by mature workspace I2C drivers.
-- Reduced example-only health and CLI helpers to the paths exercised by the
-  diagnostic applications, while retaining typed dirty-state visibility.
-- Replaced completed implementation prompts and an empty NOT-RUN HIL report
-  with durable feature, naming, integration, and validation documentation.
-- Updated the fully pinned CI artifact uploader to its Node 24-based release,
-  removing the deprecated Node 20 runtime annotation.
-
-### Fixed
-
-- Removed an unreachable private readiness helper whose power-down inference
-  was not part of the driver's hardware-evidence freshness path.
-- Removed the unused legacy example command parser, avoiding a second parser
-  with silent truncation semantics beside the bounded shared line buffer.
-- Updated current validation evidence, CI links, commands, generated metadata,
-  and Doxygen inputs without claiming physical validation.
-- Kept example health-rate formatting correct when two saturated lifetime
-  counters would overflow a 32-bit intermediate.
-
-## 1.2.0 - 2026-08-08
-
-### Added
-
 - Bus-silent `bind()` / `unbind()` lifecycle and a five-instruction
   `startAttach()` path for sole-owner I2C task integration.
 - Explicit error-reporting `powerDown()` and bus-silent `cancelPollJob()` with
@@ -195,59 +203,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SBOS993A device/core/CLI/test feature matrix in
   `docs/reports/feature-matrix-20260808.md`.
 
-### Changed
-
-- Diagnostic `stress` and `stress_mix` are finite cooperative owner-loop
-  sessions. Measurement phases use `poll(..., 1)` so a service iteration
-  performs at most one transport callback.
-- The version generator now synchronizes `idf_component.yml`, Doxygen project
-  metadata, and the supported security branch from `library.json`.
-- CLI contracts verify help and handler visibility, fixed-buffer overflow
-  recovery, qualified discovery, owner jobs, health/color parity, and absence
-  of superseded blocking stress handlers.
-
-### Fixed
-
-- Prevented both CLIs from silently dispatching truncated overlong commands.
-- Removed Arduino command-path `String` allocation and aligned Arduino/native
-  IDF parser and diagnostic behavior.
-- Preserved the documented legacy `end()` power-down attempt while providing a
-  separate bus-silent release API instead of redefining shutdown semantics.
-
-## 1.1.1 - 2026-08-08
-
-### Changed
-
-- Non-burst raw register-window reads now issue one bounded transaction per
-  16-bit register, preserving contiguous byte semantics without hardware
-  pointer auto-increment.
-- Arduino and native ESP-IDF CLIs now share the documented conversion-start
-  acceptance/readiness flow, latest-register `raw` semantics, register-byte
-  formatting, and stronger executable command-contract checks.
-- Native ESP-IDF `stress_mix` and `selftest` now exercise bounded mixed
-  operations instead of aliases/minimal placeholders.
-- Lux-to-threshold conversion rounds to the nearest representable register
-  quantum.
-
-### Fixed
-
-- Rejected overflowing `size_t` register windows before transport instead of
-  truncating the register span and forwarding an oversized read.
-- Made blocking deadlines correct across the full `uint32_t` timeout range and
-  retained truthful in-flight one-shot state after a host timeout.
-- Made sample full-scale/resolution helpers return NaN for invalid hardware
-  result exponents instead of silently treating them as auto-range.
-- Prevented cache-only package/CRC setters from changing or losing policy while
-  a staged poll job owns the driver state.
-- Fixed Arduino one-shot watch and IDF burst/scaled-read helpers that treated
-  the documented `IN_PROGRESS` start result as failure.
-- Fixed Arduino burst, slot-0, milli-lux, and micro-lux commands that consumed
-  the fresh token in a priming read before the requested operation.
-
-## 1.1.0 - 2026-08-07
-
-### Added
-
 - Poll-chunked job API: `poll(nowMs, maxInstructions)`, `pollBusy()`,
   `lastPollStatus()`, `startReadSample()`, `startReadBurst()`,
   `getLastBurst()`, `startConfigureMeasurement()`, and
@@ -258,40 +213,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   helpers, including defined fallback names for invalid enum casts.
 - Native tests for coherent sample transfers, FLAGS raw-access side effects,
   PicoStar INT restrictions, and invalid numeric-helper inputs.
-
-### Changed
-
-- `readBurst()` now shares the tracked RESULT/FIFO burst block decoder used by
-  poll-chunked sample jobs and caches the most recently completed burst frame.
-- `tryReadSample()` is documented as a synchronous diagnostic/convenience path,
-  not an instruction-budgeted poll job.
-- Arduino and native ESP-IDF diagnostics now share library-owned status/state
-  names. The native IDF CLI adds bounded address/package selection, blocking and
-  poll-friendly reads, FIFO slots, watch/stop, decoded configuration, threshold
-  conversion, interrupt presets, timing/scaling, raw registers, and colorized
-  sectioned help.
-- PlatformIO pins the Arduino platform to pioarduino `55.03.311` and native
-  tests to `platformio/native@1.2.1` for reproducible workspace builds.
-- CI uses the stable Ubuntu 24.04 runner, PlatformIO Core `6.1.19`, and
-  full-commit action pins; guard/package/HIL parser gates are enforced in the
-  workflow.
-
-### Fixed
-
-- Read RESULT and RESULT_LSB_CRC in one transaction when burst mode is enabled,
-  preventing mixed fields when a conversion completes between two reads.
-- Kept generic FLAGS reads/writes synchronized with cached freshness evidence,
-  without incorrectly marking cached hardware configuration dirty.
-- Rejected impossible PicoStar INT GPIO hooks and interrupt-output presets
-  before bus I/O.
-- Made invalid range, conversion-time, and one-shot budget helpers honor their
-  documented `NaN`/zero contracts instead of returning plausible values.
-- Corrected native ESP-IDF conversion-time parsing so `ctime 0..11` maps to the
-  enum values shown by the CLI rather than ambiguous rounded millisecond values.
-
-## 1.0.0 - 2026-06-03
-
-### Added
 
 - Production-oriented OPT4001 driver with injected I2C transport, tracked health
   state, and framework-neutral public headers/source.
@@ -319,6 +240,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Centralized the CRC-aware duplicate-counter rule for synchronous sample,
+  burst, slot and poll reads. Existing checksum-invalid counter behavior is
+  preserved, with the invalid-exponent exclusion described above.
+- Clarified pre-clock health timestamps, ungated synchronous readiness before a
+  clock exists, and rounded nominal values on all three full-scale accessors.
+  Integration documentation now agrees with the sample timestamp policy, and
+  the README identifies the existing ESP-IDF target restriction.
+
+- Aligned invalid `Err` and `DriverState` display-name fallbacks with the
+  cross-library `"UNKNOWN"` convention used by mature workspace I2C drivers.
+  Valid enum values, numeric ordering, names, and all driver behavior remain
+  unchanged.
+- Re-audited public status, lifecycle, health, dirty-state, and private
+  raw/tracked/address/config/poll naming against mature peers. Existing names
+  remain the compatible shared vocabulary; no cosmetic API or internal rename
+  was added.
+
+- Aligned private transport-address helpers and example health/status output
+  with the stable library-owned naming used by mature workspace I2C drivers.
+- Reduced example-only health and CLI helpers to the paths exercised by the
+  diagnostic applications, while retaining typed dirty-state visibility.
+- Replaced completed implementation prompts and an empty NOT-RUN HIL report
+  with durable feature, naming, integration, and validation documentation.
+- Updated the fully pinned CI artifact uploader to its Node 24-based release,
+  removing the deprecated Node 20 runtime annotation.
+
+- Diagnostic `stress` and `stress_mix` are finite cooperative owner-loop
+  sessions. Measurement phases use `poll(..., 1)` so a service iteration
+  performs at most one transport callback.
+- The version generator now synchronizes `idf_component.yml`, Doxygen project
+  metadata, and the supported security branch from `library.json`.
+- CLI contracts verify help and handler visibility, fixed-buffer overflow
+  recovery, qualified discovery, owner jobs, health/color parity, and absence
+  of superseded blocking stress handlers.
+
+- Non-burst raw register-window reads now issue one bounded transaction per
+  16-bit register, preserving contiguous byte semantics without hardware
+  pointer auto-increment.
+- Arduino and native ESP-IDF CLIs now share the documented conversion-start
+  acceptance/readiness flow, latest-register `raw` semantics, register-byte
+  formatting, and stronger executable command-contract checks.
+- Native ESP-IDF `stress_mix` and `selftest` now exercise bounded mixed
+  operations instead of aliases/minimal placeholders.
+- Lux-to-threshold conversion rounds to the nearest representable register
+  quantum.
+
+- `readBurst()` now shares the tracked RESULT/FIFO burst block decoder used by
+  poll-chunked sample jobs and caches the most recently completed burst frame.
+- `tryReadSample()` is documented as a synchronous diagnostic/convenience path,
+  not an instruction-budgeted poll job.
+- Arduino and native ESP-IDF diagnostics now share library-owned status/state
+  names. The native IDF CLI adds bounded address/package selection, blocking and
+  poll-friendly reads, FIFO slots, watch/stop, decoded configuration, threshold
+  conversion, interrupt presets, timing/scaling, raw registers, and colorized
+  sectioned help.
+- PlatformIO pins the Arduino platform to pioarduino `55.03.311` and native
+  tests to `platformio/native@1.2.1` for reproducible workspace builds.
+- CI uses the stable Ubuntu 24.04 runner, PlatformIO Core `6.1.19`, and
+  full-commit action pins; guard/package/HIL parser gates are enforced in the
+  workflow.
+
 - Removed Arduino `millis()` and `yield()` fallbacks from the driver core;
   applications provide `Config::nowMs` and optional `Config::cooperativeYield`
   when blocking helpers need wall-clock time or cooperative scheduling.
@@ -339,26 +321,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Narrowed Doxygen inputs to maintained API and reference documents so
   generated docs do not promote historical audit reports as primary API pages.
 
-### Fixed
-
-- Guarded raw-register APIs before successful `begin()`, after `end()`, and
-  while the driver is latched `OFFLINE`.
-- Preserved probe and startup transport error detail while keeping `probe()`
-  free of health side effects.
-- Validated full `DEVICE_ID` fixed-pattern fields instead of accepting only a
-  partial DIDH match.
-- Tied fresh-sample reads to flag, INT, or counter evidence and prevented stale
-  samples from being reported as fresh.
-- Propagated readiness-poll transport errors through `tryRead*()` and blocking
-  helper paths instead of flattening them into not-ready or timeout results.
-- Added finite polling caps for blocking read helpers using injected time.
-- Hardened raw lux, threshold, range, conversion-time, and CRC paths with
-  independent vectors, invalid-input handling, and wider intermediates.
-- Decoded all four burst/FIFO slots after transfer success and preserved
-  per-slot CRC fields while returning aggregate CRC status.
-- Marked hardware/cache dirty state after partial multi-register write failures
-  and cleared it only after successful reapply or recovery.
-
 ### Known Limitations
 
 - No completed real-device smoke, optical reference, address-pin matrix, INT
@@ -367,7 +329,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   serial, wiring, optical, INT capture, and operator approval metadata were not
   provided.
 - Pure ESP-IDF builds are configured in CI, but no completed local or CI
-  ESP-IDF build log was captured for `1.0.0`.
+  ESP-IDF build log was captured for the initial development baseline.
 - General-call reset is bus-wide; applications and HIL fixtures must explicitly
   approve that path before running reset/fault validation.
 - Optical compensation remains application-specific and should be characterized
