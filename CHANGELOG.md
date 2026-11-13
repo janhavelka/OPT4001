@@ -240,6 +240,8 @@ represent published releases.
 
 ### Changed
 
+- Unified author, copyright and contact metadata: THYMOS Solution s.r.o.,
+  Jan Havelka, info@thymos.cz.
 - Centralized the CRC-aware duplicate-counter rule for synchronous sample,
   burst, slot and poll reads. Existing checksum-invalid counter behavior is
   preserved, with the invalid-exponent exclusion described above.
