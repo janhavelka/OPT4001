@@ -30,7 +30,7 @@
     "url": "https://github.com/janhavelka/OPT4001.git"
   },
   "license": "MIT",
-  "homepage": "https://www.thymos.cz",
+  "homepage": "https://github.com/janhavelka/OPT4001",
   "frameworks": [
     "arduino",
     "espidf"
