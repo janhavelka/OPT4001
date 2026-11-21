@@ -281,3 +281,9 @@ Release steps:
 - The current Arduino and ESP-IDF CLIs are diagnostic/bring-up examples unless they clearly demonstrate production bus management.
 - Do not claim hardware, optical, interrupt, address-pin, or FIFO validation without captured evidence; native tests use a fake transport and prove source behaviour only.
 - Preserve dirty user changes. Never revert unrelated work unless the user explicitly asks.
+
+## Commit and pull request attribution
+
+Credit human contributors for their work. Omit AI co-author trailers, AI-generated
+signatures or sign-offs, generated-by footers, session links, and other AI
+attribution from commit messages and pull request titles and descriptions.
